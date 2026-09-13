@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Portfolio</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<main>
+<header><div class="title-row"><h1>Portfolio</h1><a class="button secondary" href="/api/export" download>Export holdings</a></div></header>
+<div id="notice" role="alert" hidden></div>
+<section class="connect panel">
+<div class="section-heading"><h2>Yahoo Finance</h2><span id="browser-badge" class="badge">Not paired</span></div>
+<p id="connection-intro">Sign in to Yahoo in Chrome, then find your portfolios.</p>
+<details id="chrome-setup" class="signin-help" open><summary>Connection settings</summary>
+<ol><li>In Chrome, open <strong>chrome://extensions</strong>, turn on <strong>Developer mode</strong>, and click <strong>Load unpacked</strong>.</li><li>Select this extension folder:<input id="extension-path" readonly aria-label="Chrome extension folder"></li><li>Open <strong>Local Portfolio</strong> from Chrome’s Extensions menu. Keep the local app address, paste this pairing key, and click <strong>Save connection</strong>.<div class="pairing-row"><input id="pairing-key" type="password" readonly aria-label="Local pairing key"><button id="copy-pairing" class="secondary" type="button">Copy key</button></div></li></ol>
+<p id="extension-version" class="muted"></p>
+</details>
+<div class="actions"><button id="connect">Open Yahoo</button><button id="discover" class="secondary">Find portfolios</button><button id="disconnect" class="quiet">Disconnect</button></div>
+<div id="browser-error" class="connection-error" role="alert" hidden></div>
+<p id="browser-message" class="muted" aria-live="polite"></p>
+</section>
+<section class="collection"><div class="section-heading"><h2>Portfolios <span id="source-count" class="count">0</span></h2><button id="refresh">Pull latest holdings</button></div><p class="muted">Select portfolios to pull.</p><div id="sources"></div><div id="refresh-results" aria-live="polite"></div></section>
+<section id="snapshot-panel" class="panel" hidden><div class="section-heading"><div><h2 id="snapshot-title"></h2></div><button id="close-snapshot" class="quiet">Close</button></div><div class="snapshot-controls"><label>Pull history<select id="snapshot-select"></select></label><a id="raw-download" class="button secondary" download>Export CSV</a></div><p id="snapshot-meta" class="muted"></p><div id="snapshot-total"></div><details class="capture-details"><summary>Capture details</summary><div id="warnings"></div><p class="muted">Values are as displayed by Yahoo. Missing quantities remain empty; capture time is not a quote timestamp.</p></details><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Quantity</th><th>Price</th><th>Average cost / share</th><th>Total cost</th><th>Market value</th><th>Purchase price / share</th><th>Trade date</th><th>Currency</th></tr></thead><tbody id="records"></tbody></table></div></section>
+<footer>Stored locally on this computer.</footer>
+</main>
+</body></html>

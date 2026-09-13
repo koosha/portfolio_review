@@ -1,0 +1,20 @@
+[project]
+name = "portfolio-review"
+version = "0.1.0"
+description = "Local Yahoo Finance holdings collection with Chrome and SQLite"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["ruff>=0.11"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

@@ -1,0 +1,5 @@
+Symbol,Current Price,Date,Time,Change,Open,High,Low,Volume,Trade Date,Purchase Price,Quantity,Commission,High Limit,Low Limit,Comment
+AAPL,220.15,2026/09/11,16:00 EDT,1.2,219,222,218,45000000,2024/03/12,175.50,10,0,,,Synthetic example - not real investments
+AAPL,220.15,2026/09/11,16:00 EDT,1.2,219,222,218,45000000,2025/05/08,190.25,2.5,0,,,Separate example lot
+VTI,280.10,2026/09/11,16:00 EDT,0.8,279,281,278,2000000,2024/06/01,240.75,8,0,,,Synthetic example
+MSFT,430.00,2026/09/11,16:00 EDT,1.0,428,432,426,20000000,,,,,,,Example watchlist entry - quantity intentionally missing
