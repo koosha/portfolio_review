@@ -1,4 +1,8 @@
 # Local investment data and exports
+portfolio_lab_project/
+/reference/
+reports/
+cache/
 data/
 private/
 backups/
@@ -73,6 +77,7 @@ __pycache__/
 .coverage*
 htmlcov/
 node_modules/
+.pnpm-store/
 dist/
 build/
 *.egg-info/

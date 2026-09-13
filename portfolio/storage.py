@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import re
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -222,6 +223,20 @@ class Store:
                   purchase_price TEXT, trade_date TEXT, currency TEXT,
                   PRIMARY KEY(snapshot_id,row_number));
                 CREATE INDEX IF NOT EXISTS positions_source ON positions(source_id,snapshot_id);
+                CREATE TABLE IF NOT EXISTS import_batches (
+                  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, completed_at TEXT,
+                  status TEXT NOT NULL CHECK(status IN ('collecting','published','failed','abandoned')),
+                  requested_sources_json TEXT NOT NULL, selected_scope_json TEXT NOT NULL,
+                  completeness TEXT);
+                CREATE TABLE IF NOT EXISTS import_batch_members (
+                  batch_id TEXT NOT NULL REFERENCES import_batches(id),
+                  source_id INTEGER NOT NULL REFERENCES sources(id),
+                  snapshot_id INTEGER REFERENCES snapshots(id), received_at TEXT,
+                  status TEXT NOT NULL CHECK(status IN ('pending','success','failed')),
+                  completeness TEXT, error TEXT,
+                  PRIMARY KEY(batch_id,source_id));
+                CREATE INDEX IF NOT EXISTS import_batches_completed
+                  ON import_batches(status,completed_at DESC);
             """)
             columns = {r["name"] for r in db.execute("PRAGMA table_info(sources)")}
             for name, definition in [
@@ -378,7 +393,62 @@ class Store:
             )
         return sources
 
-    def ingest(self, source_id, data, filename="quotes.csv", capture=None):
+    def begin_batch(self, source_ids):
+        """Freeze an importer request; publication waits for all of its members."""
+        ids = list(dict.fromkeys(source_ids))
+        if not ids or any(type(value) is not int for value in ids):
+            raise ValueError("A batch requires portfolio IDs.")
+        batch_id = secrets.token_hex(16)
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            selected = [
+                r[0] for r in db.execute("SELECT id FROM sources WHERE selected=1 ORDER BY id")
+            ]
+            if not set(ids).issubset(selected):
+                raise ValueError("Select at least one portfolio with a Yahoo URL.")
+            db.execute(
+                "INSERT INTO import_batches(id,created_at,status,requested_sources_json,selected_scope_json) VALUES(?,?,'collecting',?,?)",
+                (batch_id, now(), json.dumps(ids), json.dumps(selected)),
+            )
+            db.executemany(
+                "INSERT INTO import_batch_members(batch_id,source_id,status) VALUES(?,?,'pending')",
+                [(batch_id, source_id) for source_id in ids],
+            )
+        return batch_id
+
+    @staticmethod
+    def _finish_batch(db, batch_id):
+        members = db.execute(
+            "SELECT status,completeness FROM import_batch_members WHERE batch_id=?", (batch_id,)
+        ).fetchall()
+        if not members or any(member["status"] == "pending" for member in members):
+            return
+        success = all(member["status"] == "success" for member in members)
+        verified = success and all(member["completeness"] == "count-verified" for member in members)
+        db.execute(
+            "UPDATE import_batches SET status=?,completed_at=?,completeness=? WHERE id=? AND status='collecting'",
+            (
+                "published" if success else "failed",
+                now(),
+                "count-verified" if verified else "unverified",
+                batch_id,
+            ),
+        )
+
+    def abandon_batches(self):
+        """An importer restart cannot resume its old in-memory Chrome jobs."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "UPDATE import_batch_members SET status='failed',error=? WHERE status='pending' AND batch_id IN (SELECT id FROM import_batches WHERE status='collecting')",
+                ("The collector restarted before this batch finished.",),
+            )
+            db.execute(
+                "UPDATE import_batches SET status='abandoned',completed_at=? WHERE status='collecting'",
+                (now(),),
+            )
+
+    def ingest(self, source_id, data, filename="quotes.csv", capture=None, batch_id=None):
         rows, warnings = parse_csv(data)
         if capture:
             warnings.append(
@@ -393,6 +463,17 @@ class Store:
             db.execute("BEGIN IMMEDIATE")
             if not db.execute("SELECT id FROM sources WHERE id=?", (source_id,)).fetchone():
                 raise ValueError("Portfolio not found.")
+            if batch_id is not None:
+                member = db.execute(
+                    "SELECT m.status,b.status AS batch_status FROM import_batch_members m JOIN import_batches b ON b.id=m.batch_id WHERE m.batch_id=? AND m.source_id=?",
+                    (batch_id, source_id),
+                ).fetchone()
+                if (
+                    not member
+                    or member["status"] != "pending"
+                    or member["batch_status"] != "collecting"
+                ):
+                    raise ValueError("This collection batch is no longer accepting this portfolio.")
             latest = db.execute(
                 "SELECT id, sha256, capture_json FROM snapshots WHERE source_id=? ORDER BY id DESC LIMIT 1",
                 (source_id,),
@@ -425,6 +506,18 @@ class Store:
                 "UPDATE sources SET last_checked=?, last_error=NULL WHERE id=?",
                 (timestamp, source_id),
             )
+            if batch_id is not None:
+                db.execute(
+                    "UPDATE import_batch_members SET status='success',snapshot_id=?,received_at=?,completeness=? WHERE batch_id=? AND source_id=?",
+                    (
+                        snapshot_id,
+                        timestamp,
+                        (capture or {}).get("completeness", "unverified"),
+                        batch_id,
+                        source_id,
+                    ),
+                )
+                self._finish_batch(db, batch_id)
         return dict(
             snapshot_id=snapshot_id,
             unchanged=unchanged,
@@ -433,7 +526,7 @@ class Store:
             warnings=warnings,
         )
 
-    def ingest_table(self, source_id, table):
+    def ingest_table(self, source_id, table, batch_id=None):
         if not isinstance(table, dict) or table.get("method") != "yahoo-holdings-table-v1":
             raise ValueError(
                 "Unsupported holdings capture. Restart the app and reload the Chrome extension."
@@ -494,11 +587,19 @@ class Store:
             row_count=len(records),
             source_url=self.source(source_id)["url"],
         )
-        return self.ingest(source_id, data, "yahoo-holdings-table.csv", capture=capture)
+        return self.ingest(
+            source_id, data, "yahoo-holdings-table.csv", capture=capture, batch_id=batch_id
+        )
 
-    def failed(self, source_id, message):
+    def failed(self, source_id, message, batch_id=None):
         with self.connect() as db:
             db.execute("UPDATE sources SET last_error=? WHERE id=?", (message, source_id))
+            if batch_id is not None:
+                db.execute(
+                    "UPDATE import_batch_members SET status='failed',error=? WHERE batch_id=? AND source_id=? AND status='pending'",
+                    (message, batch_id, source_id),
+                )
+                self._finish_batch(db, batch_id)
 
     def snapshots(self, source_id):
         self.source(source_id)

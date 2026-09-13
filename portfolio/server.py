@@ -6,7 +6,7 @@ import re
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .companion import ChromeCompanion
 from .storage import MAX_FILE_BYTES, Store
@@ -14,10 +14,9 @@ from .storage import MAX_FILE_BYTES, Store
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
 
-def make_handler(store, browser, port):
+def make_handler(store, browser, port, research=None):
     token = secrets.token_urlsafe(32)
     hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
-    origins = {"http://" + host for host in hosts}
 
     class Handler(BaseHTTPRequestHandler):
         def extension_origin(self):
@@ -49,7 +48,10 @@ def make_handler(store, browser, port):
             self.wfile.write(data)
 
         def trusted(self, mutation=False):
-            if self.headers.get("Host") not in hosts:
+            actual_port = self.server.server_address[1]
+            local_hosts = {f"127.0.0.1:{actual_port}", f"localhost:{actual_port}"}
+            local_origins = {"http://" + host for host in local_hosts}
+            if self.headers.get("Host") not in local_hosts:
                 self.reply(403, {"error": "Localhost access only."})
                 return False
             if urlsplit(self.path).path.startswith("/api/companion/"):
@@ -64,12 +66,12 @@ def make_handler(store, browser, port):
                     )
                     return False
                 origin = self.headers.get("Origin")
-                if origin and not self.extension_origin() and origin not in origins:
+                if origin and not self.extension_origin() and origin not in local_origins:
                     self.reply(403, {"error": "This origin cannot use the Chrome connector."})
                     return False
                 return True
             origin = self.headers.get("Origin")
-            if (origin and origin not in origins) or self.headers.get(
+            if (origin and origin not in local_origins) or self.headers.get(
                 "Sec-Fetch-Site"
             ) == "cross-site":
                 self.reply(403, {"error": "Cross-site access denied."})
@@ -103,10 +105,12 @@ def make_handler(store, browser, port):
                 return
             path = urlsplit(self.path).path
             try:
-                if path in ("/", "/app.js", "/style.css"):
+                if path in ("/", "/app.js", "/style.css", "/research.js", "/research-state.js"):
                     filename = "index.html" if path == "/" else path[1:]
                     mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
                     self.reply(200, (STATIC / filename).read_bytes(), mime + "; charset=utf-8")
+                elif research and path.startswith("/api/research"):
+                    self.research_get(path)
                 elif path == "/api/state":
                     self.reply(
                         200, dict(token=token, sources=store.sources(), browser=browser.status())
@@ -137,6 +141,8 @@ def make_handler(store, browser, port):
                     self.reply(404, {"error": "Not found."})
             except ValueError as exc:
                 self.reply(400, {"error": str(exc)})
+            except KeyError:
+                self.reply(404, {"error": "Research record not found."})
             except Exception:
                 self.reply(500, {"error": "Could not read local data."})
 
@@ -161,7 +167,9 @@ def make_handler(store, browser, port):
                 body = json.loads(data)
                 if not isinstance(body, dict):
                     raise ValueError("Expected a JSON object.")
-                if path == "/api/companion/result":
+                if research and path.startswith("/api/research/"):
+                    self.research_post(path, body)
+                elif path == "/api/companion/result":
                     self.reply(200, browser.complete(body))
                 elif path.startswith("/api/sources/") and path.endswith("/selection"):
                     browser.select_source(int(path.split("/")[3]), body.get("selected"))
@@ -193,16 +201,80 @@ def make_handler(store, browser, port):
                     self.reply(404, {"error": "Not found."})
             except (ValueError, UnicodeDecodeError) as exc:
                 self.reply(400, {"error": str(exc)})
+            except KeyError:
+                self.reply(404, {"error": "Research record not found."})
             except TimeoutError:
                 self.reply(408, {"error": "Request timed out."})
             except Exception:
                 self.reply(500, {"error": "Operation failed. Previous snapshots are preserved."})
 
+        def research_get(self, path):
+            if path == "/api/research":
+                self.reply(200, research.status())
+            elif path == "/api/research/supplemental":
+                self.reply(200, research.supplemental())
+            elif path.startswith("/api/research/runs/"):
+                self.reply(200, research.run(path.rsplit("/", 1)[-1]))
+            elif path.startswith("/api/research/jobs/"):
+                self.reply(200, research.job(path.rsplit("/", 1)[-1]))
+            elif path == "/api/research/records":
+                query = parse_qs(urlsplit(self.path).query)
+                kind = query.get("kind", ["decision"])[0]
+                if kind not in {"decision", "evaluation", "assessment", "comparator"}:
+                    raise ValueError("Choose a review record type.")
+                from portfolio_research.public import _clean
+
+                self.reply(
+                    200, _clean(research.store.records(kind, query.get("run_id", [None])[0]))
+                )
+            elif path == "/api/research/compare":
+                query = parse_qs(urlsplit(self.path).query)
+                self.reply(
+                    200, research.compare(query.get("left", [""])[0], query.get("right", [""])[0])
+                )
+            elif path.startswith("/api/research/export/"):
+                from portfolio_lab.pipeline import report_html
+
+                name = path.rsplit("/", 1)[-1]
+                run_id, extension = name.rsplit(".", 1)
+                result = research.run(run_id)["result"]
+                if extension == "json":
+                    self.reply(200, result, attachment=f"portfolio-review-{run_id}.json")
+                elif extension == "html":
+                    self.reply(
+                        200,
+                        report_html(result).encode(),
+                        "text/html; charset=utf-8",
+                        f"portfolio-review-{run_id}.html",
+                    )
+                else:
+                    raise ValueError("Exports support JSON or HTML.")
+            else:
+                self.reply(404, {"error": "Not found."})
+
+        def research_post(self, path, body):
+            if path == "/api/research/jobs":
+                self.reply(202, research.submit(body))
+            elif path == "/api/research/settings":
+                self.reply(200, research.save_settings(body.get("patch", {})))
+            elif path == "/api/research/inputs":
+                self.reply(200, research.import_input(body))
+            elif path == "/api/research/decision":
+                self.reply(201, research.save_decision(body))
+            elif path == "/api/research/valuation-link":
+                self.reply(200, research.valuation_link(body))
+            elif path == "/api/research/providers":
+                self.reply(200, research.save_providers(body))
+            else:
+                self.reply(404, {"error": "Not found."})
+
     return Handler
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Local Yahoo Finance portfolio collector")
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Portfolio Review: local Yahoo collection and research"
+    )
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--data-dir",
@@ -210,7 +282,8 @@ def main():
             "PORTFOLIO_DATA_DIR", str(Path(__file__).resolve().parent.parent / "data")
         ),
     )
-    args = parser.parse_args()
+    parser.add_argument("--research-config", help="Optional private research configuration JSON")
+    args = parser.parse_args(argv)
     if not 1024 <= args.port <= 65535:
         parser.error("--port must be between 1024 and 65535")
     os.umask(0o077)
@@ -226,9 +299,20 @@ def main():
         parser.error("Another app is already using this data directory.")
     store = Store(directory)
     browser = ChromeCompanion(store)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store, browser, args.port))
+    from portfolio_lab.config import load_config
+    from portfolio_research.service import ResearchService, default_config
+
+    default_path = directory / "research-config.json"
+    config_path = args.research_config or (str(default_path) if default_path.is_file() else None)
+    config = load_config(config_path) if config_path else default_config(directory)
+    research = ResearchService(
+        config, collector_busy=lambda: browser.status().get("busy", False), recover=True
+    )
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port), make_handler(store, browser, args.port, research)
+    )
     server.daemon_threads = True
-    print(f"Portfolio app: http://127.0.0.1:{args.port}", flush=True)
+    print(f"Portfolio Review: http://127.0.0.1:{args.port}", flush=True)
     print(f"Local data: {directory}", flush=True)
     print("Press Ctrl+C to stop. Yahoo stays signed in in your normal Chrome browser.", flush=True)
     try:
@@ -237,6 +321,7 @@ def main():
         pass
     finally:
         server.server_close()
+        research.close()
         lock.close()
 
 

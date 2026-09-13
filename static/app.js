@@ -54,7 +54,7 @@ function renderSources() {
   const target=$('sources'); target.replaceChildren();
   if(!state.sources.length) {
     const empty=node('div',undefined,'empty');
-    empty.append(node('strong','Load your Yahoo portfolios'),node('div','Connect Yahoo above, then click Find portfolios.'));
+    empty.append(node('strong','Load your Yahoo portfolios'),node('div','Connect Yahoo in Data, then click Find portfolios.'));
     target.append(empty); return;
   }
   for(const source of state.sources) {
@@ -135,6 +135,9 @@ async function reload() {
   renderBrowser();
 }
 async function showSource(source) {
+  if (typeof document.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    document.dispatchEvent(new CustomEvent('portfolio:holdings'));
+  }
   const request = ++sourceViewRequest;
   activeSource = source;
   const snapshots = await api(`/api/sources/${source.id}/snapshots`);

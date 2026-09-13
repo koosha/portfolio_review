@@ -13,6 +13,7 @@ from .yahoo import discover_links
 class ChromeCompanion:
     def __init__(self, store):
         self.store = store
+        self.store.abandon_batches()
         self.key_path = store.directory / ".chrome-connector-key"
         if not self.key_path.exists():
             self.key_path.write_text(secrets.token_urlsafe(32))
@@ -79,7 +80,7 @@ class ChromeCompanion:
         job["finished"] = time.time()
         job["result"] = {"ok": False, "error": message}
         if job.get("source_id"):
-            self.store.failed(job["source_id"], message)
+            self.store.failed(job["source_id"], message, batch_id=job.get("batch_id"))
             self.state["results"].append(
                 dict(source_id=job["source_id"], name=job["name"], ok=False, error=message)
             )
@@ -119,6 +120,9 @@ class ChromeCompanion:
                 if not sources or any(not s["url"] or not s["selected"] for s in sources):
                     raise ValueError("Select at least one portfolio with a Yahoo URL.")
             self.jobs = []
+            batch_id = (
+                self.store.begin_batch([source["id"] for source in sources]) if sources else None
+            )
             for source in sources or [None]:
                 self.jobs.append(
                     dict(
@@ -131,6 +135,7 @@ class ChromeCompanion:
                         if source
                         else "https://finance.yahoo.com/portfolios/",
                         source_id=source["id"] if source else None,
+                        batch_id=batch_id,
                         name=source["name"] if source else "Yahoo Finance",
                     )
                 )
@@ -192,7 +197,11 @@ class ChromeCompanion:
                         raise ValueError(
                             "Chrome navigated away from the selected portfolio. Previous data was kept."
                         )
-                    result.update(self.store.ingest_table(job["source_id"], payload.get("table")))
+                    result.update(
+                        self.store.ingest_table(
+                            job["source_id"], payload.get("table"), batch_id=job.get("batch_id")
+                        )
+                    )
                     self.state["results"].append(
                         dict(name=job["name"], source_id=job["source_id"], **result)
                     )

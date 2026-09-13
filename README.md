@@ -1,87 +1,64 @@
 # Portfolio Review
 
-A local app that reads selected Yahoo Finance Holdings tables through a Chrome extension and saves them in SQLite. Yahoo and Google sign-in stay in your normal Chrome session. This phase collects data; it does not analyze investments or place trades.
+A local application for collecting Yahoo Finance holdings and conducting a repeatable monthly portfolio review. Your normal Yahoo/Google sign-in stays in Chrome. Holdings collection, company evidence, EPS/multiple and DCF valuations, scenarios, feasible alternatives, saved reviews, and prospective evaluation share one interface.
 
-## Run locally
+The application produces research records and conditional comparisons. It does not place orders. Missing data remains visible; synthetic demo preferences never become settings for real accounts.
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Chrome. Then, from the repository folder:
+## Start
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Chrome. From this checkout:
 
 ```sh
-uv sync
+uv sync --locked
 uv run app.py
 ```
 
-Open [the local app](http://127.0.0.1:8765). Leave the terminal running.
+Open [Portfolio Review](http://127.0.0.1:8765). Keep the terminal running. The existing `data/` database, portfolio selections and Chrome pairing key are retained. Only one server can own a data directory, and only one can listen on a port.
 
-The default data directory is `data/` inside the repository and is ignored by Git. To use an existing database and pairing key:
+For an isolated, fully populated example:
 
 ```sh
-uv run app.py --data-dir /path/to/existing/data
+uv run python -m portfolio_research demo --directory data/demo --serve
 ```
 
-`PORTFOLIO_DATA_DIR` can also set the data directory. Use `--port` to change the local port.
+Open [the synthetic demo](http://127.0.0.1:8766). Use a new directory for each newly generated demo. The dataset and company assessments are explicitly synthetic.
 
-## Connect and pull
+## Connect Yahoo
 
-1. Open `chrome://extensions`, enable **Developer mode**, and choose **Load unpacked**. Select this repository's `chrome-extension` folder.
-2. Open **Local Portfolio** from Chrome's Extensions menu. Copy the pairing key from the app's **Connection settings**, paste it into the extension, and save.
-3. Click **Open Yahoo** and sign in normally. Click **Find portfolios** in the local app.
-4. Check the portfolios you want, then click **Pull latest holdings**. Keep Chrome open while it runs.
+1. In `chrome://extensions`, enable Developer mode and load this checkout's `chrome-extension` folder.
+2. In the app's **Data → Connection settings**, copy the pairing key into the **Local Portfolio** extension and save it.
+3. Open Yahoo and sign in normally. Use **Find portfolios**, select portfolios with checkboxes, then **Pull latest holdings**.
+4. Review the saved holdings and capture details. Reload the extension after extension code changes; restart the server after Python changes.
 
-Choices persist. Unchecked portfolios are excluded from pulls and exports; their previous snapshots remain available. New discoveries start unchecked.
+Selections persist. Unchecked accounts retain history but are excluded from pulls and exports. A failed collection never publishes a new complete analytical batch. A successful pull without an independently verified row count is visibly unverified.
 
-Cards show market value and the last successful pull. **View holdings** opens the saved rows and history; **Capture details** contains completeness and missing-value notes. **Export holdings** exports selected data as JSON. The CSV export is generated locally from captured table cells; no Yahoo download button is required.
+## Monthly review
 
-After an extension code update, reload Local Portfolio in `chrome://extensions`. For UI-only changes, refresh the app page. Restart the app after Python changes.
+Use **Data** to reconcile dated account NAV/cash, currency and security identity. Import missing facts and scenarios through validated forms/CSV/JSON. Use **Settings** to supply your actual mandate, account permissions and explicit sleeve allocation.
 
-## Data and limitations
+Then **Run monthly review** creates an immutable record. **Research** contains the company workspace; **Scenarios → Recalculate** uses frozen inputs; **Save run** archives a new child. **Review** contains full candidate baskets, funding, no-action rationale, run comparisons, exports and outcome evaluation.
 
-- `sources` stores portfolio identities, selections and pull status.
-- `snapshots` retains captured rows, raw displayed fields and capture metadata.
-- `positions` stores decimal share quantities, prices, cost and market value where supplied.
-- `latest_positions` exposes the most recent saved positions for selected portfolios.
+The analytical layer reads the holdings database without changing it. A separate `data/research.sqlite3` contains jobs, versioned inputs, assumptions, runs, decisions and evaluations. Read-only JSON/HTML exports exclude internal paths, source SQL and credentials; their portfolio contents are still private financial information.
 
-Successful changes create snapshots. Unchanged captures update the check time. Failed pulls preserve previous data.
-
-Market value sums captured values and the Yahoo Total Cash balance within each explicit currency. Unknown currencies remain unspecified. Yahoo's **Add** prompt means no quantity was recorded; the original display remains in the snapshot and is not turned into a zero-share position. Purchase lots and history are not reconstructed.
-
-The reader checks account identity, row widths, pagination and changing rows. If Yahoo exposes a total row count, the capture must match it. Otherwise it is marked **completeness unverified**. Compare the captured totals with Yahoo before using the data for analysis.
+See [Operations](docs/OPERATIONS.md) for verified configuration, monthly commands, replay, evaluation, exports, backup/restore and migration. See the [feature map](docs/FEATURE_MAP.md), [source schema](docs/SOURCE_SCHEMA.md), [methodology register](docs/METHODOLOGY_GAPS.md) and [verification record](docs/VERIFICATION.md) for implementation scope and limitations.
 
 ## Development
 
-Python's standard library provides the server and SQLite storage. JavaScript has no runtime dependencies. Node.js 20+ is needed only for extension/UI tests.
+Python 3.12+ runs the standard-library HTTP service and numerical core. JavaScript has no production runtime dependencies. Node.js 20+ and npm are used for tests; jsdom is a development dependency for DOM/API integration checks.
 
 ```sh
-uv sync
+uv sync --locked
+npm ci
 uv run ruff check .
 uv run ruff format --check .
 uv run python -m unittest discover -s tests -q
 node --test tests/*.test.mjs
 ```
 
-Test fixtures are synthetic. Keep new tests independent of personal accounts.
+- `portfolio/`, `chrome-extension/`: Yahoo collection and persistence.
+- `portfolio_research/`: collector adapter, evidence/valuation, calendar, application services, public schemas and operations.
+- `portfolio_lab/`: audited numerical modules; the import namespace is retained for compatibility.
+- `static/`: one application shell and per-tab draft state.
+- `tests/`: synthetic collector, numerical, valuation, persistence and UI regressions.
 
-## Local data and Git
-
-The server binds only to loopback. App mutations require a local token; the extension uses a revocable pairing key and sends captured tables only to the configured loopback app. The extension cannot read Google pages or cookies.
-
-`.gitignore` excludes the database, credentials, browser profiles, exports, virtual environments and local artifacts. Never force-add ignored personal files. Review `git diff --cached` before committing. The database and pairing key are not application-encrypted; keep them private and back them up separately while the app is stopped.
-
-To retain the requested commit identity in this checkout:
-
-```sh
-git config user.name koosha
-git config user.email koosha.g@gmail.com
-```
-
-## Structure
-
-- `portfolio/server.py`: local HTTP routes and startup
-- `portfolio/companion.py`: paired Chrome request queue
-- `portfolio/storage.py`: validation, snapshots and SQLite storage
-- `portfolio/yahoo.py`: portfolio-link normalization
-- `chrome-extension/`: connection panel, worker and Holdings reader
-- `static/`: local UI
-- `tests/`: storage, HTTP, collector and UI tests
-
-Read-only data APIs are `/api/export`, `/api/positions`, `/api/sources/{id}/snapshots` and `/api/snapshots/{id}`. Selection and collection use the authenticated local UI.
+The app binds to loopback. Same-origin mutations require a local token; the extension has a separate revocable pairing key. This is a personal local service, not remote-production authentication. `.gitignore` excludes personal data, keys, sessions, reports, caches and environments. Never force-add ignored artifacts or publish personal exports. Use the SQLite backup command, including for a running WAL database; copying one live database file is insufficient.
