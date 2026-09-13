@@ -36,6 +36,8 @@ Selections persist. Unchecked accounts retain history but are excluded from pull
 
 Use **Data** to reconcile dated account NAV/cash, currency and security identity. Import missing facts and scenarios through validated forms/CSV/JSON. Use **Settings** to supply your actual mandate, account permissions and explicit sleeve allocation.
 
+Reporting and combined totals default to USD. Original amount currencies are preserved; automatic FX conversion is not yet implemented, so mixed or unknown value currencies still require verified conversion before aggregation.
+
 Then **Run monthly review** creates an immutable record. **Research** contains the company workspace; **Scenarios → Recalculate** uses frozen inputs; **Save run** archives a new child. **Review** contains full candidate baskets, funding, no-action rationale, run comparisons, exports and outcome evaluation.
 
 The analytical layer reads the holdings database without changing it. A separate `data/research.sqlite3` contains jobs, versioned inputs, assumptions, runs, decisions and evaluations. Read-only JSON/HTML exports exclude internal paths, source SQL and credentials; their portfolio contents are still private financial information.

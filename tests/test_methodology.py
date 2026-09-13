@@ -49,12 +49,12 @@ class MethodologyTests(unittest.TestCase):
         result = build_proposals(self.bundle, self.config, self.scores)
         return result, {row["candidate"]: row for row in result.get("candidates", [])}
 
-    def test_real_defaults_do_not_manufacture_preferences(self):
+    def test_usd_reporting_default_keeps_investment_mandate_unconfirmed(self):
         config = validate_config({})
         self.assertFalse(config["mandate"]["confirmed"])
         self.assertFalse(config["allocation"]["optimize"])
         self.assertTrue(config["allocation"]["use_probabilities"])
-        self.assertIsNone(config["mandate"]["base_currency"])
+        self.assertEqual(config["mandate"]["base_currency"], "USD")
         self.assertIsNone(config["mandate"]["benchmark_id"])
         self.assertIsNone(config["allocation"]["active_sleeve_weight"])
         self.assertIsNone(config["allocation"]["sleeve_budget_basis"])

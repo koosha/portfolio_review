@@ -43,7 +43,7 @@ DEFAULTS = {
     },
     "mandate": {
         "confirmed": False,
-        "base_currency": None,
+        "base_currency": "USD",
         "benchmark_id": None,
         "issuer_cap": None,
         "sector_cap": None,

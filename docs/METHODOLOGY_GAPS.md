@@ -8,7 +8,7 @@ This register distinguishes software behavior from inputs or evidence the applic
 
 | Requirement | Result and verification |
 | --- | --- |
-| Real-use investment preferences | Base currency, benchmark, horizon cash return, sleeve budget and budget basis default to null; mandate remains unconfirmed; optimization defaults off. Synthetic preferences are declared only by demo generation. |
+| Real-use investment preferences | USD is the default reporting and aggregation currency. Benchmark, horizon cash return, sleeve budget and budget basis default to null; mandate remains unconfirmed; optimization defaults off. Synthetic investment preferences are declared only by demo generation. |
 | Reconciliation | Explicit cash differs from missing cash; residuals remain unresolved. Separate account budgets, currencies and source completeness gates are retained. The analytical adapter owns decimal input normalization separately from numerical float arrays. Candidate exports also preserve decimal amount/quantity strings. |
 | Universe | Scores require explicit US domicile, ordinary common equity, compatible currencies, source eligibility, dated issuer common-equity capitalization and appropriate accounting. Missing source identity is not inferred from ticker, name or USD. Rankings describe the configured universe, not an exhaustive market universe. |
 | Liquidity and momentum | Liquidity uses exactly the last 60 XNYS session dates. Missing/duplicate/nonfinite observations cannot qualify through a median over fewer data. Momentum uses exact exchange-session endpoints at t−12 and t−1; a missing endpoint stays missing, including holiday month ends. |
@@ -75,6 +75,7 @@ Changing horizon clears incompatible numerical return overrides, priors and cash
 | --- | --- |
 | Market-wide or survivor-free historical ranking | Blocked without a licensed point-in-time universe, identity history, delistings and historical capitalization. Current holdings are not that universe. |
 | Accurate live security identity, cash, NAV, tax lots and account permissions | Requires source data or validated supplements. Code and synthetic cases are implemented; the application cannot invent the owner's values or restrictions. |
+| Currency conversion and aggregation | USD is the default target. Original quote, reported market-value and account currencies retain their separate meanings. Automatic FX conversion is not implemented; mixed or unknown value currencies remain blocked without verified conversion. Selecting USD does not relabel a foreign amount or convert it at parity. |
 | Complete fund exposure | Requires dated complete disclosures and underlying issuer mappings. Partial fund holdings remain unresolved, not inferred cash. |
 | Qualified company fundamentals | Requires compatible currency/accounting definitions, public availability and receipt evidence. SEC supports reviewed USD US-GAAP tags; unsupported IFRS/custom tags require a reviewed import. |
 | Intraday historical knowledge | SEC date-only filings retain the conservative next-day policy; same-day FRED vintages do not establish an exact publication time. Stronger replay needs actual availability/receipt records. |

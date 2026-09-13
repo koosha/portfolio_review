@@ -53,9 +53,9 @@ Required owner evidence includes:
 - A real valuation date, independent NAV including cash, explicit cash, account currency and type for each included account. Currency attestation for unlabeled position values is separate from account currency.
 - Verified stable security/issuer mappings, dated ticker aliases, instrument type, currencies and any supported company-screen eligibility facts. Plan funds are never guessed from similar retail names.
 - Snapshot-bound open tax lots and applicable treatment if a taxable sale is to be reviewed. Average cost alone is insufficient.
-- Actual account permissions, dealing rules, locks, limits, benchmark, explicit cash-return assumption and sleeve membership/budget in **Settings**. A confirmed mandate is an owner decision. Defaults remain unconfirmed/null.
+- Actual account permissions, dealing rules, locks, limits, benchmark, explicit cash-return assumption and sleeve membership/budget in **Settings**. A confirmed mandate is an owner decision. Reporting defaults to USD; the investment mandate remains unconfirmed.
 
-A changed source snapshot invalidates snapshot-bound account/lot supplements until they are reviewed again. The unexplained NAV residual is not cash. Mixed currencies remain blocked without a verified conversion path. The display account filter does not change the analysis scope or denominators.
+A changed source snapshot invalidates snapshot-bound account/lot supplements until they are reviewed again. The unexplained NAV residual is not cash. USD is the default reporting currency and the target for conversions and combined totals. Preserve each amount's source currency: a security's quote currency may differ from Yahoo's reported market-value currency or the account balance currency. Automatic FX conversion is not implemented; mixed or unknown value currencies remain blocked without a verified conversion path. The display account filter does not change the analysis scope or denominators.
 
 ## Provider and evidence inputs
 
