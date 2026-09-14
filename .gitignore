@@ -89,3 +89,8 @@ attachments/
 .DS_Store
 .idea/
 .vscode/
+
+# Planning documents, handoff material and archives stay local
+docs/
+CODEX_HANDOFF_README.md
+wealthify.zip
