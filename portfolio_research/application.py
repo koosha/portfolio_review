@@ -55,6 +55,15 @@ def analyze_review(bundle, config):
             "scope": "Retained records eligible at the saved decision cutoff; units/currencies and source IDs accompany each observation.",
         }
     result["timeline"] = deepcopy(bundle.get("timeline") or decision_context(bundle["as_of"]))
+    timeline = result["timeline"]
+    result["metadata"]["review_kind"] = timeline.get("review_kind", "historical")
+    result["metadata"]["information_cutoff"] = timeline.get(
+        "information_cutoff", timeline["decision_cutoff"]
+    )
+    result["metadata"]["collection_received_at"] = timeline.get("collection_received_at")
+    result["metadata"]["market_observation_date"] = timeline.get(
+        "market_observation_date", timeline["decision_date"]
+    )
     result["company_research"] = {}
     for security_id in sorted(
         set(workspace.get("assessments", {})) | set(workspace.get("valuations", {}))

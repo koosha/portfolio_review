@@ -9,6 +9,7 @@ let service = {}, result = null, saved = null, draft = newDraft(null), token = '
 let page = 'overview', securityId = '', detailId = '', selectedCandidate = '', account = '';
 let supplemental = null, supplementalSupported = false, decisionRecords = [], latestEvaluation = null;
 let fieldCounter = 0;
+let current = null, currentRequest = 0;
 const columnVisibility = new Set(['security_id','account_id','quantity','price','market_value','calculated_weight','currency']);
 const text = value => value === null || value === undefined || value === '' ? '—' : typeof value === 'object' ? JSON.stringify(value) : String(value);
 const friendly = value => String(value || '').replaceAll('_',' ').replace(/\b\w/g, letter => letter.toUpperCase());
@@ -16,6 +17,11 @@ const numeric = value => { try { return numberOrNull(value); } catch { return nu
 const num = (value, digits=2) => numeric(value) === null ? '—' : numeric(value).toLocaleString(undefined,{maximumFractionDigits:typeof digits==='number'?digits:2});
 const pct = value => numeric(value) === null ? '—' : `${num(numeric(value)*100,1)}%`;
 const money = (value, currency=result?.summary?.currency) => numeric(value) === null ? '—' : `${num(value)}${currency ? ` ${currency}` : ''}`;
+function when(value) {
+  if (!value) return 'Never';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
 function el(tag, content, className) {
   const node = document.createElement(tag);
   if (content !== undefined && content !== null) node.textContent = String(content);
@@ -197,6 +203,77 @@ function renderDiff() {
   const changes=differences(draft.baseConfig,resolved());
   replace('resolved-diff',changes.length?table(changes,[{key:'field'},{key:'before',wrap:true},{key:'after',wrap:true}]):el('p','No configuration changes in this draft.','muted'));
 }
+// Current holdings: the newest collection, dated by server receipt time. This view never
+// depends on a saved review and never converts currencies or reconciles NAV.
+const collectionLabels={published:'Published',legacy_partial:'Legacy partial',none:'None'};
+const collectionClasses={published:'complete',legacy_partial:'warning',none:''};
+const completenessLabels={'count-verified':['Count verified','complete'],'end-observed':['End observed',''],unverified:['Unverified','warning']};
+const listOf = value => Array.isArray(value) ? value : [];
+const objectRows = value => listOf(value).filter(row => row && typeof row === 'object');
+function collectionBadge(label,className='') {
+  const node=$('current-collection-state');node.textContent=label;node.className=`badge ${className}`.trim();
+}
+function completenessBadge(value) {
+  const [label,className]=completenessLabels[value] || [value ? friendly(value) : 'Completeness unknown',value ? '' : 'warning'];
+  return el('span',label,`badge ${className}`.trim());
+}
+function subtotalLine(line) {
+  const missing=numeric(line?.missing_value_count) || 0;
+  const parts=[`Holdings ${num(line?.holdings)}`,`Cash ${num(line?.cash)}`,line?.currency || 'unlabeled'];
+  if(missing)parts.push(`${missing} without a value`);
+  return el('div',parts.join(' · '));
+}
+function accountCard(row) {
+  const node=el('article',null,'account-card'), heading=el('div',null,'account-card-heading');
+  heading.append(el('strong',row?.name || row?.account_id || 'Account'),completenessBadge(row?.completeness));
+  const positions=numeric(row?.position_count);
+  const captured=`Captured ${when(row?.captured_at)}${positions===null?'':` · ${positions} ${positions===1?'position':'positions'}`}`;
+  node.append(heading,el('div',captured,'account-meta'));
+  const subtotals=el('div',null,'account-subtotals'), lines=listOf(row?.subtotals);
+  for(const line of lines)subtotals.append(subtotalLine(line));
+  if(!lines.length)subtotals.append(el('div','No captured subtotal','muted'));
+  node.append(subtotals);
+  if(row?.value_basis==='attested')node.append(el('div',`Attested valuation ${row.valuation_date || 'date unavailable'}`,'account-meta'));
+  const exceptions=listOf(row?.exceptions).length;
+  node.append(el('div',exceptions?`${exceptions} ${exceptions===1?'exception':'exceptions'}`:'No exceptions',`account-meta${exceptions?' has-exceptions':''}`));
+  return node;
+}
+function renderCurrent() {
+  const containers=['current-totals','current-accounts','current-positions','current-exceptions'];
+  if(!current){collectionBadge('Loading…');$('current-dates').textContent='Loading the newest collection…';for(const id of containers)replace(id);return;}
+  if(!current.supported){collectionBadge('Unavailable');$('current-dates').textContent=current.reason || 'Current holdings are unavailable for this source.';for(const id of containers)replace(id);return;}
+  const snapshot=current.current || {}, dates=snapshot.dates || {}, collection=snapshot.collection || {};
+  const accounts=objectRows(snapshot.accounts), positions=objectRows(snapshot.positions);
+  const status=collection.status || 'none';
+  collectionBadge(collectionLabels[status] || friendly(status),collectionClasses[status] ?? '');
+  $('current-dates').textContent=`Collected ${when(dates.collection_received_at)} · Source valuation time ${dates.source_valuation_time || 'unknown — captured values shown as observed'} · Market observation date ${dates.market_observation_date || 'unavailable'} · Generated ${when(dates.generated_at)}`;
+  const totals=objectRows(snapshot.totals?.by_currency);
+  replace('current-totals',...(totals.length?totals.map(row=>metric(`Captured subtotal (${row?.currency || 'unlabeled'})`,num(row?.total),`${row?.account_count ?? 0} ${row?.account_count===1?'account':'accounts'} · not reconciled NAV`)):[el('p','No captured subtotals in the newest collection.','muted')]));
+  replace('current-accounts',...(accounts.length?accounts.map(accountCard):[empty('Pull holdings to capture the newest collection.','No captured accounts')]));
+  const names=new Map(accounts.map(row=>[row?.account_id,row?.name || row?.account_id]));
+  replace('current-positions',table(positions,[
+    {key:'symbol'},{key:'name',wrap:true},{key:'quantity',render:value=>num(value,4)},{key:'price',render:value=>num(value)},
+    {key:'market_value',label:'Market value',render:value=>num(value)},{key:'currency'},
+    {key:'account_id',label:'Account',render:value=>names.get(value) || text(value)},{key:'observed_at',label:'Observed',render:value=>when(value)},
+  ],`${positions.length} captured positions · values as observed at capture · no FX conversion`));
+  const issues=listOf(snapshot.exceptions).filter(issue=>['error','warning'].includes(issue?.severity));
+  const shown=issues.slice(0,8);
+  replace('current-exceptions',
+    collection.newer_collection_in_progress?el('p','A newer collection is still in progress; the newest complete collection is shown until it publishes.','current-progress'):null,
+    collection.newer_collection_failed?el('p','A newer collection did not complete; the newest complete collection is shown.','current-alert'):null,
+    listIssues(shown,'No collection warnings or errors.'),
+    issues.length>shown.length?el('p',`+${issues.length-shown.length} more`,'muted'):null);
+}
+async function loadCurrent() {
+  const request=++currentRequest;
+  let next;
+  try { next=await api('/api/research/current'); }
+  catch(failure){ next={supported:false,reason:`Current holdings could not be loaded. ${failure?.message || ''}`.trim()}; }
+  if(request!==currentRequest)return;
+  current=next && typeof next==='object'?next:{supported:false,reason:'The current holdings response was unreadable.'};
+  try { renderCurrent(); }
+  catch(failure){ current={supported:false,reason:`Current holdings could not be displayed: ${failure?.message || failure}`}; try { renderCurrent(); } catch { /* the panel keeps its last state */ } }
+}
 function renderOverview() {
   const summary=result?.summary || {}, risk=result?.risk || {}, currency=summary.currency;
   replace('overview-metrics',metric('Portfolio NAV',money(summary.total_value,currency),'Declared account NAV'),
@@ -204,6 +281,7 @@ function renderOverview() {
     metric('Coverage',pct(summary.coverage),summary.complete?'Accounts reconciled':'Unresolved amounts remain visible'),
     metric('Unclassified',money(summary.unclassified_value,currency),'Not assumed to be cash'));
   $('overview-caption').textContent=result?`${text(result.metadata?.valuation_date)} · ${summary.position_count ?? '—'} positions · ${friendly(result.metadata?.scope)}`:'Run a review to reconcile completed holdings and available research inputs.';
+  $('analysis-caption').textContent=result?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}`:'No completed analysis yet · Current holdings above are shown from the newest collection.';
   $('exposure-state').replaceChildren(badge(result?.exposure_status));
   replace('issuer-chart',barChart(result?.issuer_exposure,'weight','issuer_id','Top issuer weights · portfolio NAV · direct and fund look-through'));
   replace('sector-chart',barChart(result?.sector_exposure,'weight','sector','Additive sector weights · portfolio NAV · unknown exposure retained'));
@@ -617,6 +695,7 @@ async function submitJob(kind,payload,evaluationOnly=false) {
     if(!gate.current(ticket))return;
     await refreshService();
     if(!gate.current(ticket))return;
+    if(kind==='monthly' || kind==='save')loadCurrent();
     if(evaluationOnly){latestEvaluation=job.output;renderReview();announce('Evaluation saved.');return;}
     if(draft.revision!==revision || draft.baseRunId!==base){announce('An earlier calculation completed. Your newer draft was retained; recalculate it before saving.');return;}
     const response=job.output;result=response.result;
@@ -641,6 +720,7 @@ async function monthly(refresh=false) {
 for(const node of document.querySelectorAll('[data-page]'))node.addEventListener('click',()=>navigate(node.dataset.page));
 for(const node of document.querySelectorAll('[data-go]'))node.addEventListener('click',()=>navigate(node.dataset.go));
 document.addEventListener('portfolio:holdings',()=>navigate('holdings'));
+document.addEventListener('portfolio:sources-changed',()=>{loadCurrent();});
 window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)));
 for(const node of document.querySelectorAll('[data-company-tab]')){
   node.addEventListener('click',()=>{
@@ -722,7 +802,7 @@ window.addEventListener('beforeunload',event=>{if(draft.dirty){persist();event.p
 async function initialize() {
   navigate(pages.includes(location.hash.slice(1))?location.hash.slice(1):'overview');
   try {
-    const [local,status]=await Promise.all([api('/api/state'),api('/api/research')]);token=local.token;service=status;
+    const [local,status]=await Promise.all([api('/api/state'),api('/api/research'),loadCurrent()]);token=local.token;service=status;
     try{const response=await api('/api/research/supplemental');supplementalSupported=response.supported;supplemental=clone(response.saved || response.template || null);}catch(failure){error(`Supplemental input is unavailable: ${failure.message}`);}
     if(service.latest_run_id)await loadRun(service.latest_run_id,false);
     else{draft=restoreDraft(sessionStorage,null,service.config,{});renderAll();}

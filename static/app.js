@@ -131,7 +131,10 @@ async function reload() {
   nextState.didCollapseSetup = state.didCollapseSetup;
   state = nextState;
   const signature = JSON.stringify([state.sources,state.browser.progress]);
-  if (signature !== sourceSignature) { sourceSignature = signature; renderSources(); }
+  if (signature !== sourceSignature) {
+    sourceSignature = signature; renderSources();
+    if (typeof CustomEvent === 'function') document.dispatchEvent(new CustomEvent('portfolio:sources-changed'));
+  }
   renderBrowser();
 }
 async function showSource(source) {

@@ -135,6 +135,13 @@ def _issue(issues, code, message, severity="error"):
     issues.append({"code": code, "message": message, "severity": severity})
 
 
+def _account_issue(issues, by_account, accounts, code, message, severity="error"):
+    """Record an issue and the accounts it applies to; saved issue records keep their shape."""
+    _issue(issues, code, message, severity)
+    for aid in [accounts] if isinstance(accounts, str) else accounts:
+        by_account.setdefault(aid, set()).add(code)
+
+
 def _iso_date(value, label, nullable=True):
     if value is None and nullable:
         return None
@@ -399,16 +406,50 @@ def assert_separate_store(source_path, research_path):
         raise ValueError("Research storage must be separate from the read-only collector database.")
 
 
-def _receipt_before(value, cutoff):
+def _receipt_moment(value):
     try:
         moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return moment.tzinfo is not None and moment <= cutoff
     except (AttributeError, TypeError, ValueError):
-        return False
+        return None
+    return moment if moment.tzinfo is not None else None
 
 
-def _read_snapshot_set(source_path, as_of, account_ids=None):
-    cutoff = datetime.combine(date.fromisoformat(as_of), time.max, ZoneInfo("America/New_York"))
+def _receipt_before(value, cutoff):
+    return (moment := _receipt_moment(value)) is not None and moment <= cutoff
+
+
+def _receipt_cutoff(as_of, receipt_through=None, receipt_before=None):
+    """End of the New York receipt day, bounded by an exact receipt instant when given."""
+    cutoff = datetime.combine(
+        date.fromisoformat(receipt_through or as_of), time.max, ZoneInfo("America/New_York")
+    )
+    if receipt_before is None:
+        return cutoff
+    return min(cutoff, datetime.fromisoformat(receipt_before))
+
+
+def _collection_received_at(batch, snapshots):
+    """Server receipt time of the selected collection. It is never a quote time."""
+    if batch:
+        return batch["completed_at"]
+    dated = [
+        (moment, row["received_at"])
+        for row in snapshots.values()
+        if (moment := _receipt_moment(row.get("received_at"))) is not None
+    ]
+    return max(dated)[1] if dated else None
+
+
+def _read_snapshot_set(
+    source_path, as_of, account_ids=None, receipt_through=None, receipt_before=None
+):
+    """Newest complete publication (or legacy snapshots) received by the cutoff.
+
+    Returns ``(sources, snapshots, batch, newer_failed, newer_in_progress)``. A newer batch
+    that failed, was abandoned, or published with missing members sets ``newer_failed``;
+    one still collecting at the cutoff only sets ``newer_in_progress``.
+    """
+    cutoff = _receipt_cutoff(as_of, receipt_through, receipt_before)
     with _read_source(source_path) as (db, objects):
         sources = [
             dict(row) for row in db.execute("SELECT id,name,selected FROM sources ORDER BY id")
@@ -428,7 +469,7 @@ def _read_snapshot_set(source_path, as_of, account_ids=None):
                     raise ValueError("An account ID is not present in the collector.")
                 chosen.add(source_id)
         sources = [row for row in sources if row["id"] in chosen]
-        selected_batch, snapshots, newer_failed = None, {}, False
+        selected_batch, snapshots, newer_failed, newer_in_progress = None, {}, False, False
         if chosen and "import_batches" in objects:
             batches = [
                 dict(row)
@@ -442,10 +483,15 @@ def _read_snapshot_set(source_path, as_of, account_ids=None):
                     batch["created_at"], cutoff
                 ):
                     continue
+                if batch["status"] == "collecting":
+                    newer_in_progress = True
+                    continue
                 if batch["status"] != "published":
                     newer_failed = True
                     continue
                 if not _receipt_before(batch["completed_at"], cutoff):
+                    # Published after the cutoff: it was still collecting at that instant.
+                    newer_in_progress = True
                     continue
                 members = [
                     dict(row)
@@ -478,7 +524,7 @@ def _read_snapshot_set(source_path, as_of, account_ids=None):
                     if _receipt_before(row["captured_at"], cutoff):
                         snapshots[source["id"]] = {**dict(row), "received_at": row["captured_at"]}
                         break
-        return sources, snapshots, selected_batch, newer_failed
+        return sources, snapshots, selected_batch, newer_failed, newer_in_progress
 
 
 def _frames(ledger, issues):
@@ -505,17 +551,36 @@ def _frames(ledger, issues):
     return frames
 
 
-def load_collector(source_path, as_of, supplemental=None, account_ids=None):
+def load_collector(
+    source_path,
+    as_of,
+    supplemental=None,
+    account_ids=None,
+    receipt_through=None,
+    receipt_before=None,
+):
     """Map one exact collector publication and separately supplied evidence.
 
-    Legacy holdings remain inspectable with blocking issues. ``as_of`` limits
-    source receipts through that New York calendar date; it never turns receipt
-    time into a quote date. Decision cutoff policy belongs to orchestration.
+    Legacy holdings remain inspectable with blocking issues. ``as_of`` is the
+    market observation date. ``receipt_through`` is the last New York calendar
+    day of accepted source receipts and defaults to ``as_of``; a current review
+    passes the generation day so a Sunday capture is not rolled back to Friday,
+    plus ``receipt_before``, the exact generation instant, so a collection received
+    later that day is never selected. Dated evidence (valuation dates, lot
+    acquisitions, alias validity) may run through the receipt day. Receipt time
+    never turns into a quote date. Decision cutoff policy belongs to orchestration.
     """
     as_of = _iso_date(as_of, "as_of", nullable=False)
+    receipt_through = _iso_date(receipt_through, "receipt_through")
+    if receipt_through is not None and receipt_through < as_of:
+        raise ValueError("Receipt limit cannot precede the market observation date.")
+    receipt_before = _timestamp(receipt_before, "receipt_before")
+    evidence_through = receipt_through or as_of
     supplemental = validate_supplemental({} if supplemental is None else supplemental)
-    sources, snapshots, batch, fallback = _read_snapshot_set(source_path, as_of, account_ids)
-    issues, provenance = [], []
+    sources, snapshots, batch, fallback, in_progress = _read_snapshot_set(
+        source_path, as_of, account_ids, receipt_through, receipt_before
+    )
+    issues, provenance, account_codes = [], [], {}
     ledger = {name: [] for name in FRAME_COLUMNS}
     ledger.update(captures=[], excluded_rows=[], security_aliases=[])
     if not sources:
@@ -536,7 +601,7 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
     by_account = {
         (row["source_id"], row.get("snapshot_id")): row for row in supplemental["accounts"]
     }
-    security_rows, selected_dates = {}, []
+    security_rows, selected_dates, holders = {}, [], {}
     for source in sources:
         source_id, aid = source["id"], account_id(source["id"])
         snapshot = snapshots.get(source_id)
@@ -545,15 +610,19 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
         if not account_evidence and any(
             row["source_id"] == source_id for row in supplemental["accounts"]
         ):
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "STALE_ACCOUNT_SUPPLEMENT",
                 "Supplemental account facts refer to a different snapshot and were not applied.",
             )
         valuation = account_evidence.get("valuation_date")
-        if valuation and valuation > as_of:
-            _issue(
+        if valuation and valuation > evidence_through:
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "FUTURE_VALUATION",
                 "An account valuation date is after the decision date; its supplied balances and date were not applied.",
             )
@@ -564,21 +633,27 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError("A collector snapshot contains invalid row records.")
         if not snapshot:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "MISSING_ACCOUNT_SNAPSHOT",
                 "A selected account has no snapshot received on or before the requested date.",
             )
         elif (capture or {}).get("completeness") != "count-verified":
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "UNVERIFIED_CAPTURE",
                 "Yahoo table coverage is unverified. Explicit account reconciliation evidence is required.",
                 "warning" if account_evidence.get("complete") is True else "error",
             )
         if not valuation:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "UNKNOWN_VALUATION_DATE",
                 "A capture/receipt timestamp is not a quote valuation date. Supply the dated snapshot evidence.",
             )
@@ -598,8 +673,10 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
         observed_cash = cash_values[0] if len(cash_values) == 1 else None
         observed_cash_currency = cash_currencies[0] if len(cash_currencies) == 1 else None
         if len(cash_values) > 1:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "AMBIGUOUS_CASH",
                 "Multiple cash rows prevent determining a unique account cash balance.",
             )
@@ -608,8 +685,10 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
             observed_cash_currency and currency and observed_cash_currency != currency
         )
         if cash_currency_mismatch:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "CASH_CURRENCY_MISMATCH",
                 "Captured cash uses a different currency from account balances; no FX conversion was inferred.",
             )
@@ -621,8 +700,10 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
             and observed_cash is not None
             and Decimal(cash) != Decimal(observed_cash)
         ):
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "CASH_MISMATCH",
                 "Supplemental cash differs from the explicitly captured cash row; reconcile before allocation.",
             )
@@ -654,20 +735,26 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
         }
         ledger["accounts"].append(account)
         if nav is None or cash is None:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "MISSING_ACCOUNT_TOTALS",
                 "Explicit dated account NAV and cash are required; a holdings subtotal is not reported NAV.",
             )
         if currency is None:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "MISSING_CURRENCY",
                 "An account has no explicit currency; no currency or FX rate was assumed.",
             )
         if not complete:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                aid,
                 "INCOMPLETE_ACCOUNT_COVERAGE",
                 "An account has not been reconciled as complete within a published batch.",
             )
@@ -691,12 +778,20 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
                 for record in supplemental["securities"]
                 if record["source_id"] == source_id
                 and record["raw_symbol"] == symbol
-                and (not record.get("valid_from") or record["valid_from"] <= (valuation or as_of))
-                and (not record.get("valid_to") or record["valid_to"] >= (valuation or as_of))
+                and (
+                    not record.get("valid_from")
+                    or record["valid_from"] <= (valuation or evidence_through)
+                )
+                and (
+                    not record.get("valid_to")
+                    or record["valid_to"] >= (valuation or evidence_through)
+                )
             ]
             if len(mappings) > 1:
-                _issue(
+                _account_issue(
                     issues,
+                    account_codes,
+                    aid,
                     "AMBIGUOUS_SECURITY_ALIAS",
                     "Multiple security mappings apply to the same dated collector symbol.",
                 )
@@ -720,8 +815,10 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
                 and mapping.get("valid_from")
             )
             if not resolved:
-                _issue(
+                _account_issue(
                     issues,
+                    account_codes,
+                    aid,
                     "UNRESOLVED_SECURITY",
                     "A held source symbol lacks an explicit dated security/issuer mapping. Separate share classes and unknown plan funds remain separate.",
                 )
@@ -733,9 +830,12 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
                 eligible=bool(resolved and mapping.get("eligible") is True),
                 resolution_status="resolved" if resolved else "unresolved",
             )
+            holders.setdefault(security_id, set()).add(aid)
             if security_id in security_rows and security_rows[security_id] != security:
-                _issue(
+                _account_issue(
                     issues,
+                    account_codes,
+                    holders[security_id],
                     "CONFLICTING_SECURITY_IDENTITY",
                     "Different source mappings disagree about a shared security identity.",
                 )
@@ -761,20 +861,26 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
                 "total_cost": _decimal(row.get("total_cost"), "total_cost"),
             }
             if position["currency"] is None:
-                _issue(
+                _account_issue(
                     issues,
+                    account_codes,
+                    aid,
                     "MISSING_POSITION_CURRENCY",
                     "A holding's value currency is unknown; an account label or security trading currency is not a conversion.",
                 )
             if position["market_value"] is None:
-                _issue(
+                _account_issue(
                     issues,
+                    account_codes,
+                    aid,
                     "MISSING_POSITION_VALUE",
                     "Some held quantities lack market values; portfolio totals cannot be completed.",
                 )
             if position["quantity"] is None:
-                _issue(
+                _account_issue(
                     issues,
+                    account_codes,
+                    aid,
                     "MISSING_QUANTITY",
                     "A value-bearing holding lacks quantity; sizing and lot matching are unavailable.",
                 )
@@ -802,16 +908,21 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
     source_accounts = {row["source_id"]: row for row in ledger["accounts"]}
     for lot in supplemental["tax_lots"]:
         account = source_accounts.get(lot["source_id"])
+        lot_accounts = [account["account_id"]] if account else []
         if not account or lot["snapshot_id"] != account["snapshot_id"]:
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                lot_accounts,
                 "STALE_TAX_LOT",
                 "An open-lot record is outside the selected account snapshot and was not applied.",
             )
             continue
-        if lot["acquired_date"] > (account["valuation_date"] or as_of):
-            _issue(
+        if lot["acquired_date"] > (account["valuation_date"] or evidence_through):
+            _account_issue(
                 issues,
+                account_codes,
+                lot_accounts,
                 "FUTURE_TAX_LOT",
                 "A lot acquisition is after the selected valuation date and was not applied.",
             )
@@ -821,8 +932,10 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
             and position["security_id"] == lot["security_id"]
             for position in ledger["positions"]
         ):
-            _issue(
+            _account_issue(
                 issues,
+                account_codes,
+                lot_accounts,
                 "UNMATCHED_TAX_LOT",
                 "An open-lot identity has no corresponding position in this snapshot.",
             )
@@ -850,8 +963,10 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
                 )
                 account["reconciliation_residual"] = format(residual, "f")
                 if abs(residual) > Decimal("0.01"):
-                    _issue(
+                    _account_issue(
                         issues,
+                        account_codes,
+                        account["account_id"],
                         "NAV_MISMATCH",
                         "Explicit NAV does not reconcile to captured holdings plus explicit cash within one cent.",
                     )
@@ -883,8 +998,10 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
         key = (row["account_id"], row["security_id"])
         counts[key] = counts.get(key, 0) + 1
     if any(count > 1 for count in counts.values()):
-        _issue(
+        _account_issue(
             issues,
+            account_codes,
+            sorted({aid for (aid, _), count in counts.items() if count > 1}),
             "DUPLICATE_POSITIONS",
             "Multiple rows share account/security identity. Exact source records remain separate until their lot/position semantics are reconciled.",
         )
@@ -909,6 +1026,22 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
             "batch": batch,
             "legacy_partial": batch is None,
             "account_count": len(sources),
+            "receipt_through": receipt_through or as_of,
+            "collection_received_at": _collection_received_at(batch, snapshots),
+            "snapshot_ids": {
+                str(source["id"]): snapshots[source["id"]]["id"]
+                for source in sources
+                if source["id"] in snapshots
+            },
+            "captured_at": {
+                str(source["id"]): snapshots[source["id"]]["captured_at"]
+                for source in sources
+                if source["id"] in snapshots
+            },
+            "newer_collection_in_progress": in_progress,
+            "account_issue_codes": {
+                aid: sorted(codes) for aid, codes in sorted(account_codes.items())
+            },
             "normalized_sha256": normalized_hash,
             "schema_version": VERSION,
         },
@@ -918,7 +1051,7 @@ def load_collector(source_path, as_of, supplemental=None, account_ids=None):
 def supplemental_template(source_path, account_ids=None):
     """Return an editable, private local UI shape containing no paths/URLs/keys."""
     today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
-    sources, snapshots, _, _ = _read_snapshot_set(source_path, today, account_ids)
+    sources, snapshots, *_ = _read_snapshot_set(source_path, today, account_ids)
     template = {"version": VERSION, "accounts": [], "securities": [], "tax_lots": []}
     for source in sources:
         snapshot = snapshots.get(source["id"])

@@ -9,7 +9,7 @@ import pandas as pd
 from portfolio_lab.analytics import json_safe
 from portfolio_lab.evaluation import _stats, evaluate_forecasts
 
-from .calendar import _calendar, decision_context
+from .calendar import _calendar, decision_context, new_york_dates
 
 CONVENTIONS = {
     "prices": "Unadjusted terminal prices plus explicit cash distributions and corporate actions",
@@ -179,7 +179,9 @@ def evaluate_saved_forecasts(bundle, prices, evaluation_date):
             ),
             "forecast_date",
         ]
-        dates = pd.to_datetime(originals, errors="coerce", utc=True, format="mixed")
+        parsed = pd.to_datetime(originals, errors="coerce", utc=True, format="mixed")
+        # A bare forecast date starts its New York day when compared with the frozen cutoff.
+        dates = new_york_dates(originals, parsed)
         group_dates = dates[dates.dt.strftime("%Y-%m-%d") == row["forecast_date"]]
         if "joint_validation_status" in forecasts:
             selected = forecasts.loc[group_dates.index, "joint_validation_status"]

@@ -5,6 +5,9 @@ import json
 import os
 from copy import deepcopy
 from pathlib import Path
+from time import monotonic
+
+import pandas as pd
 
 from .ingestion import ResearchStore, _open_source, _source_path, load_portfolio
 from .providers import enrich_bundle
@@ -34,20 +37,47 @@ def distinct_databases(config):
         raise ValueError("Source holdings and research must use different database files.")
 
 
-def load_inputs(config, as_of=None, refresh=False, *, supplemental=None, account_ids=None):
-    from portfolio_research.calendar import decision_context
+def load_inputs(
+    config,
+    as_of=None,
+    refresh=False,
+    *,
+    supplemental=None,
+    account_ids=None,
+    review_kind="historical",
+    generated_at=None,
+):
+    """Load dated inputs for a historical month-end review or a current review.
 
+    A current review takes the newest completed collection received by the generation
+    instant and observes the last completed session; a historical review keeps the
+    month-end contract and only accepts receipts through its decision date. The calendar
+    owns the kind/date contract and its error messages.
+    """
+    from portfolio_research.calendar import review_context
+
+    timeline = review_context(review_kind, as_of=as_of, generated_at=generated_at)
     distinct_databases(config)
-    timeline = decision_context(as_of)
+    current = review_kind == "current"
     as_of = timeline["decision_date"]
     c = deepcopy(config)
     c["data"]["refresh_network"] = bool(refresh)
     if is_collector(c["source"]["path"]):
         from portfolio_research.adapter import load_collector
 
-        bundle = load_collector(c["source"]["path"], as_of, supplemental, account_ids)
+        bundle = load_collector(
+            c["source"]["path"],
+            as_of,
+            supplemental,
+            account_ids,
+            receipt_through=timeline["requested_date"] if current else None,
+            receipt_before=timeline["generated_at"] if current else None,
+        )
     else:
         bundle = load_portfolio(c, as_of)
+    received = bundle.get("collector", {}).get("collection_received_at")
+    if received:
+        timeline["collection_received_at"] = received
     bundle["timeline"] = timeline
     return enrich_bundle(bundle, c, as_of)
 
@@ -66,14 +96,49 @@ def save_analysis(result, config, bundle):
     return archived
 
 
+def _settle_execution(result, bundle, started):
+    """Move a current review's execution past the moment its result exists.
+
+    Completion is measured on the generation clock (generation time plus monotonic
+    elapsed time), so an explicitly supplied generation time stays self-consistent.
+    """
+    from portfolio_research.calendar import settle_execution
+
+    timeline = bundle["timeline"]
+    elapsed = pd.Timedelta(seconds=max(monotonic() - started, 0.0))
+    completed = pd.Timestamp(timeline["generated_at"]) + elapsed
+    settled = settle_execution(timeline, completed.isoformat())
+    if settled == timeline:
+        return
+    bundle["timeline"] = settled
+    result["timeline"] = deepcopy(settled)
+
+
 def run_analysis(
-    config, as_of=None, refresh=False, save=True, *, supplemental=None, workspace=None
+    config,
+    as_of=None,
+    refresh=False,
+    save=True,
+    *,
+    supplemental=None,
+    workspace=None,
+    review_kind="historical",
+    generated_at=None,
 ):
     from portfolio_research.application import analyze_review
 
-    bundle = load_inputs(config, as_of, refresh, supplemental=supplemental)
+    started = monotonic()
+    bundle = load_inputs(
+        config,
+        as_of,
+        refresh,
+        supplemental=supplemental,
+        review_kind=review_kind,
+        generated_at=generated_at,
+    )
     bundle["workspace"] = deepcopy(workspace or {})
     result = analyze_review(bundle, config)
+    _settle_execution(result, bundle, started)
     if save:
         result = save_analysis(result, config, bundle)
     return result, bundle

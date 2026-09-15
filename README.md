@@ -34,6 +34,8 @@ Selections persist. Unchecked accounts retain history but are excluded from pull
 
 ## Monthly review
 
+**Overview** shows the newest collected holdings as soon as a collection finishes, with no saved review or mandate required. Each account lists its capture and server receipt times; a receipt time is not a quote time. Captured amounts are shown as observed, grouped by explicit value currency without FX conversion and never labeled NAV, and the source valuation time stays unknown unless dated account evidence attests it. The last completed analysis appears separately with its own market date, information cutoff and generation time, so current holdings and saved reviews never share a denominator.
+
 Use **Data** to reconcile dated account NAV/cash, currency and security identity. Import missing facts and scenarios through validated forms/CSV/JSON. Use **Settings** to supply your actual mandate, account permissions and explicit sleeve allocation.
 
 Reporting and combined totals default to USD. Original amount currencies are preserved; automatic FX conversion is not yet implemented, so mixed or unknown value currencies still require verified conversion before aggregation.

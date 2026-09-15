@@ -87,7 +87,7 @@ test('one accessible application shell preserves collector controls and loads ex
   for (const page of ['overview','holdings','research','scenarios','review','data','settings']) {
     assert.match(html, new RegExp(`data-page="${page}"`));
   }
-  for (const id of ['sources','refresh','connect','discover','disconnect','snapshot-panel','snapshot-select','records','pairing-key']) {
+  for (const id of ['sources','refresh','connect','discover','disconnect','snapshot-panel','snapshot-select','records','pairing-key','current-accounts','current-dates','analysis-caption']) {
     assert.equal([...html.matchAll(new RegExp(`id="${id}"`, 'g'))].length, 1);
   }
   assert.ok(!/<iframe|\sonclick=/.test(html));

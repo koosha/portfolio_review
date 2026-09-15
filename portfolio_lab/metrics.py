@@ -61,9 +61,17 @@ def _frame(bundle: dict, name: str) -> pd.DataFrame:
 
 
 def _cutoff(bundle: dict) -> pd.Timestamp:
-    from portfolio_research.calendar import information_cutoff
+    from portfolio_research.calendar import bundle_cutoff
 
-    return information_cutoff(bundle["as_of"])
+    return bundle_cutoff(bundle)
+
+
+def _available_times(values: pd.Series) -> pd.Series:
+    """Parse availability stamps; a bare calendar date starts its New York day."""
+    from portfolio_research.calendar import new_york_dates
+
+    parsed = pd.to_datetime(values, errors="coerce", utc=True, format="mixed")
+    return new_york_dates(values, parsed)
 
 
 def _observed(
@@ -76,19 +84,17 @@ def _observed(
     if frame.empty or date_column not in frame:
         return frame.iloc[0:0].copy()
     cutoff = _cutoff(bundle)
-    dates = pd.to_datetime(frame[date_column], errors="coerce", utc=True, format="mixed")
+    dates = _available_times(frame[date_column])
     mask = dates.notna() & dates.le(cutoff)
     if publication_column and publication_column not in frame:
         return frame.iloc[0:0].copy()
     if publication_column:
-        available = pd.to_datetime(
-            frame[publication_column], errors="coerce", utc=True, format="mixed"
-        )
+        available = _available_times(frame[publication_column])
         mask &= available.notna() & available.le(cutoff)
     if config and config.get("data", {}).get("require_received_by_cutoff", False):
         if "received_at" not in frame:
             return frame.iloc[0:0].copy()
-        received = pd.to_datetime(frame.received_at, errors="coerce", utc=True, format="mixed")
+        received = _available_times(frame.received_at)
         mask &= received.notna() & received.le(cutoff)
     return frame.loc[mask].copy()
 

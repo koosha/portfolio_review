@@ -213,6 +213,8 @@ def make_handler(store, browser, port, research=None):
                 self.reply(200, research.status())
             elif path == "/api/research/supplemental":
                 self.reply(200, research.supplemental())
+            elif path == "/api/research/current":
+                self.reply(200, research.current())
             elif path.startswith("/api/research/runs/"):
                 self.reply(200, research.run(path.rsplit("/", 1)[-1]))
             elif path.startswith("/api/research/jobs/"):

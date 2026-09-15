@@ -49,18 +49,22 @@ def macro_panel(bundle, config):
     result = []
     if frame.empty:
         return result
-    from portfolio_research.calendar import information_cutoff
+    from portfolio_research.calendar import bundle_cutoff, new_york_dates
 
-    cutoff = information_cutoff(bundle["as_of"])
+    cutoff = bundle_cutoff(bundle)
     f = frame.copy()
     f["_date"] = pd.to_datetime(f["date"], utc=True, errors="coerce")
     f["_vintage"] = pd.to_datetime(f["vintage_date"], utc=True, errors="coerce")
     f["value"] = pd.to_numeric(f["value"], errors="coerce")
-    f = f[(f._date <= cutoff) & (f._vintage <= cutoff)].dropna(subset=["value"])
+    # Bare dates start their New York day for the cutoff; ordering keeps the parsed values.
+    observed = new_york_dates(f["date"], f["_date"]) <= cutoff
+    vintaged = new_york_dates(f["vintage_date"], f["_vintage"]) <= cutoff
+    f = f[observed & vintaged].dropna(subset=["value"])
     if config["data"]["require_received_by_cutoff"]:
         if "received_at" not in f:
             raise ValueError("Strict receipt policy requires macro received_at timestamps")
-        f = f[pd.to_datetime(f.received_at, utc=True, errors="coerce") <= cutoff]
+        received = pd.to_datetime(f.received_at, utc=True, errors="coerce")
+        f = f[new_york_dates(f.received_at, received) <= cutoff]
     for sid, group in f.groupby("series_id"):
         group = group.sort_values(["_date", "_vintage"]).drop_duplicates("date", keep="last")
         latest = group.iloc[-1]
@@ -163,7 +167,10 @@ def analyze(bundle: dict, config: dict) -> dict:
     )
     forecasts = bundle.get("forecasts", pd.DataFrame()).copy()
     if not forecasts.empty:
-        dates = pd.to_datetime(forecasts.forecast_date, utc=True, errors="coerce")
+        from portfolio_research.calendar import new_york_dates
+
+        parsed = pd.to_datetime(forecasts.forecast_date, utc=True, errors="coerce")
+        dates = new_york_dates(forecasts.forecast_date, parsed)
         horizon = pd.to_numeric(forecasts.horizon_months, errors="coerce")
         forecasts = forecasts[
             (dates <= metrics._cutoff(bundle)) & (horizon == config["allocation"]["horizon_months"])

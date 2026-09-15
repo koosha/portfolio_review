@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -20,11 +21,16 @@ from portfolio_lab.pipeline import (
 )
 
 from .application import validate_workspace, validate_workspace_revision
-from .calendar import decision_context
+from .calendar import REVIEW_KINDS, decision_context, review_context
 from .public import _safe_text, public_config, public_result, public_workspace
 from .repository import ResearchRepository
 
 INPUT_KINDS = {"prices", "fundamentals", "macro", "fund_holdings", "forecasts", "universe"}
+DEFAULT_REVIEW_KIND = "current"
+SUBMITTED_REVIEW_KIND = "historical"
+UNSUPPORTED_CURRENT = "Current holdings come from the Yahoo collector; this configured source is analyzed only through saved reviews."
+CURRENT_NOTE = "Current holdings and the last completed analysis are dated separately; they do not share a denominator."
+UNREADABLE_COLLECTION = "Collector holdings could not be read. Saved reviews remain available."
 
 
 def default_config(directory):
@@ -88,7 +94,65 @@ class ResearchService:
                 for key in ("mode", "price_provider", "sec_enabled", "fred_enabled")
             },
             "collector_busy": bool(self.collector_busy()),
+            "latest_collection": self._latest_collection(),
+            "review_kinds": list(REVIEW_KINDS),
+            "default_review_kind": DEFAULT_REVIEW_KIND,
             "schema_version": 1,
+        }
+
+    def _latest_collection(self):
+        """Receipt facts of the newest collection; a read failure never breaks status."""
+        empty = {"collection_received_at": None, "account_count": None}
+        if not self.collector:
+            return {**empty, "status": "unsupported"}
+        from .current import current_snapshot
+
+        try:
+            snapshot = current_snapshot(self.config["source"]["path"])
+        except ValueError as exc:
+            return {**empty, "status": "unavailable", "error": _safe_text(str(exc))}
+        except (OSError, sqlite3.Error):
+            return {**empty, "status": "unavailable", "error": UNREADABLE_COLLECTION}
+        return {
+            "collection_received_at": snapshot["dates"]["collection_received_at"],
+            "status": snapshot["collection"]["status"],
+            "account_count": snapshot["collection"]["account_count"],
+        }
+
+    def current(self):
+        """Newest collected holdings beside the last completed analysis, each with its dates."""
+        if not self.collector:
+            return {"supported": False, "reason": UNSUPPORTED_CURRENT}
+        from .current import current_snapshot
+
+        snapshot = current_snapshot(
+            self.config["source"]["path"], supplemental=self.store.latest("supplemental")
+        )
+        return {
+            "supported": True,
+            "current": snapshot,
+            "latest_run": self._latest_run(),
+            "note": CURRENT_NOTE,
+        }
+
+    def _latest_run(self):
+        runs = self.store.list_runs()
+        if not runs:
+            return None
+        row = runs[0]
+        saved = self.store.load_run(row["run_id"])
+        metadata = saved.get("metadata", {})
+        timeline = saved.get("timeline") or {}
+        return {
+            "run_id": row["run_id"],
+            "as_of": row["as_of"],
+            "created_at": row["created_at"],
+            "review_kind": metadata.get("review_kind", SUBMITTED_REVIEW_KIND),
+            "valuation_date": metadata.get("valuation_date"),
+            "collection_received_at": metadata.get("collection_received_at"),
+            "information_cutoff": metadata.get("information_cutoff")
+            or timeline.get("information_cutoff")
+            or timeline.get("decision_cutoff"),
         }
 
     def run(self, run_id):
@@ -105,7 +169,7 @@ class ResearchService:
             raise ValueError("Send an object describing the research job.")
         kind = payload.get("kind")
         allowed = {
-            "monthly": {"as_of", "refresh", "patch", "workspace"},
+            "monthly": {"as_of", "refresh", "patch", "workspace", "review_kind"},
             "preview": {"base_run_id", "patch", "workspace"},
             "save": {"preview_job_id"},
             "evaluate": {"run_id", "prices_csv", "evaluation_date"},
@@ -132,8 +196,14 @@ class ResearchService:
                 )
             if type(request.get("refresh", False)) is not bool:
                 raise ValueError("refresh must be true or false.")
-            if request.get("as_of"):
-                decision_context(request["as_of"])
+            review_kind = request.get("review_kind", SUBMITTED_REVIEW_KIND)
+            # The calendar owns the kind/date contract: it rejects unknown kinds, an explicit
+            # date on a current review, and malformed historical dates.
+            review_context(review_kind, as_of=request.get("as_of"))
+            if review_kind == SUBMITTED_REVIEW_KIND:
+                # The stored request is hashed under its request key. Omitting the default keeps
+                # stable scheduler keys created before review kinds existed valid on retry.
+                request.pop("review_kind", None)
             request["resolved_config"] = dashboard_patch(
                 self.resolved_config(), request.pop("patch", {})
             )
@@ -184,6 +254,7 @@ class ResearchService:
                     save=False,
                     supplemental=request.get("supplemental"),
                     workspace=request.get("workspace"),
+                    review_kind=request.get("review_kind", SUBMITTED_REVIEW_KIND),
                 )
                 result["run_id"] = job_id
                 result = save_analysis(result, config, bundle)

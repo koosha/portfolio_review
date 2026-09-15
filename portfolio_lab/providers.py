@@ -554,9 +554,15 @@ def _merge(bundle: dict, name: str, frame: pd.DataFrame) -> None:
 
 def _filter_frames(bundle: dict, as_of: str, require_received: bool = False) -> None:
     # Match metrics/allocation exactly, including daylight-saving time.
-    from portfolio_research.calendar import information_cutoff
+    from portfolio_research.calendar import bundle_cutoff, information_cutoff, new_york_dates
 
-    cutoff = information_cutoff(as_of)
+    cutoff = bundle_cutoff(bundle) if bundle.get("timeline") else information_cutoff(as_of)
+
+    def available_times(values):
+        # A bare calendar date starts its New York day, never the prior New York evening.
+        parsed = pd.to_datetime(values, utc=True, errors="coerce", format="mixed")
+        return new_york_dates(values, parsed)
+
     specs = {
         "prices": (
             ["date", "available_at"],
@@ -586,7 +592,7 @@ def _filter_frames(bundle: dict, as_of: str, require_received: bool = False) -> 
             continue
         valid = pd.Series(True, index=frame.index)
         for column in date_cols:
-            dates = pd.to_datetime(frame[column], utc=True, errors="coerce", format="mixed")
+            dates = available_times(frame[column])
             valid &= dates.notna() & (dates <= cutoff)
         if require_received:
             if "received_at" not in frame:
@@ -598,9 +604,7 @@ def _filter_frames(bundle: dict, as_of: str, require_received: bool = False) -> 
                 )
                 valid &= False
             else:
-                receipt_dates = pd.to_datetime(
-                    frame["received_at"], utc=True, errors="coerce", format="mixed"
-                )
+                receipt_dates = available_times(frame["received_at"])
                 valid &= receipt_dates.notna() & (receipt_dates <= cutoff)
         removed = int((~valid).sum())
         if removed:

@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from portfolio_research.calendar import decision_context
+from portfolio_research.calendar import decision_context, review_context
 from portfolio_research.prospective import (
     baseline_records,
     evaluate_comparators,
@@ -179,6 +179,23 @@ class ExactForecastTests(unittest.TestCase):
         result = evaluate_saved_forecasts(bundle, self.prices(), "2027-09-08")
         self.assertFalse(result["prospective_eligible"])
         self.assertIn("reconstruction", result["provenance"])
+
+    def test_bare_forecast_date_after_a_current_cutoff_is_not_frozen_before_it(self):
+        """Sunday 20:30 New York: a Monday-dated forecast was not made before the cutoff."""
+        codes, statuses = {}, {}
+        for day in ("2026-09-13", "2026-09-14"):
+            bundle = self.bundle()
+            bundle["as_of"] = "2026-09-11"
+            bundle["timeline"] = review_context("current", generated_at="2026-09-14T00:30:00Z")
+            bundle["forecasts"]["forecast_date"] = day
+            result = evaluate_saved_forecasts(bundle, self.prices(), "2027-09-20")
+            [row] = result["results"]
+            codes[day] = {issue["code"] for issue in row["issues"]}
+            statuses[day] = row["status"]
+        self.assertNotEqual(statuses["2026-09-13"], "invalid_forecast")
+        self.assertNotIn("FORECAST_AFTER_DECISION", codes["2026-09-13"])
+        self.assertEqual(statuses["2026-09-14"], "invalid_forecast")
+        self.assertIn("FORECAST_AFTER_DECISION", codes["2026-09-14"])
 
     def test_invalid_probabilities_stay_invalid_after_endpoint_matching(self):
         bundle = self.bundle()
