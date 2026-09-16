@@ -63,6 +63,89 @@ def _collector_fx(bundle, c, listings, live):
     )
 
 
+def _price_majors(prices) -> list[tuple[str, str]]:
+    """``(major currency, date)`` pairs the enriched price frame carries, subunits mapped."""
+    from portfolio_research.fx import MINOR_UNITS
+
+    if not isinstance(prices, pd.DataFrame) or prices.empty:
+        return []
+    if {"currency", "date"} - set(prices.columns):
+        return []
+    pairs = prices[["currency", "date"]].dropna().drop_duplicates()
+    out = []
+    for code, day in zip(pairs["currency"], pairs["date"]):
+        major = MINOR_UNITS[code][0] if code in MINOR_UNITS else code
+        observed = _day(day)
+        if isinstance(major, str) and observed is not None:
+            out.append((major, observed))
+    return out
+
+
+def _day(value) -> str | None:
+    """One price row's date as a plain ISO day, or ``None`` when it is not a date."""
+    try:
+        stamp = pd.Timestamp(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(stamp):
+        return None
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_localize(None)
+    return stamp.normalize().date().isoformat()
+
+
+def _unserved(rows, fx, presentation) -> set[str]:
+    """Currencies with no observation dated at or before some row that needs one.
+
+    A row whose rate is merely stale is already reported as a series gap; one with no
+    dated observation at all can never convert, so its currency is asked for again.
+    """
+    unserved = set()
+    for major, day in rows:
+        if major == presentation or major in unserved:
+            continue
+        try:
+            found = fx.latest(major, presentation, day)
+        except ValueError:
+            continue  # Not a convertible code; the row is reported as a gap.
+        if found is None:
+            unserved.add(major)
+    return unserved
+
+
+def _price_window(rows, start: str, end: str) -> tuple[str, str]:
+    """The FX window widened to every date the price frame actually carries."""
+    days = [day for _, day in rows]
+    return (min([start, *days]), max([end, *days])) if days else (start, end)
+
+
+def _price_fx(enriched, c, fx, live) -> tuple[object, list]:
+    """``(FX table for the price frame, new issues)``.
+
+    The held ledger's currencies do not cover a research candidate quoted abroad or a
+    price series with more history than the holdings, and an unconvertible price row is
+    dropped, so the series is asked for on its own terms before it is converted.
+    """
+    from portfolio_research.fx import FxTable
+    from portfolio_research.fx_providers import load_fx_table
+    from portfolio_research.normalize import fx_window
+
+    presentation = c.get("mandate", {}).get("base_currency")
+    if presentation is None:
+        return fx, []
+    rows = _price_majors(enriched.get("prices"))
+    wanted = _unserved(rows, fx, presentation)
+    if not wanted:
+        return fx, []
+    start, end = _price_window(rows, *fx_window(enriched, c))
+    issues = []
+    extra = load_fx_table(
+        c, sorted(wanted), start_date=start, end_date=end, refresh=live, issues=issues
+    )
+    records = [*fx.to_records(), *extra.to_records()]
+    return FxTable(records, max_age_days=c["data"]["max_fx_age_days"]), issues
+
+
 def _normalize_collector(bundle, c, refresh, review_kind, timeline, supplemental):
     """``(presented bundle, FX table)``: listing identity and presentation before enrichment."""
     from portfolio_research.normalize import gather_listings, normalize_bundle
@@ -80,6 +163,21 @@ def _normalize_collector(bundle, c, refresh, review_kind, timeline, supplemental
         **gathered,
     )
     return presented, fx
+
+
+def _presented(enriched, c, fx, live):
+    """The enriched bundle with its price series converted at each row's own date.
+
+    Enriched closes carry the listing's own quote unit, and the series may reach
+    currencies and dates the held ledger never needed, so its FX is loaded for it.
+    """
+    from portfolio_research.normalize import present_prices
+
+    table, issues = _price_fx(enriched, c, fx, live)
+    if issues:
+        seen = enriched.get("issues") or []
+        enriched = {**enriched, "issues": [*seen, *(row for row in issues if row not in seen)]}
+    return present_prices(enriched, c, table)
 
 
 def load_inputs(
@@ -128,10 +226,7 @@ def load_inputs(
     enriched = enrich_bundle(bundle, c, as_of)
     if fx is None:
         return enriched
-    # Enriched closes carry the listing's own quote unit; convert them at each row's date.
-    from portfolio_research.normalize import present_prices
-
-    return present_prices(enriched, c, fx)
+    return _presented(enriched, c, fx, bool(refresh) and c["data"]["mode"] == "live")
 
 
 def save_analysis(result, config, bundle):

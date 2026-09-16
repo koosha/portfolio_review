@@ -517,6 +517,84 @@ class CurrentExceptionServiceTests(unittest.TestCase):
         # One supplemental version for the attestation and one for the resolution.
         self.assertEqual(len(self.service.store.records("supplemental")), 2)
 
+    def resolve_shop(self, listing_id="SHOP.TO"):
+        shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
+        self.service.save_resolution(
+            {
+                "key": shop["key"],
+                "kind": "security_listing",
+                "source_id": self.a,
+                "snapshot_id": self.snapshots[self.a],
+                "values": {"security_id": listing_id},
+            }
+        )
+        return self.service.store.latest("supplemental")["securities"]
+
+    def carry_mappings_and_attest(self, mappings, day=FRIDAY):
+        """Attest the account's valuation date while keeping the mappings already saved."""
+        self.service.import_input(
+            {
+                "kind": "supplemental",
+                "data": {
+                    "version": 1,
+                    "accounts": [
+                        {
+                            "source_id": self.a,
+                            "snapshot_id": self.snapshots[self.a],
+                            "valuation_date": day,
+                        }
+                    ],
+                    "securities": mappings,
+                    "tax_lots": [],
+                },
+            }
+        )
+
+    def test_a_resolution_dated_before_an_earlier_answer_leaves_one_mapping_per_date(self):
+        """A backwards valid_from must not reopen the symbol on the next collection."""
+        from portfolio_research.current import current_snapshot
+
+        first = self.resolve_shop()
+        self.assertEqual([row["valid_from"] for row in first], ["2026-09-13"])
+        self.carry_mappings_and_attest(first)
+        mappings = self.resolve_shop()
+        windows = sorted((row["valid_from"], row.get("valid_to")) for row in mappings)
+        self.assertEqual(windows, [(FRIDAY, "2026-09-12"), ("2026-09-13", None)])
+
+        supplemental = {"version": 1, "accounts": [], "securities": mappings, "tax_lots": []}
+        snapshot = current_snapshot(
+            self.service.config["source"]["path"],
+            supplemental=supplemental,
+            config=self.service.resolved_config(),
+        )
+        codes = {row["code"] for row in snapshot["exceptions"]}
+        self.assertNotIn("AMBIGUOUS_SECURITY_ALIAS", codes)
+        self.assertNotIn("UNRESOLVED_LISTING", {row["code"] for row in snapshot["open_exceptions"]})
+        shop = [row for row in snapshot["positions"] if row["symbol"] == "SHOP"]
+        self.assertEqual([row["security_id"] for row in shop], ["SHOP.TO"])
+        self.assertEqual([row["resolution_status"] for row in shop], ["resolved"])
+
+    def test_two_listings_dated_backwards_do_not_both_apply(self):
+        from portfolio_research import resolutions
+
+        later = {
+            "source_id": self.a,
+            "raw_symbol": "SHOP",
+            "security_id": "SHOP.TO",
+            "valid_from": "2026-09-13",
+        }
+        earlier = {**later, "security_id": "SHOP.NE", "valid_from": FRIDAY}
+        merged = resolutions.merged_securities(
+            {**resolutions.EMPTY_SUPPLEMENTAL, "securities": [later]}, earlier
+        )
+        applying = [
+            row
+            for row in merged["securities"]
+            if row["valid_from"] <= "2026-09-13"
+            and (not row.get("valid_to") or row["valid_to"] >= "2026-09-13")
+        ]
+        self.assertEqual([row["security_id"] for row in applying], ["SHOP.TO"])
+
     def test_a_resolution_that_would_leave_the_exception_open_is_not_written(self):
         from portfolio_research import resolutions
 

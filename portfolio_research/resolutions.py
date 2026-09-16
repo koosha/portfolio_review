@@ -165,12 +165,21 @@ def listing_mapping(config, record, values, valid_from, *, issues) -> dict:
     return {field: value for field, value in mapping.items() if value is not None}
 
 
+def _day_before(day) -> str:
+    return (date.fromisoformat(day) - timedelta(days=1)).isoformat()
+
+
 def merged_securities(latest, mapping) -> dict:
-    """Next supplemental version with ``mapping`` applying from its ``valid_from`` day."""
+    """Next supplemental version with ``mapping`` applying from its ``valid_from`` day.
+
+    A mapping may be dated before one the owner already gave, so the new answer is closed
+    the day before the earliest later mapping and every earlier one is closed the day
+    before it: exactly one mapping of a source symbol applies on any date.
+    """
     base = copy.deepcopy(latest) if latest else copy.deepcopy(EMPTY_SUPPLEMENTAL)
     start = mapping["valid_from"]
-    previous_day = (date.fromisoformat(start) - timedelta(days=1)).isoformat()
-    securities = []
+    previous_day = _day_before(start)
+    securities, later = [], []
     for row in base.get("securities", []):
         same_symbol = (row.get("source_id"), row.get("raw_symbol")) == (
             mapping["source_id"],
@@ -181,11 +190,14 @@ def merged_securities(latest, mapping) -> dict:
             continue
         if row.get("valid_from") == start:
             continue  # Replaced by the new mapping for the same day.
-        starts_before = not row.get("valid_from") or row["valid_from"] < start
+        if row.get("valid_from") and row["valid_from"] > start:
+            later.append(row["valid_from"])
+            securities.append(row)
+            continue
         open_on_start = not row.get("valid_to") or row["valid_to"] >= start
-        securities.append(
-            {**row, "valid_to": previous_day} if starts_before and open_on_start else row
-        )
+        securities.append({**row, "valid_to": previous_day} if open_on_start else row)
+    if later:
+        mapping = {**mapping, "valid_to": _day_before(min(later))}
     return {**base, "securities": [*securities, mapping]}
 
 

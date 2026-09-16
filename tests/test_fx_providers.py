@@ -3,6 +3,7 @@
 No network: ``portfolio_lab.providers._fetch_json`` and ``yfinance.Ticker`` are patched.
 """
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -592,6 +593,123 @@ class CachedWindowTests(_Case):
             )
         self.assertEqual(issues, [])
         self.assertEqual(cached, live)
+
+
+class ArchiveCoverageTests(_Case):
+    """A cache-only read is answered by coverage of the window, never by the newest end."""
+
+    WIDE = [("2018-12-24", "1.3600"), ("2021-08-02", "1.2500"), ("2023-12-29", "1.3230")]
+    NARROW = [("2021-09-01", "1.2600"), ("2026-09-11", "1.3900")]
+
+    def payload(self, days):
+        return {
+            "terms": VALET["terms"],
+            "seriesDetail": {"FXUSDCAD": VALET["seriesDetail"]["FXUSDCAD"]},
+            "observations": [{"d": day, "FXUSDCAD": {"v": rate}} for day, rate in days],
+        }
+
+    def archive(self, days, start, end, received):
+        with patch.object(providers, "_fetch_json", self.fake_fetch(self.payload(days))):
+            with patch.object(providers, "_now", lambda: received):
+                return bank_of_canada_observations(
+                    self.config, ["USD"], start, end, refresh=True, issues=[]
+                )
+
+    def cached(self, start, end, issues):
+        self.forbid_fetch()
+        return bank_of_canada_observations(
+            self.config, ["USD"], start, end, refresh=False, issues=issues
+        )
+
+    def test_an_older_wide_archive_answers_the_days_a_newer_narrow_one_never_held(self):
+        self.archive(self.WIDE, "2018-12-22", "2024-01-01", "2026-01-05T21:00:00+00:00")
+        self.archive(self.NARROW, "2021-09-01", "2026-09-13", "2026-09-13T21:00:00+00:00")
+        issues = []
+        cached = self.cached("2018-12-23", "2024-01-02", issues)
+        dates = sorted(record["date"] for record in cached if record["pair"] == "USDCAD")
+        self.assertEqual(dates, ["2018-12-24", "2021-08-02", "2021-09-01", "2023-12-29"])
+        self.assertEqual(issues, [])
+
+    def test_the_newer_archive_still_wins_on_a_day_both_cover(self):
+        self.archive(self.WIDE, "2018-12-22", "2024-01-01", "2026-01-05T21:00:00+00:00")
+        self.archive(
+            [("2021-08-02", "9.9999")], "2021-08-01", "2026-09-13", "2026-09-13T21:00:00+00:00"
+        )
+        cached = self.cached("2018-12-23", "2024-01-02", [])
+        rates = {r["date"]: r["rate"] for r in cached if r["pair"] == "USDCAD"}
+        self.assertEqual(rates["2021-08-02"], "9.9999")
+        self.assertEqual(rates["2018-12-24"], "1.3600")
+
+    def test_an_archive_holding_nothing_for_these_dates_is_reported_not_silent(self):
+        self.archive(
+            [("2026-09-11", "1.3900")], "2023-09-04", "2026-09-13", "2026-09-13T21:00:00+00:00"
+        )
+        issues = []
+        self.assertEqual(self.cached("2023-09-05", "2023-12-31", issues), [])
+        self.assertEqual([issue["code"] for issue in issues], ["FX_PROVIDER_FAILED"])
+        self.assertIn("refresh market data", issues[0]["message"])
+
+
+class CacheScanCostTests(_Case):
+    """One cache-only load indexes each provider directory once, whatever the pair count."""
+
+    def setUp(self):
+        super().setUp()
+        self.config = make_config(self.tmp_path, fx_providers=["yahoo"], mode="offline")
+        root = self.tmp_path / "cache" / "yahoo_fx"
+        root.mkdir(parents=True)
+        self.root = root
+
+    def archive(self, pair, start, end, closes):
+        payload = [{"Date": day, "Close": close} for day, close in closes]
+        raw = json.dumps(payload).encode()
+        name = f"{pair}_{start}_{end}"
+        (self.root / f"{name}.json").write_bytes(raw)
+        (self.root / f"{name}.source.json").write_text(
+            json.dumps(
+                {
+                    "key": name,
+                    "received_at": RECEIVED,
+                    "raw_path": str(self.root / f"{name}.json"),
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "source_id": f"yahoo_fx:{name}",
+                }
+            )
+        )
+
+    def counted(self):
+        from portfolio_research import provider_cache
+
+        calls = []
+        original = provider_cache.newest_sources
+
+        def counting(config, provider):
+            calls.append(provider)
+            return original(config, provider)
+
+        self.enterContext(patch.object(provider_cache, "newest_sources", counting))
+        return calls
+
+    def load(self, currencies):
+        return load_fx_table(
+            self.config, currencies, "2026-09-02", "2026-09-12", refresh=False, issues=[]
+        )
+
+    def test_the_provider_directory_is_indexed_once_however_many_pairs_are_asked_for(self):
+        currencies = ["CAD", "GBP", "EUR", "CHF", "JPY", "USD"]
+        for code in currencies:
+            if code != "USD":
+                self.archive(f"{code}USD", "2026-09-01", "2026-09-11", [("2026-09-10", 0.72)])
+        calls = self.counted()
+        table = self.load(currencies)
+        self.assertEqual(calls, ["yahoo_fx"])
+        self.assertEqual(table.latest("CAD", "USD", "2026-09-11")["rate"], "0.72")
+
+    def test_one_pair_costs_the_same_single_scan(self):
+        self.archive("CADUSD", "2026-09-01", "2026-09-11", [("2026-09-10", 0.72)])
+        calls = self.counted()
+        self.load(["CAD", "USD"])
+        self.assertEqual(calls, ["yahoo_fx"])
 
 
 if __name__ == "__main__":

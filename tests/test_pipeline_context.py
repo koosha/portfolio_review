@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+from copy import deepcopy
+from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
@@ -11,6 +13,7 @@ from portfolio_lab.ingestion import ResearchStore
 from portfolio_lab.pipeline import load_inputs, replay_analysis, run_analysis
 from portfolio_lab.providers import _filter_frames
 from portfolio_research.calendar import bundle_cutoff, review_context
+from portfolio_research.fx import FxTable
 from portfolio_research.service import default_config
 
 SUNDAY_RECEIPT = "2026-09-13T20:00:00+00:00"
@@ -307,3 +310,108 @@ class DateOnlyCutoffTests(unittest.TestCase):
         bundle["forecasts"] = frame
         _filter_frames(bundle, FRIDAY)
         self.assertEqual(bundle["forecasts"]["forecast_date"].tolist(), ["2026-09-10", FRIDAY])
+
+
+class PriceSeriesCurrencyTests(unittest.TestCase):
+    """The presented price series is converted with FX asked for on the series' own terms."""
+
+    EARLY = "2019-05-01"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = Store(self.temp.name)
+        self.source = self.store.add_source(
+            "USD account", url="https://finance.yahoo.com/portfolio/p_fixture_price_currency"
+        )
+        with patch("portfolio.storage.now", return_value=SUNDAY_RECEIPT):
+            batch = self.store.begin_batch([self.source])
+            self.store.ingest_table(self.source, table("DEMO"), batch_id=batch)
+        self.config = default_config(self.temp.name)
+        self.requested = []
+
+    def prices_csv(self, rows):
+        path = Path(self.temp.name) / "prices.csv"
+        header = "security_id,date,close,adjusted_close,currency,available_at,received_at\n"
+        lines = [
+            f"{security},{day},{close},{close},{currency},{day}T20:01:00Z,{day}T20:02:00Z\n"
+            for security, day, close, currency in rows
+        ]
+        path.write_text(header + "".join(lines), encoding="utf-8")
+        config = deepcopy(self.config)
+        config["data"]["prices_csv"] = str(path)
+        return config
+
+    def loader(self, rates):
+        """Stub provider: records each request and serves ``rates`` for the asked currencies."""
+
+        def load(config, currencies, *, start_date, end_date, refresh, issues):
+            self.requested.append(
+                {"currencies": sorted(currencies), "start": start_date, "end": end_date}
+            )
+            served = [
+                observation
+                for observation in rates
+                if observation["base"] in set(currencies)
+                and start_date <= observation["date"] <= end_date
+            ]
+            return FxTable(served, max_age_days=7)
+
+        return patch("portfolio_research.fx_providers.load_fx_table", side_effect=load)
+
+    @staticmethod
+    def rate(day, rate="0.7211"):
+        return {
+            "pair": "CADUSD",
+            "base": "CAD",
+            "quote": "USD",
+            "rate": rate,
+            "date": day,
+            "source_id": f"yahoo_fx:CADUSD:{day}",
+            "provider": "yahoo",
+            "received_at": SUNDAY_RECEIPT,
+        }
+
+    def load(self, config, rates):
+        with self.loader(rates):
+            return load_inputs(config, review_kind="current", generated_at=SUNDAY_GENERATED)
+
+    def series(self, bundle, security_id):
+        prices = bundle["prices"]
+        return prices[prices["security_id"] == security_id]
+
+    def test_a_price_row_in_a_currency_no_holding_uses_is_converted_not_dropped(self):
+        config = self.prices_csv(
+            [
+                ("DEMO", "2026-09-10", "200", "USD"),
+                ("RY.TO", "2026-09-10", "180", "CAD"),
+                ("RY.TO", FRIDAY, "181", "CAD"),
+            ]
+        )
+        bundle = self.load(config, [self.rate("2026-09-10"), self.rate(FRIDAY)])
+        candidate = self.series(bundle, "RY.TO")
+        self.assertEqual(len(candidate), 2)
+        self.assertEqual(set(candidate["currency"]), {"USD"})
+        self.assertEqual(set(candidate["local_currency"]), {"CAD"})
+        self.assertAlmostEqual(candidate["close"].tolist()[0], 180 * 0.7211, places=9)
+        self.assertEqual(len(self.series(bundle, "DEMO")), 1)
+        codes = {issue["code"] for issue in bundle["issues"]}
+        self.assertNotIn("FX_SERIES_GAPS", codes)
+        self.assertEqual([call["currencies"] for call in self.requested], [["CAD"]])
+
+    def test_price_history_older_than_the_fx_window_widens_the_request(self):
+        config = self.prices_csv(
+            [("RY.TO", self.EARLY, "150", "CAD"), ("RY.TO", "2026-09-10", "180", "CAD")]
+        )
+        bundle = self.load(config, [self.rate(self.EARLY, "0.7400"), self.rate("2026-09-10")])
+        candidate = self.series(bundle, "RY.TO")
+        self.assertEqual(len(candidate), 2)
+        self.assertLessEqual(self.requested[0]["start"], self.EARLY)
+        self.assertAlmostEqual(candidate["close"].tolist()[0], 150 * 0.74, places=9)
+        self.assertNotIn("FX_SERIES_GAPS", {issue["code"] for issue in bundle["issues"]})
+
+    def test_a_fully_presented_series_asks_no_provider(self):
+        config = self.prices_csv([("DEMO", "2026-09-10", "200", "USD")])
+        bundle = self.load(config, [])
+        self.assertEqual(self.requested, [])
+        self.assertEqual(len(self.series(bundle, "DEMO")), 1)

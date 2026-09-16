@@ -31,6 +31,14 @@ CROSS_CURRENCIES = ("USD", "CAD")
 FX_HISTORY_PADDING_DAYS = 10
 _CURRENCY = re.compile(r"[A-Za-z]{3}")
 FX_FIELDS = ("fx_rate", "fx_pair", "fx_observation_date", "fx_source_id")
+# Cash can be denominated apart from its account, so its conversion is evidenced apart too.
+CASH_FX_FIELDS = (
+    "cash_fx_rate",
+    "cash_fx_pair",
+    "cash_fx_observation_date",
+    "cash_fx_source_id",
+    "cash_fx_inverted",
+)
 EVIDENCE_FIELDS = (
     "value_currency_ratio",
     "value_currency_implied_rate",
@@ -724,6 +732,11 @@ def _cash_currency(account, held, currency, basis, context):
     return held_currency, "inferred_from_positions"
 
 
+def _cash_evidence(cash_fx):
+    """The cash conversion's own FX evidence, kept apart from the NAV's rate."""
+    return {f"cash_{name}": value for name, value in (cash_fx or {}).items()}
+
+
 def _normalize_account(account, held, context):
     """``(account row, converted cash or None, unconverted flag)``."""
     currency, basis = _account_currency(account, held, context)
@@ -746,7 +759,11 @@ def _normalize_account(account, held, context):
         "total_value_usd": nav,
         **dict.fromkeys(FX_FIELDS),
         "fx_inverted": None,
-        **(cash_fx or nav_fx),
+        # The row's own rate evidences its NAV; it stands in for cash only when no NAV
+        # was converted, so a reader never reconciles a NAV against the cash's pair.
+        **(nav_fx or cash_fx),
+        **dict.fromkeys(CASH_FX_FIELDS),
+        **_cash_evidence(cash_fx),
         "presentation_currency": context["presentation"],
         "currency": currency,
     }

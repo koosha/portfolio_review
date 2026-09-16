@@ -33,6 +33,7 @@ VALET_CURRENCIES = frozenset(
 )
 ANCHOR_SERIES = "FXUSDCAD"
 _LABELS = {"bank_of_canada": "Bank of Canada", "yahoo": "Yahoo"}
+_CACHES = {"bank_of_canada": BOC_CACHE, "yahoo": YAHOO_CACHE}
 
 
 def _currencies(values) -> list[str]:
@@ -211,52 +212,101 @@ def _key_window(key: str):
 
 
 def _archived_windows(config, provider: str):
-    """``(key, start, end, tail)`` of every archived response, newest window first."""
-    from .provider_cache import newest_sources
+    """``(key, start, end, tail, received_at)`` of every archived response, newest first.
 
+    One scan answers for every pair of a presentation: an open cache scan is reused
+    rather than re-reading the provider directory once per pair.
+    """
+    from .provider_cache import newest_sources, scanned_sources
+
+    index = scanned_sources(provider)
+    if index is None:
+        index = newest_sources(config, provider)
     windows = []
-    for key, source in newest_sources(config, provider).items():
+    for key, source in index.items():
         parsed = _key_window(key)
         if parsed is None:
             continue
         start, end, tail = parsed
         windows.append((key, start, end, tail, source.get("received_at") or ""))
     windows.sort(key=lambda row: (row[2], row[4]), reverse=True)
-    return [(key, start, end, tail) for key, start, end, tail, _ in windows]
+    return windows
 
 
-def _covering_key(config, provider: str, start, end, wanted: str, score=None) -> str | None:
-    """Newest archived key whose window overlaps this one and answers ``wanted``."""
-    best, best_score = None, 0
-    for key, archived_start, archived_end, tail in _archived_windows(config, provider):
+def _distinct(records: list[dict]) -> list[dict]:
+    """One observation per pair and date; archives read newest first, so the first wins."""
+    seen, kept = set(), []
+    for record in records:
+        key = (record["pair"], record["date"])
+        if key not in seen:
+            seen.add(key)
+            kept.append(record)
+    return kept
+
+
+def _uncovered(ranges, window) -> list[tuple[str, str]]:
+    """The parts of ``ranges`` this archived window leaves unanswered."""
+    start, end = window
+    remaining = []
+    for first, last in ranges:
+        if end < first or start > last:
+            remaining.append((first, last))
+            continue
+        if first < start:
+            remaining.append((first, _shift(start, -1)))
+        if last > end:
+            remaining.append((_shift(end, 1), last))
+    return remaining
+
+
+def _shift(day: str, days: int) -> str:
+    return (date.fromisoformat(day) + timedelta(days=days)).isoformat()
+
+
+def _covering_keys(config, provider: str, start, end, score) -> list[str]:
+    """Archived keys that together answer ``[start, end]``, richest and newest first.
+
+    Coverage decides, not the newest window end: a narrow recent archive answers only
+    its own days, and an older wide one still supplies the days it alone holds.
+    """
+    candidates = []
+    for key, archived_start, archived_end, tail, _ in _archived_windows(config, provider):
         if archived_start > str(end) or archived_end < str(start):
             continue  # A window that never overlaps cannot answer for these dates.
-        found = score(tail) if score else int(tail == wanted)
-        if found > best_score:
-            best, best_score = key, found
-    return best
+        found = score(tail)
+        if found > 0:
+            candidates.append((-found, key, archived_start, archived_end))
+    candidates.sort(key=lambda row: row[0])
+    needed, chosen = [(str(start), str(end))], []
+    for _, key, archived_start, archived_end in candidates:
+        if not needed:
+            break
+        remaining = _uncovered(needed, (archived_start, archived_end))
+        if remaining != needed:
+            chosen.append(key)
+            needed = remaining
+    return chosen
 
 
-def _cached_valet(config, series: list[str], start, end):
-    """The archived response for this window, else the newest overlapping one."""
-    from portfolio_lab import providers
+def _cached_valet(config, series: list[str], start, end) -> list[tuple]:
+    """The archived response for this window, else every overlapping one that covers it."""
+    from .provider_cache import cached_response
 
     key = _valet_key(start, end, series)
     try:
-        return providers._cached(config, BOC_CACHE, key)
+        return [cached_response(config, BOC_CACHE, key)]
     except FileNotFoundError:
         wanted = set(series)
-        found = _covering_key(
+        found = _covering_keys(
             config,
             BOC_CACHE,
             start,
             end,
-            "-".join(series),
             score=lambda tail: len(wanted & set(tail.split("-"))),
         )
-        if found is None:
+        if not found:
             raise
-        return providers._cached(config, BOC_CACHE, found)
+        return [cached_response(config, BOC_CACHE, key) for key in found]
 
 
 def bank_of_canada_observations(
@@ -271,12 +321,19 @@ def bank_of_canada_observations(
     try:
         if refresh:
             answered, payload, received_at, source = _valet_live(config, series, start, end)
+            responses = [(payload, received_at, source)]
         else:
-            answered = series
-            payload, received_at, source = _cached_valet(config, series, start, end)
+            answered, responses = series, _cached_valet(config, series, start, end)
         _unsupported(issues, [name[2:5] for name in series if name not in answered])
         window = (start.isoformat(), end.isoformat())
-        return _valet_records(payload, answered, source["source_id"], received_at, window)
+        records = []
+        for payload, received_at, source in responses:
+            records += _valet_records(payload, answered, source["source_id"], received_at, window)
+        records = _distinct(records)
+        if not refresh and not records:
+            # A reused archive that holds nothing for these dates is a miss, not silence.
+            raise FileNotFoundError("No cached observations inside this window")
+        return records
     except Exception as exc:  # provider isolation: never raise, never echo the URL
         _failure(issues, "bank_of_canada", exc)
         return []
@@ -312,18 +369,18 @@ def _history_payload(history) -> list[dict]:
     return rows
 
 
-def _cached_yahoo(config, base: str, quote: str, start, end):
-    """The archived closes for this window, else the newest overlapping ones for the pair."""
-    from portfolio_lab import providers
+def _cached_yahoo(config, base: str, quote: str, start, end) -> list[tuple]:
+    """The archived closes for this window, else every overlapping archive that covers it."""
+    from .provider_cache import cached_response
 
     pair = base + quote
     try:
-        return providers._cached(config, YAHOO_CACHE, f"{pair}_{start}_{end}")
+        return [cached_response(config, YAHOO_CACHE, f"{pair}_{start}_{end}")]
     except FileNotFoundError:
-        found = _covering_key(config, YAHOO_CACHE, start, end, pair)
-        if found is None:
+        found = _covering_keys(config, YAHOO_CACHE, start, end, lambda tail: int(tail == pair))
+        if not found:
             raise
-        return providers._cached(config, YAHOO_CACHE, found)
+        return [cached_response(config, YAHOO_CACHE, key) for key in found]
 
 
 def _yahoo_records(
@@ -409,15 +466,26 @@ def yahoo_fx_observations(config, pairs, start_date, end_date, *, refresh, issue
     records = []
     for base, quote in checked:
         try:
-            if refresh:
-                payload, received_at, source = _yahoo_history(config, yf, base, quote, start, end)
-            else:
-                payload, received_at, source = _cached_yahoo(config, base, quote, start, end)
-            records += _yahoo_records(
-                payload, base, quote, source["source_id"], received_at, window
-            )
+            records += _pair_records(config, yf, base, quote, (start, end), window, refresh)
         except Exception as exc:  # per-pair isolation; never echo provider messages
             _failure(issues, "yahoo", exc, pair=base + quote)
+    return records
+
+
+def _pair_records(config, yf, base: str, quote: str, dates, window, refresh) -> list[dict]:
+    """One pair's observations inside ``window``, from a refresh or the archives."""
+    start, end = dates
+    if refresh:
+        responses = [_yahoo_history(config, yf, base, quote, start, end)]
+    else:
+        responses = _cached_yahoo(config, base, quote, start, end)
+    records = []
+    for payload, received_at, source in responses:
+        records += _yahoo_records(payload, base, quote, source["source_id"], received_at, window)
+    records = _distinct(records)
+    if not refresh and not records:
+        # A reused archive that holds nothing for these dates is a miss, not silence.
+        raise FileNotFoundError("No cached closes inside this window")
     return records
 
 
@@ -429,9 +497,24 @@ def _yahoo_pairs(currencies: list[str], presentation: str) -> list[tuple[str, st
 
 
 def load_fx_table(config, currencies, start_date, end_date, *, refresh, issues) -> FxTable:
-    """Collect observations from ``data.fx_providers`` in order (first per pair/date wins)."""
+    """Collect observations from ``data.fx_providers`` in order (first per pair/date wins).
+
+    A cache-only load indexes each provider directory once, so its cost does not grow
+    with the number of currency pairs a presentation needs.
+    """
+    from .provider_cache import scanned
+
     data = config["data"]
     live = bool(refresh) and data.get("mode") == "live"
+    if live:
+        return _fx_table(config, currencies, start_date, end_date, live=True, issues=issues)
+    caches = [_CACHES[name] for name in data["fx_providers"] if name in _CACHES]
+    with scanned(config, *caches):
+        return _fx_table(config, currencies, start_date, end_date, live=False, issues=issues)
+
+
+def _fx_table(config, currencies, start_date, end_date, *, live, issues) -> FxTable:
+    data = config["data"]
     presentation = _major(config.get("mandate", {}).get("base_currency", "USD"), "base_currency")
     wanted = _currencies(currencies)
     observations: list[dict] = []

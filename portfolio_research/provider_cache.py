@@ -95,9 +95,29 @@ def scanning(provider: str) -> bool:
     return isinstance(index, dict) and provider in index
 
 
+def scanned_sources(provider: str) -> dict | None:
+    """The active scan's whole index for a provider, or ``None`` when none is open."""
+    index = getattr(_ACTIVE, "index", None)
+    if not isinstance(index, dict):
+        return None
+    return index.get(provider)
+
+
 def scanned_source(provider: str, key: str) -> dict | None:
     """The newest sidecar for a key from the active scan, or ``None``."""
     index = getattr(_ACTIVE, "index", None)
     if not isinstance(index, dict):
         return None
     return index.get(provider, {}).get(key)
+
+
+def cached_response(config, provider: str, key: str):
+    """``(payload, received_at, source)`` for a key, from an open scan when there is one."""
+    from portfolio_lab import providers
+
+    if not scanning(provider):
+        return providers._cached(config, provider, key)
+    source = scanned_source(provider, key)
+    if source is None:
+        raise FileNotFoundError("No compatible cached provider response")
+    return read_payload(config, provider, source)
