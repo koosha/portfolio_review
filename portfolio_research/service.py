@@ -2,7 +2,6 @@
 
 import hashlib
 import io
-import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -22,15 +21,32 @@ from portfolio_lab.pipeline import (
 
 from .application import validate_workspace, validate_workspace_revision
 from .calendar import REVIEW_KINDS, decision_context, review_context
-from .public import _safe_text, public_config, public_result, public_workspace
+from .public import _clean, _safe_text, public_config, public_result, public_workspace
 from .repository import ResearchRepository
 
+_LATEST = object()  # "the stored supplemental", distinct from an explicit None.
 INPUT_KINDS = {"prices", "fundamentals", "macro", "fund_holdings", "forecasts", "universe"}
 DEFAULT_REVIEW_KIND = "current"
 SUBMITTED_REVIEW_KIND = "historical"
 UNSUPPORTED_CURRENT = "Current holdings come from the Yahoo collector; this configured source is analyzed only through saved reviews."
 CURRENT_NOTE = "Current holdings and the last completed analysis are dated separately; they do not share a denominator."
 UNREADABLE_COLLECTION = "Collector holdings could not be read. Saved reviews remain available."
+
+
+def _mapping_date(snapshot, record):
+    """The date a listing mapping must apply from to answer this snapshot.
+
+    ``load_collector`` chooses a mapping by the account's attested valuation date when it
+    has one, so a mapping dated on the review day would never reach that snapshot.
+    """
+    requested = snapshot["timeline"]["requested_date"]
+    accounts = snapshot.get("accounts") or []
+    valuations = [
+        row.get("valuation_date")
+        for row in accounts
+        if row.get("account_id") == record.get("account_id") and row.get("valuation_date")
+    ]
+    return min([requested, *valuations])
 
 
 def default_config(directory):
@@ -101,39 +117,129 @@ class ResearchService:
         }
 
     def _latest_collection(self):
-        """Receipt facts of the newest collection; a read failure never breaks status."""
+        """Receipt facts of the newest collection; a read failure never breaks status.
+
+        Only the collection's own dates are needed here, so this never runs listing
+        identity or FX presentation: status is polled on every page load.
+        """
         empty = {"collection_received_at": None, "account_count": None}
         if not self.collector:
             return {**empty, "status": "unsupported"}
-        from .current import current_snapshot
+        from .adapter import load_collector
+        from .calendar import review_context
+        from .current import collection_facts
 
         try:
-            snapshot = current_snapshot(self.config["source"]["path"])
+            timeline = review_context("current")
+            bundle = load_collector(
+                self.config["source"]["path"],
+                timeline["decision_date"],
+                receipt_through=timeline["requested_date"],
+                receipt_before=timeline["generated_at"],
+            )
+            return collection_facts(bundle)
         except ValueError as exc:
             return {**empty, "status": "unavailable", "error": _safe_text(str(exc))}
-        except (OSError, sqlite3.Error):
+        except Exception:  # A cache or database failure must never break the status page.
             return {**empty, "status": "unavailable", "error": UNREADABLE_COLLECTION}
-        return {
-            "collection_received_at": snapshot["dates"]["collection_received_at"],
-            "status": snapshot["collection"]["status"],
-            "account_count": snapshot["collection"]["account_count"],
-        }
 
     def current(self):
         """Newest collected holdings beside the last completed analysis, each with its dates."""
         if not self.collector:
             return {"supported": False, "reason": UNSUPPORTED_CURRENT}
-        from .current import current_snapshot
-
-        snapshot = current_snapshot(
-            self.config["source"]["path"], supplemental=self.store.latest("supplemental")
-        )
         return {
             "supported": True,
-            "current": snapshot,
+            "current": self._current_snapshot(),
             "latest_run": self._latest_run(),
             "note": CURRENT_NOTE,
         }
+
+    def _current_snapshot(self, config=None, supplemental=_LATEST):
+        """Current holdings with identity and USD presentation from cached providers."""
+        from .current import current_snapshot
+
+        if supplemental is _LATEST:
+            supplemental = self.store.latest("supplemental")
+        return current_snapshot(
+            self.config["source"]["path"],
+            supplemental=supplemental,
+            config=config or self.resolved_config(),
+        )
+
+    def exceptions(self):
+        """Open identity and currency exceptions of the newest collection."""
+        if not self.collector:
+            return {
+                "supported": False,
+                "reason": UNSUPPORTED_CURRENT,
+                "exceptions": [],
+                "count": 0,
+                "generated_at": None,
+            }
+        snapshot = self._current_snapshot()
+        records = snapshot["open_exceptions"]
+        return {
+            "supported": True,
+            "exceptions": records,
+            "count": len(records),
+            "generated_at": snapshot["dates"]["generated_at"],
+        }
+
+    def save_resolution(self, payload):
+        """Resolve one open exception by appending the next supplemental version.
+
+        The payload ``{key, kind, source_id, snapshot_id, values}`` must name an exception
+        that is open now. Account kinds set facts on the exception's snapshot; a listing
+        choice applies from the date this snapshot is evaluated on, so an account with an
+        attested valuation date is answered too. An answer that would leave the exception
+        open is refused before anything is written, and the resolution is recorded beside
+        the supplemental version it produced.
+        """
+        from .adapter import validate_supplemental
+        from .resolutions import (
+            append_resolution,
+            open_exception,
+            require_closed,
+            resolution_values,
+            validate_payload,
+        )
+
+        validate_payload(payload)
+        with self.lock:
+            config = self.resolved_config()
+            snapshot = self._current_snapshot(config) if self.collector else None
+            record = open_exception(payload, snapshot["open_exceptions"] if snapshot else [])
+            kind = record["resolution"]["kind"]
+            values = resolution_values(kind, payload.get("values"))
+            issues = []
+            supplemental = self._resolved_supplemental(
+                config, snapshot, record, kind, values, issues
+            )
+            validated = validate_supplemental(supplemental)
+            answered = self._current_snapshot(config, supplemental=validated)
+            remaining = answered["open_exceptions"]
+            require_closed(record["key"], remaining)
+            supplemental_id, record_id = append_resolution(
+                self.store, record, kind, values, validated
+            )
+        return {
+            "record_id": record_id,
+            "supplemental_record_id": supplemental_id,
+            "remaining": len(remaining),
+            "issues": _clean(issues),
+        }
+
+    def _resolved_supplemental(self, config, snapshot, record, kind, values, issues):
+        """The next supplemental version this answer produces, not yet written."""
+        from .resolutions import listing_mapping, merged_accounts, merged_securities
+
+        latest = self.store.latest("supplemental")
+        if kind != "security_listing":
+            return merged_accounts(latest, record, values)
+        mapping = listing_mapping(
+            config, record, values, _mapping_date(snapshot, record), issues=issues
+        )
+        return merged_securities(latest, mapping)
 
     def _latest_run(self):
         runs = self.store.list_runs()

@@ -94,7 +94,7 @@ function renderBrowser() {
   $('connection-intro').hidden = !!b.browser_open || state.sources.length>0;
   $('extension-path').value = b.extension_dir || '';
   $('pairing-key').value = b.pairing_key || '';
-  $('extension-version').textContent = `Extension: ${b.extension_version || 'not connected'} · Required: 1.1.6`;
+  $('extension-version').textContent = `Extension: ${b.extension_version || 'not connected'} · Required: 1.2.0`;
   $('browser-badge').textContent = b.busy ? 'Working…' : b.setup_required ? 'Setup required' : b.browser_open ? 'Connected' : 'Chrome offline';
   $('browser-badge').className = 'badge' + (b.browser_open ? ' connected' : '');
   $('browser-message').textContent = b.message || '';

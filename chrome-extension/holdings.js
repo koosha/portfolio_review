@@ -49,6 +49,16 @@ export async function readYahooHoldings(expectedURL) {
   const sharesColumn=headers.findIndex(header=>['shares','quantity','shares held'].includes(normalized(header)));
   if(headers.length>80 || new Set(headers.map(normalized)).size!==headers.length)
     throw new Error('Holdings table has ambiguous columns: '+JSON.stringify(originalHeaders)+'. Previous holdings were kept.');
+  // Yahoo links each holding to its exact listing, e.g. /quote/RY.TO/. Remember
+  // that quote symbol per row without changing the displayed Symbol value.
+  const quoteSymbolOf=new WeakMap();
+  const quoteSymbol=link=>{
+    try {
+      const parts=new URL(String(link?.href || ''),location.href).pathname.split('/');
+      const index=parts.indexOf('quote');
+      return index<0 ? '' : decodeURIComponent(parts[index+1] || '').trim();
+    } catch {return '';}
+  };
   const readRows=()=>{
     stage='reading table rows';
     check(); table=findTable();
@@ -70,6 +80,7 @@ export async function readYahooHoldings(expectedURL) {
          && !/^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?|\((?:\d+(?:\.\d*)?|\.\d+)\))$/i.test(numeric))
         throw new Error(`Shares for ${values[symbolColumn]} contains unrecognized text ${JSON.stringify(shares).slice(0,180)}. Previous holdings were kept.`);
       records.push(values);
+      quoteSymbolOf.set(values,quote?quoteSymbol(quote):'');
     }
     return records;
   };
@@ -169,6 +180,7 @@ export async function readYahooHoldings(expectedURL) {
       // Retain every row for pagination reconciliation and keep its exact Shares
       // display in the raw snapshot. The importer excludes null quantities from
       // the positions view while retaining their other captured information.
+      const quoteSymbols=rows.map(row=>quoteSymbolOf.get(row) || '');
       let outputHeaders=headers, outputRows=rows;
       if(rows.some(row=>/^add$/i.test(row[sharesColumn]))) {
         const displayHeader='Yahoo Shares display';
@@ -181,9 +193,17 @@ export async function readYahooHoldings(expectedURL) {
           return values;
         });
       }
+      const listed=quoteSymbols.some(Boolean);
+      if(listed) {
+        const quoteHeader='Yahoo quote symbol';
+        if(outputHeaders.some(h=>normalized(h)===normalized(quoteHeader)))
+          throw new Error('Holdings table conflicts with the Yahoo quote symbol column. Previous holdings were kept.');
+        outputHeaders=[...outputHeaders,quoteHeader];
+        outputRows=outputRows.map((row,index)=>[...row,quoteSymbols[index]]);
+      }
       return {ok:true,url:location.href, table:{method:'yahoo-holdings-table-v1',headers:outputHeaders,rows:outputRows,page_count:pages,
         expected_count:expectedCount, completeness:expectedCount===null?'end-observed':'count-verified',
-        captured_at:new Date().toISOString()}};
+        captured_at:new Date().toISOString(),...(listed?{capture_version:2}:{})}};
     }
     next.click();
     const waitStarted=Date.now();

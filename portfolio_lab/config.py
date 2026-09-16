@@ -8,6 +8,8 @@ from copy import deepcopy
 from datetime import date
 from pathlib import Path
 
+FX_PROVIDERS = ("bank_of_canada", "yahoo")
+
 DEFAULTS = {
     "source": {
         "path": "holdings.sqlite",
@@ -40,6 +42,10 @@ DEFAULTS = {
         "max_holdings_age_days": 7,
         "require_received_by_cutoff": False,
         "refresh_network": False,
+        "fx_providers": ["bank_of_canada", "yahoo"],
+        "max_fx_age_days": 7,
+        "listing_provider": "yahoo",
+        "max_listing_age_days": 30,
     },
     "mandate": {
         "confirmed": False,
@@ -171,6 +177,18 @@ def validate_config(config: dict) -> dict:
         raise ValueError("data.mode must be demo, live or offline")
     if c["data"]["price_provider"] not in {"csv", "yahoo"}:
         raise ValueError("data.price_provider must be csv or yahoo")
+    fx_providers = c["data"]["fx_providers"]
+    if (
+        not isinstance(fx_providers, list)
+        or not fx_providers
+        or any(not isinstance(x, str) or x not in FX_PROVIDERS for x in fx_providers)
+        or len(set(fx_providers)) != len(fx_providers)
+    ):
+        raise ValueError(
+            "data.fx_providers must be a nonempty list of distinct providers: bank_of_canada, yahoo"
+        )
+    if c["data"]["listing_provider"] not in {"yahoo", "none"}:
+        raise ValueError("data.listing_provider must be yahoo or none")
     if c["allocation"]["mode"] not in {"scenario", "calibrated"}:
         raise ValueError("allocation.mode must be scenario or calibrated")
     if c["risk"]["covariance"] != "ledoit_wolf":
@@ -268,6 +286,8 @@ def validate_config(config: dict) -> dict:
         "max_fund_holdings_age_days",
         "max_forecast_age_days",
         "max_holdings_age_days",
+        "max_fx_age_days",
+        "max_listing_age_days",
     ]:
         _number(c["data"][key], key, 0, 1000)
     p = c["allocation"]["probability_overrides"]

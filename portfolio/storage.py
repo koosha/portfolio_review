@@ -13,6 +13,12 @@ from urllib.parse import quote, unquote, urlsplit
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_ROWS = 50000
+LISTING_CAPTURE_VERSION = "1.2.0"
+QUOTE_SYMBOL_HEADER = "Yahoo quote symbol"
+LISTING_METADATA_IGNORED = (
+    "Listing metadata ignored: reload the Local Portfolio extension (1.2.0 or newer) "
+    "to capture Yahoo quote symbols."
+)
 
 
 def now():
@@ -42,6 +48,19 @@ def yahoo_navigation_url(value):
     return identity + (
         "/" + suffix if re.fullmatch(r"view(?:/[A-Za-z0-9_-]+)?", suffix) else "/view"
     )
+
+
+def version_at_least(version, minimum):
+    """Compare the first three numeric parts of dotted versions; unparseable is False."""
+
+    def parts(value):
+        match = re.match(r"\s*v?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?!\d)", str(value or ""))
+        return tuple(int(part) for part in match.groups()) if match else None
+
+    found, required = parts(version), parts(minimum)
+    if required is None:
+        raise ValueError("Minimum version must have three numeric parts.")
+    return found is not None and found >= required
 
 
 def number(value, label, row):
@@ -138,6 +157,7 @@ def parse_csv(data):
                     trade_date=pick("trade date", "purchase date") or None,
                     currency=currency,
                     comment=pick("comment", "notes") or None,
+                    quote_symbol=pick("yahoo quote symbol") or None,
                     raw=original,
                 )
             )
@@ -448,7 +468,9 @@ class Store:
                 (now(),),
             )
 
-    def ingest(self, source_id, data, filename="quotes.csv", capture=None, batch_id=None):
+    def ingest(
+        self, source_id, data, filename="quotes.csv", capture=None, batch_id=None, *, notices=()
+    ):
         rows, warnings = parse_csv(data)
         if capture:
             warnings.append(
@@ -458,6 +480,7 @@ class Store:
                 warnings.append(
                     "Reached the end of the loaded table, but Yahoo did not expose a total row count. Completeness is unverified."
                 )
+        warnings.extend(notices)
         digest, timestamp = hashlib.sha256(data).hexdigest(), now()
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -526,10 +549,16 @@ class Store:
             warnings=warnings,
         )
 
-    def ingest_table(self, source_id, table, batch_id=None):
+    def ingest_table(self, source_id, table, batch_id=None, *, extension_version=None):
         if not isinstance(table, dict) or table.get("method") != "yahoo-holdings-table-v1":
             raise ValueError(
                 "Unsupported holdings capture. Restart the app and reload the Chrome extension."
+            )
+        declared = table.get("capture_version", 1)
+        if type(declared) is not int or declared not in (1, 2):
+            raise ValueError(
+                "Invalid holdings capture version. Reload the Chrome extension and retry. "
+                "Previous holdings were kept."
             )
         headers, records = table.get("headers"), table.get("rows")
         if (
@@ -574,6 +603,19 @@ class Store:
             raise ValueError(
                 "Holdings completeness was not established. Previous holdings were kept."
             )
+        capture_version = (
+            2
+            if declared == 2 and version_at_least(extension_version, LISTING_CAPTURE_VERSION)
+            else 1
+        )
+        notices = []
+        quote_key = QUOTE_SYMBOL_HEADER.lower()
+        if capture_version == 1 and quote_key in keys:
+            # Only a declared v2 capture from a current extension carries listing identity.
+            dropped = keys.index(quote_key)
+            headers = [h for i, h in enumerate(headers) if i != dropped]
+            records = [[c for i, c in enumerate(row) if i != dropped] for row in records]
+            notices.append(LISTING_METADATA_IGNORED)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow(headers)
@@ -586,9 +628,15 @@ class Store:
             page_count=pages,
             row_count=len(records),
             source_url=self.source(source_id)["url"],
+            capture_version=capture_version,
         )
         return self.ingest(
-            source_id, data, "yahoo-holdings-table.csv", capture=capture, batch_id=batch_id
+            source_id,
+            data,
+            "yahoo-holdings-table.csv",
+            capture=capture,
+            batch_id=batch_id,
+            notices=notices,
         )
 
     def failed(self, source_id, message, batch_id=None):

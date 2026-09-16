@@ -92,3 +92,11 @@ test('navigation to a different account never passes readiness',async()=>{
   assert.throws(()=>validateJob({id:'a'.repeat(32),action:'refresh',url:'https://finance.yahoo.com/portfolio/p_fixture_9',
     navigation_url:'https://finance.yahoo.com/portfolio/p_other/view'}),/does not match/);
 });
+test('manifest version matches the version the worker and popup announce', async () => {
+  const manifest=JSON.parse(await readFile(new URL('../chrome-extension/manifest.json',import.meta.url)));
+  const worker=await readFile(new URL('../chrome-extension/worker.js',import.meta.url),'utf8');
+  const popup=await readFile(new URL('../chrome-extension/popup.html',import.meta.url),'utf8');
+  assert.equal(manifest.version,'1.2.0');
+  assert.match(worker,/'X-Companion-Version':\s*'1\.2\.0'/);
+  assert.match(popup,new RegExp(`Version ${manifest.version.replace(/\./g,'\\.')}\\.`));
+});

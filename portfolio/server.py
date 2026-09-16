@@ -215,6 +215,8 @@ def make_handler(store, browser, port, research=None):
                 self.reply(200, research.supplemental())
             elif path == "/api/research/current":
                 self.reply(200, research.current())
+            elif path == "/api/research/exceptions":
+                self.reply(200, research.exceptions())
             elif path.startswith("/api/research/runs/"):
                 self.reply(200, research.run(path.rsplit("/", 1)[-1]))
             elif path.startswith("/api/research/jobs/"):
@@ -263,6 +265,8 @@ def make_handler(store, browser, port, research=None):
                 self.reply(200, research.import_input(body))
             elif path == "/api/research/decision":
                 self.reply(201, research.save_decision(body))
+            elif path == "/api/research/resolutions":
+                self.reply(201, research.save_resolution(body))
             elif path == "/api/research/valuation-link":
                 self.reply(200, research.valuation_link(body))
             elif path == "/api/research/providers":

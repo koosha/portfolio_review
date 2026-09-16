@@ -17,6 +17,7 @@ RECORD_KINDS = {
     "evaluation",
     "comparator",
     "override",
+    "resolution",
 }
 
 

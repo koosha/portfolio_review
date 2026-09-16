@@ -43,6 +43,11 @@ FRAME_COLUMNS = {
         "reported_weight",
         "valuation_date",
         "snapshot_complete",
+        "reported_market_value",
+        "reported_currency",
+        "fx_rate",
+        "fx_pair",
+        "fx_observation_date",
     ],
     "securities": [
         "security_id",
@@ -76,7 +81,14 @@ FRAME_COLUMNS = {
 }
 NUMERIC_COLUMNS = {
     "accounts": ["total_value", "cash", "tax_rate"],
-    "positions": ["quantity", "price", "market_value", "reported_weight"],
+    "positions": [
+        "quantity",
+        "price",
+        "market_value",
+        "reported_weight",
+        "reported_market_value",
+        "fx_rate",
+    ],
     "securities": ["market_cap"],
     "tax_lots": ["quantity", "basis_per_share"],
 }
@@ -551,6 +563,13 @@ def _frames(ledger, issues):
     return frames
 
 
+def _quote_symbol(row):
+    value = row.get("quote_symbol")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
 def load_collector(
     source_path,
     as_of,
@@ -630,6 +649,8 @@ def load_collector(
         selected_dates.append(valuation)
         capture = json.loads(snapshot["capture_json"] or "null") if snapshot else None
         rows = json.loads(snapshot["rows_json"]) if snapshot else []
+        # Only a version 2 capture carries exact Yahoo listing symbols.
+        listing_capture = (capture or {}).get("capture_version", 1) == 2
         if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
             raise ValueError("A collector snapshot contains invalid row records.")
         if not snapshot:
@@ -693,8 +714,12 @@ def load_collector(
                 "Captured cash uses a different currency from account balances; no FX conversion was inferred.",
             )
         cash = account_evidence.get("cash", observed_cash)
+        cash_basis = "attested" if account_evidence.get("cash") is not None else None
         if cash is None:
             cash = observed_cash
+            cash_basis = None
+        if cash_basis is None and cash is not None:
+            cash_basis = "captured"
         if (
             account_evidence.get("cash") is not None
             and observed_cash is not None
@@ -724,10 +749,12 @@ def load_collector(
             "name": source["name"],
             "account_type": account_evidence.get("account_type"),
             "currency": currency,
+            "position_currency": account_evidence.get("position_currency"),
             "total_value": nav,
             "cash": cash,
             "captured_cash": observed_cash,
             "captured_cash_currency": observed_cash_currency,
+            "cash_basis": cash_basis,
             "complete": complete,
             "tax_rate": account_evidence.get("tax_rate"),
             "tax_jurisdiction": account_evidence.get("tax_jurisdiction"),
@@ -797,10 +824,12 @@ def load_collector(
                 )
             mapping = mappings[0] if len(mappings) == 1 else {}
             security_id = mapping.get("security_id") or _opaque("unresolved", source_id, symbol)
+            quote_symbol = _quote_symbol(row) if listing_capture else None
             ledger["security_aliases"].append(
                 {
                     "source_id": source_id,
                     "raw_symbol": symbol,
+                    "quote_symbol": quote_symbol,
                     "security_id": security_id,
                     "valid_from": mapping.get("valid_from"),
                     "valid_to": mapping.get("valid_to"),
@@ -850,10 +879,16 @@ def load_collector(
                 "snapshot_id": snapshot_id,
                 "row_number": row.get("row_number"),
                 "raw_symbol": symbol,
+                "quote_symbol": quote_symbol,
                 "quantity": _decimal(row.get("quantity"), "quantity"),
                 "price": _decimal(row.get("price"), "price"),
                 "market_value": _decimal(row.get("market_value"), "market_value"),
                 "currency": row.get("currency") or account_evidence.get("position_currency"),
+                "currency_basis": "row"
+                if row.get("currency")
+                else "attested"
+                if account_evidence.get("position_currency")
+                else None,
                 "reported_weight": None,
                 "valuation_date": valuation,
                 "snapshot_complete": complete,

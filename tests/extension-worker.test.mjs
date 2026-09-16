@@ -82,14 +82,15 @@ async function captureWorkerCase(scenario, injectionResults) {
     tabs:{create:async options=>(tab={...tab,...options}),update:async(id,options)=>(tab={...tab,...options}),get:async()=>tab},
     scripting:{executeScript:async()=>[injectionResults[Math.min(calls++,injectionResults.length-1)]]}
   };
-  const queue=[{id:'f'.repeat(32),action:'refresh',url:portfolio,source_id:1,name:'Fixture',collection_method:'holdings-table-v1'}],results=[];
+  const queue=[{id:'f'.repeat(32),action:'refresh',url:portfolio,source_id:1,name:'Fixture',collection_method:'holdings-table-v1'}],results=[],versions=[];
   globalThis.fetch=async(url,options)=>{
+    versions.push(options.headers['X-Companion-Version']);
     if(url.endsWith('/job')) return {ok:true,json:async()=>({job:queue.shift() || null})};
     results.push(JSON.parse(options.body));return {ok:true,json:async()=>({ok:true})};
   };
   await import('../chrome-extension/worker.js?'+scenario);
   await new Promise(resolve=>listeners.message({action:'check'},{id:chrome.runtime.id},resolve));
-  return {results,calls};
+  return {results,calls,versions};
 }
 
 test('an empty injected result is retried once and never reported as an account mismatch',async()=>{
@@ -116,4 +117,14 @@ test('a transient missing result recovers, while a genuinely different account i
   const rejected=await captureWorkerCase('wrong-captured-account',[{result:{...success.result,url:'https://finance.yahoo.com/portfolio/p_other/view'}}]);
   assert.equal(rejected.results[0].ok,false);
   assert.match(rejected.results[0].error,/Captured account did not match/);
+});
+
+test('worker announces extension 1.2.0 and delivers a version 2 capture unchanged',async()=>{
+  const table={method:'yahoo-holdings-table-v1',headers:['Symbol','Shares','Yahoo quote symbol'],rows:[['RY','1','RY.TO']],
+    page_count:1,expected_count:1,completeness:'count-verified',capture_version:2};
+  const {results,versions}=await captureWorkerCase('listing-capture',[{result:{ok:true,url:'https://finance.yahoo.com/portfolio/p_fixture/view',table}}]);
+  assert.ok(versions.length>=2);
+  assert.ok(versions.every(version=>version==='1.2.0'));
+  assert.equal(results[0].ok,true);
+  assert.deepEqual(results[0].table,table);
 });

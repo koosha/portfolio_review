@@ -6,11 +6,14 @@ const url='https://finance.yahoo.com/portfolio/yodlee%7Cfixture/view';
 const headers=['Symbol','Shares','Last Price','AC/Share','Total Cost ($)','Market Value ($)'];
 const row=symbol=>[symbol,'12.345','20.10','18.25','225.29625','248.1345'];
 
-async function fixture({pages=[[row('DEMO')]],ranges=false,total,loadMore=false,virtual=false,tab=false,wrongURL=false,deepPagination=false,nextLabel='Next page',rawResult=false,unrelatedNext=false,columnHeaders=headers,hiddenColumns=[]}={}) {
+async function fixture({pages=[[row('DEMO')]],ranges=false,total,loadMore=false,virtual=false,tab=false,wrongURL=false,deepPagination=false,nextLabel='Next page',rawResult=false,unrelatedNext=false,columnHeaders=headers,hiddenColumns=[],quoteLinks={}}={}) {
   const originalNow=Date.now,originalTimeout=globalThis.setTimeout;
   let clock=0,index=0,scrolled=false,selected=!tab,clicks=0;
   const base={getClientRects:()=>[{}],getAttribute:()=>null,hasAttribute:()=>false};
   const textElement=value=>({...base,innerText:value,textContent:value,querySelector:()=>null});
+  // Symbol cells named in quoteLinks contain a Yahoo quote link, as rendered in Holdings.
+  const quoteLink=value=>Object.hasOwn(quoteLinks,value)?{href:quoteLinks[value],innerText:value,textContent:value}:null;
+  const cellElement=value=>({...textElement(value),querySelector:selector=>selector.includes('/quote/')?quoteLink(value):null});
   const next={...base,innerText:nextLabel,get disabled(){return index===pages.length-1;},click:()=>{index++;clicks++;}};
   const unrelated={...base,innerText:'Next',disabled:false,click:()=>{clicks++;}};
   const holdings={...base,innerText:'Holdings',click:()=>{selected=true;clicks++;}};
@@ -21,7 +24,7 @@ async function fixture({pages=[[row('DEMO')]],ranges=false,total,loadMore=false,
   }};
   const table={...base,parentElement:body,querySelectorAll:selector=>selector.startsWith('thead')
     ? columnHeaders.map((h,i)=>({...textElement(h),getClientRects:()=>hiddenColumns.includes(i)?[]:[{}]}))
-    : data().map(r=>({...base,querySelectorAll:()=>r.map((v,i)=>({...textElement(v),getClientRects:()=>hiddenColumns.includes(i)?[]:[{}]}))}))};
+    : data().map(r=>({...base,querySelectorAll:()=>r.map((v,i)=>({...cellElement(v),getClientRects:()=>hiddenColumns.includes(i)?[]:[{}]}))}))};
   if(deepPagination) {let parent=body;for(let i=0;i<6;i++) parent={...base,parentElement:parent,innerText:'',querySelectorAll:()=>[]};table.parentElement=parent;}
   globalThis.location={origin:'https://finance.yahoo.com',href:wrongURL?url.replace('fixture','wrong'):url};
   globalThis.getComputedStyle=()=>({visibility:'visible',overflowY:'visible'});
@@ -133,4 +136,34 @@ test('retains Add entries without inventing quantities and preserves pagination 
 });
 test('does not treat Add followed by a number as an empty quantity',async()=>{
   await assert.rejects(fixture({pages:[[['DEMO','Add 10',...row('DEMO').slice(2)]]]}),/unrecognized text "Add 10"/);
+});
+
+test('appends Yahoo quote symbols from quote links and marks capture version 2',async()=>{
+  const cash=['Total Cash','','7.25','','',''];
+  const {result}=await fixture({pages:[[row('RY'),row('INDEX')],[row('PLAIN'),row('AAPL'),cash]],ranges:true,quoteLinks:{
+    RY:'/quote/RY.TO/',INDEX:'https://finance.yahoo.com/quote/%5EGSPC/?p=%5EGSPC',AAPL:'https://finance.yahoo.com/quote/AAPL?p=AAPL#summary'
+  }});
+  assert.equal(result.table.capture_version,2);
+  assert.deepEqual(result.table.headers,[...headers,'Yahoo quote symbol']);
+  assert.deepEqual(result.table.rows,[
+    [...row('RY'),'RY.TO'],[...row('INDEX'),'^GSPC'],[...row('PLAIN'),''],[...row('AAPL'),'AAPL'],[...cash,'']
+  ]);
+  assert.equal(result.table.expected_count,5);
+  assert.equal(result.table.completeness,'count-verified');
+});
+test('a table without quote links stays a version 1 capture',async()=>{
+  const {result}=await fixture();
+  assert.equal(Object.hasOwn(result.table,'capture_version'),false);
+  assert.deepEqual(result.table.headers,headers);
+});
+test('appends the Shares display column before the Yahoo quote symbol column',async()=>{
+  const unheld=['UNHELD','Add','50','--','--','--'];
+  const {result}=await fixture({pages:[[row('HELD'),unheld]],quoteLinks:{HELD:'/quote/HELD.L/',UNHELD:'/quote/UNHELD/'}});
+  assert.equal(result.table.capture_version,2);
+  assert.deepEqual(result.table.headers,[...headers,'Yahoo Shares display','Yahoo quote symbol']);
+  assert.deepEqual(result.table.rows,[[...row('HELD'),'12.345','HELD.L'],['UNHELD','','50','--','--','--','Add','UNHELD']]);
+});
+test('rejects a holdings table that already has a Yahoo quote symbol column',async()=>{
+  await assert.rejects(fixture({columnHeaders:[...headers,'Yahoo Quote Symbol'],pages:[[[...row('RY'),'x']]],quoteLinks:{RY:'/quote/RY.TO/'}}),
+    /conflicts with the Yahoo quote symbol column/);
 });

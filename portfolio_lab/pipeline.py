@@ -37,6 +37,51 @@ def distinct_databases(config):
         raise ValueError("Source holdings and research must use different database files.")
 
 
+def _collector_fx(bundle, c, listings, live):
+    """Dated FX observations for the currencies a collector bundle needs.
+
+    No base currency means nothing is presented, so no provider is asked at all.
+    """
+    from portfolio_research.fx import FxTable
+    from portfolio_research.fx_providers import load_fx_table
+    from portfolio_research.normalize import fx_currencies, fx_window
+
+    empty = FxTable(max_age_days=c["data"]["max_fx_age_days"])
+    if c.get("mandate", {}).get("base_currency") is None:
+        return empty
+    currencies = fx_currencies(bundle, c, listings)
+    if not currencies:
+        return empty
+    start_date, end_date = fx_window(bundle, c)
+    return load_fx_table(
+        c,
+        currencies,
+        start_date=start_date,
+        end_date=end_date,
+        refresh=live,
+        issues=bundle["issues"],
+    )
+
+
+def _normalize_collector(bundle, c, refresh, review_kind, timeline, supplemental):
+    """``(presented bundle, FX table)``: listing identity and presentation before enrichment."""
+    from portfolio_research.normalize import gather_listings, normalize_bundle
+
+    live = bool(refresh) and c["data"]["mode"] == "live"
+    gathered = gather_listings(bundle, c, refresh=live, issues=bundle["issues"])
+    fx = _collector_fx(bundle, c, gathered["listings"], live)
+    presented = normalize_bundle(
+        bundle,
+        c,
+        fx=fx,
+        review_kind=review_kind,
+        generated_at=timeline["generated_at"],
+        supplemental=supplemental,
+        **gathered,
+    )
+    return presented, fx
+
+
 def load_inputs(
     config,
     as_of=None,
@@ -73,13 +118,20 @@ def load_inputs(
             receipt_through=timeline["requested_date"] if current else None,
             receipt_before=timeline["generated_at"] if current else None,
         )
+        bundle, fx = _normalize_collector(bundle, c, refresh, review_kind, timeline, supplemental)
     else:
-        bundle = load_portfolio(c, as_of)
+        bundle, fx = load_portfolio(c, as_of), None
     received = bundle.get("collector", {}).get("collection_received_at")
     if received:
         timeline["collection_received_at"] = received
     bundle["timeline"] = timeline
-    return enrich_bundle(bundle, c, as_of)
+    enriched = enrich_bundle(bundle, c, as_of)
+    if fx is None:
+        return enriched
+    # Enriched closes carry the listing's own quote unit; convert them at each row's date.
+    from portfolio_research.normalize import present_prices
+
+    return present_prices(enriched, c, fx)
 
 
 def save_analysis(result, config, bundle):

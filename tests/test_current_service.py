@@ -1,14 +1,20 @@
 import json
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from portfolio.server import make_handler
 from portfolio.storage import Store
 from portfolio_lab.config import dashboard_patch, load_config
 from portfolio_lab.demo import create_demo
 from portfolio_research.service import ResearchService, default_config
+from tests.test_current import cached_providers
+from tests.test_normalize import A_ROWS, B_ROWS, LISTINGS, cad_table, listing, usd_table
 
 SUNDAY_RECEIPT = "2026-09-13T20:00:00+00:00"
 FRIDAY = "2026-09-11"
@@ -112,6 +118,7 @@ class CurrentServiceTests(unittest.TestCase):
     def test_status_survives_an_unreadable_collection(self):
         failure = ValueError("synthetic collector problem")
         with (
+            patch("portfolio_research.adapter.load_collector", side_effect=failure),
             patch("portfolio_research.current.current_snapshot", side_effect=failure),
             patch("portfolio_research.service.current_snapshot", side_effect=failure, create=True),
         ):
@@ -225,6 +232,30 @@ class CurrentServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different inputs"):
             self.service.submit({"kind": "monthly", "review_kind": "current", "request_key": key})
 
+    def test_status_reads_the_collection_without_presenting_it(self):
+        """Status only needs receipt facts; it must not run identity and FX on every poll."""
+        with patch(
+            "portfolio_lab.pipeline._normalize_collector",
+            side_effect=AssertionError("status normalized the collection"),
+        ):
+            status = self.service.status()
+        collection = status["latest_collection"]
+        self.assertEqual(collection["status"], "published")
+        self.assertEqual(collection["account_count"], 2)
+        self.assertEqual(collection["collection_received_at"], SUNDAY_RECEIPT)
+
+    def test_a_current_view_without_a_base_currency_is_still_served(self):
+        self.service.save_settings({"mandate": {"base_currency": None}})
+        response = self.service.current()
+        self.assertTrue(response["supported"])
+        usd = response["current"]["totals"]["usd"]
+        self.assertIsNone(usd["covered_total"])
+        self.assertIsNone(usd["currency"])
+        self.assertEqual(len(response["current"]["positions"]), 2)
+        codes = {row["code"] for row in self.service.exceptions()["exceptions"]}
+        self.assertLessEqual(codes, {"UNRESOLVED_LISTING"})
+        self.assertEqual(self.service.status()["latest_collection"]["status"], "published")
+
     def test_current_review_kind_is_stored_with_the_request(self):
         with patch.object(self.service.executor, "submit"):
             job = self.service.submit(
@@ -251,3 +282,391 @@ class DemoSourceCurrentTests(unittest.TestCase):
                 self.assertNotIn(str(Path(config["source"]["path"])), json.dumps(status))
             finally:
                 service.close()
+
+
+SHOP_CANDIDATES = {
+    "SHOP": [
+        {
+            "symbol": "SHOP.TO",
+            "name": "Shopify (TSX)",
+            "exchange": "TOR",
+            "instrument_type": "equity",
+        },
+        {
+            "symbol": "SHOP.NE",
+            "name": "Shopify (NEO)",
+            "exchange": "NEO",
+            "instrument_type": "equity",
+        },
+    ]
+}
+EXCEPTION_LISTINGS = {**LISTINGS, "SHOP.TO": listing("SHOP.TO", "CAD", "TOR")}
+
+
+@patch("portfolio_research.calendar.datetime", SundayClock)
+class CurrentExceptionServiceTests(unittest.TestCase):
+    """Open exceptions from the USD gate fixture with one ambiguous and one unknown value."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = Store(self.temp.name)
+        self.a = self.store.add_source(
+            "USD portfolio", url="https://finance.yahoo.com/portfolio/p_fixture_exceptions_a"
+        )
+        self.b = self.store.add_source(
+            "CAD portfolio", url="https://finance.yahoo.com/portfolio/p_fixture_exceptions_b"
+        )
+        with patch("portfolio.storage.now", return_value=SUNDAY_RECEIPT):
+            batch = self.store.begin_batch([self.a, self.b])
+            first = self.store.ingest_table(
+                self.a, usd_table([*A_ROWS, ["SHOP", "1", "100", "100"]]), batch_id=batch
+            )
+            second = self.store.ingest_table(
+                self.b,
+                cad_table([B_ROWS[0], ["VOD.L", "100", "128.75", "500.00"]]),
+                batch_id=batch,
+                extension_version="1.2.0",
+            )
+        self.snapshots = {self.a: first["snapshot_id"], self.b: second["snapshot_id"]}
+        self.service = ResearchService(default_config(self.temp.name))
+        self.addCleanup(self.service.close)
+        self.providers = cached_providers(listings=EXCEPTION_LISTINGS, search=SHOP_CANDIDATES)
+        self.providers.__enter__()
+        self.addCleanup(self.providers.__exit__, None, None, None)
+
+    def open_exception(self, code, raw_symbol):
+        records = self.service.exceptions()["exceptions"]
+        return next(r for r in records if r["code"] == code and r["raw_symbol"] == raw_symbol)
+
+    def test_exceptions_list_exactly_the_constructed_ambiguities(self):
+        response = self.service.exceptions()
+        pairs = sorted((row["code"], row["raw_symbol"]) for row in response["exceptions"])
+        self.assertEqual(
+            pairs,
+            [
+                ("AMBIGUOUS_LISTING", "SHOP"),
+                ("UNKNOWN_VALUE_CURRENCY", "SHOP"),
+                ("UNKNOWN_VALUE_CURRENCY", "VOD.L"),
+            ],
+        )
+        self.assertEqual(response["count"], 3)
+        self.assertEqual(response["generated_at"], SUNDAY_GENERATED.isoformat())
+        for record in response["exceptions"]:
+            self.assertRegex(record["key"], r"^[0-9a-f]{40}$")
+        ambiguous = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
+        self.assertEqual([row["symbol"] for row in ambiguous["candidates"]], ["SHOP.TO", "SHOP.NE"])
+        serialized = json.dumps(response, allow_nan=False)
+        self.assertNotIn(self.temp.name, serialized)
+        self.assertNotIn("finance.yahoo.com", serialized)
+
+    def test_current_exposes_covered_usd_totals(self):
+        current = self.service.current()["current"]
+        usd = current["totals"]["usd"]
+        # A/RY.TO and A/AAPL in USD plus B/RY.TO converted once; SHOP and VOD.L stay open.
+        self.assertEqual(usd["covered_total"], "3684.588600")
+        self.assertEqual(usd["covered_position_count"], 3)
+        self.assertEqual(usd["unconverted_position_count"], 2)
+        self.assertEqual(len(current["open_exceptions"]), 3)
+        self.assertEqual(current["identity"]["ambiguous"], 1)
+
+    def test_account_currency_resolution_appends_supplemental_and_closes_the_exception(self):
+        self.service.import_input(
+            {
+                "kind": "supplemental",
+                "data": {
+                    "version": 1,
+                    "accounts": [
+                        {
+                            "source_id": self.a,
+                            "snapshot_id": self.snapshots[self.a],
+                            "tax_rate": "0.25",
+                        }
+                    ],
+                    "securities": [],
+                    "tax_lots": [],
+                },
+            }
+        )
+        vod = self.open_exception("UNKNOWN_VALUE_CURRENCY", "VOD.L")
+        self.assertEqual(vod["resolution"]["kind"], "account_currency")
+        saved = self.service.save_resolution(
+            {
+                "key": vod["key"],
+                "kind": "account_currency",
+                "source_id": self.b,
+                "snapshot_id": self.snapshots[self.b],
+                "values": {"position_currency": "CAD"},
+            }
+        )
+        self.assertEqual(saved["remaining"], 2)
+        remaining = self.service.exceptions()
+        self.assertEqual(remaining["count"], 2)
+        self.assertNotIn(vod["key"], {row["key"] for row in remaining["exceptions"]})
+        self.assertEqual(len(self.service.store.records("supplemental")), 2)
+        supplemental = self.service.store.latest("supplemental")
+        self.assertEqual(
+            supplemental["accounts"],
+            [
+                {"source_id": self.a, "snapshot_id": self.snapshots[self.a], "tax_rate": "0.25"},
+                {
+                    "source_id": self.b,
+                    "snapshot_id": self.snapshots[self.b],
+                    "position_currency": "CAD",
+                },
+            ],
+        )
+        [resolution] = self.service.store.records("resolution")
+        self.assertEqual(resolution["record_id"], saved["record_id"])
+        self.assertEqual(
+            resolution["payload"],
+            {
+                "key": vod["key"],
+                "kind": "account_currency",
+                "values": {"position_currency": "CAD"},
+                "snapshot_id": self.snapshots[self.b],
+                "source_id": self.b,
+            },
+        )
+        held = {
+            (row["source_id"], row["symbol"]): row
+            for row in self.service.current()["current"]["positions"]
+        }
+        self.assertEqual(held[(self.b, "VOD.L")]["value_currency_basis"], "attested")
+        with self.assertRaisesRegex(ValueError, "no longer open"):
+            self.service.save_resolution(
+                {
+                    "key": vod["key"],
+                    "kind": "account_currency",
+                    "source_id": self.b,
+                    "snapshot_id": self.snapshots[self.b],
+                    "values": {"position_currency": "CAD"},
+                }
+            )
+
+    def test_security_listing_resolution_maps_the_chosen_listing_from_today(self):
+        shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
+        self.service.save_resolution(
+            {
+                "key": shop["key"],
+                "kind": "security_listing",
+                "source_id": self.a,
+                "snapshot_id": self.snapshots[self.a],
+                "values": {"security_id": "SHOP.TO"},
+            }
+        )
+        [mapping] = self.service.store.latest("supplemental")["securities"]
+        self.assertEqual(
+            mapping,
+            {
+                "source_id": self.a,
+                "raw_symbol": "SHOP",
+                "security_id": "SHOP.TO",
+                "issuer_id": "listing:SHOP.TO",
+                "ticker": "SHOP.TO",
+                "name": "SHOP.TO fixture listing",
+                "instrument_type": "equity",
+                "currency": "CAD",
+                "exchange": "TOR",
+                "valid_from": "2026-09-13",
+            },
+        )
+        keys = {row["key"] for row in self.service.exceptions()["exceptions"]}
+        self.assertNotIn(shop["key"], keys)
+        self.assertEqual(self.service.current()["current"]["identity"]["mapped"], 1)
+
+    def attest_valuation_date(self, day=FRIDAY):
+        self.service.import_input(
+            {
+                "kind": "supplemental",
+                "data": {
+                    "version": 1,
+                    "accounts": [
+                        {
+                            "source_id": self.a,
+                            "snapshot_id": self.snapshots[self.a],
+                            "valuation_date": day,
+                        }
+                    ],
+                    "securities": [],
+                    "tax_lots": [],
+                },
+            }
+        )
+
+    def test_a_listing_choice_closes_the_exception_of_an_attested_valuation_date(self):
+        """The mapping must apply on the date the adapter evaluates for this snapshot."""
+        self.attest_valuation_date()
+        shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
+        before = self.service.exceptions()["count"]
+        saved = self.service.save_resolution(
+            {
+                "key": shop["key"],
+                "kind": "security_listing",
+                "source_id": self.a,
+                "snapshot_id": self.snapshots[self.a],
+                "values": {"security_id": "SHOP.TO"},
+            }
+        )
+        [mapping] = self.service.store.latest("supplemental")["securities"]
+        self.assertEqual(mapping["valid_from"], FRIDAY)
+        remaining = self.service.exceptions()
+        self.assertNotIn(shop["key"], {row["key"] for row in remaining["exceptions"]})
+        self.assertEqual(saved["remaining"], remaining["count"])
+        self.assertLess(remaining["count"], before)
+        # One supplemental version for the attestation and one for the resolution.
+        self.assertEqual(len(self.service.store.records("supplemental")), 2)
+
+    def test_a_resolution_that_would_leave_the_exception_open_is_not_written(self):
+        from portfolio_research import resolutions
+
+        shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
+        payload = {
+            "key": shop["key"],
+            "kind": "security_listing",
+            "source_id": self.a,
+            "snapshot_id": self.snapshots[self.a],
+            "values": {"security_id": "SHOP.TO"},
+        }
+
+        mapping = resolutions.listing_mapping
+
+        def future(config, record, values, valid_from, *, issues):
+            return mapping(config, record, values, "2099-01-01", issues=issues)
+
+        with (
+            patch("portfolio_research.resolutions.listing_mapping", side_effect=future),
+            self.assertRaisesRegex(ValueError, "does not close"),
+        ):
+            self.service.save_resolution(payload)
+        self.assertEqual(self.service.store.records("supplemental"), [])
+        self.assertEqual(self.service.store.records("resolution"), [])
+        self.assertIn(shop["key"], {row["key"] for row in self.service.exceptions()["exceptions"]})
+
+    def test_saving_a_resolution_presents_the_collection_at_most_twice(self):
+        from portfolio_research import current as current_module
+
+        vod = self.open_exception("UNKNOWN_VALUE_CURRENCY", "VOD.L")
+        calls = []
+        original = current_module.current_snapshot
+
+        def counted(*args, **kwargs):
+            calls.append(kwargs.get("supplemental"))
+            return original(*args, **kwargs)
+
+        with patch("portfolio_research.current.current_snapshot", side_effect=counted):
+            self.service.save_resolution(
+                {
+                    "key": vod["key"],
+                    "kind": "account_currency",
+                    "source_id": self.b,
+                    "snapshot_id": self.snapshots[self.b],
+                    "values": {"position_currency": "CAD"},
+                }
+            )
+        self.assertEqual(len(calls), 2, calls)
+
+    def test_invalid_resolutions_are_rejected_without_writing_records(self):
+        vod = self.open_exception("UNKNOWN_VALUE_CURRENCY", "VOD.L")
+        valid = {
+            "key": vod["key"],
+            "kind": "account_currency",
+            "source_id": self.b,
+            "snapshot_id": self.snapshots[self.b],
+            "values": {"position_currency": "CAD"},
+        }
+        cases = {
+            "unknown key": ({**valid, "key": "0" * 40}, "no longer open"),
+            "wrong kind": ({**valid, "kind": "security_listing"}, "kind"),
+            "other account": ({**valid, "source_id": self.a}, "account"),
+            "bad currency": ({**valid, "values": {"position_currency": "cad"}}, "currency"),
+            "no values": ({**valid, "values": {}}, "position_currency"),
+            "extra field": ({**valid, "note": "x"}, "fields"),
+            "unsupported value": ({**valid, "values": {"cash": "5"}}, "fields"),
+            "not an object": ([], "object"),
+        }
+        for label, (payload, message) in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(ValueError, message):
+                self.service.save_resolution(payload)
+        self.assertEqual(self.service.store.records("supplemental"), [])
+        self.assertEqual(self.service.store.records("resolution"), [])
+
+
+class ResolutionRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.research = MagicMock()
+        self.research.exceptions.return_value = {"exceptions": [], "count": 0, "generated_at": None}
+        self.research.save_resolution.return_value = {"record_id": "r1", "remaining": 0}
+        browser = MagicMock()
+        browser.status.return_value = {"busy": False}
+        server = ThreadingHTTPServer(("127.0.0.1", 0), lambda *args: None)
+        server.RequestHandlerClass = make_handler(
+            Store(self.temp.name), browser, server.server_port, self.research
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.port = server.server_port
+        self.addCleanup(thread.join)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.token = self.request("GET", "/api/state")[1]["token"]
+
+    def request(self, method, path, body=None, headers=None):
+        connection = HTTPConnection("127.0.0.1", self.port, timeout=3)
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        connection.close()
+        return response.status, payload
+
+    def test_exceptions_route_returns_the_service_listing(self):
+        status, payload = self.request("GET", "/api/research/exceptions")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"exceptions": [], "count": 0, "generated_at": None})
+
+    def test_resolution_route_is_token_gated_and_reports_invalid_input(self):
+        body = json.dumps({"key": "k", "kind": "account_currency", "values": {}})
+        status, _ = self.request(
+            "POST", "/api/research/resolutions", body, {"Content-Type": "application/json"}
+        )
+        self.assertEqual(status, 403)
+        self.research.save_resolution.assert_not_called()
+        headers = {"Content-Type": "application/json", "X-Local-Token": self.token}
+        status, payload = self.request("POST", "/api/research/resolutions", body, headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(payload, {"record_id": "r1", "remaining": 0})
+        self.research.save_resolution.assert_called_once_with(json.loads(body))
+        self.research.save_resolution.side_effect = ValueError("This exception is no longer open.")
+        status, payload = self.request("POST", "/api/research/resolutions", body, headers)
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "This exception is no longer open.")
+
+
+class ResolutionFunctionSizeTests(unittest.TestCase):
+    """Resolving an exception stays readable: no function of this path exceeds 50 lines."""
+
+    LIMIT = 50
+
+    def oversized(self, module, names=None):
+        import ast
+        import inspect
+
+        tree = ast.parse(Path(inspect.getsourcefile(module)).read_text())
+        return {
+            node.name: node.end_lineno - node.lineno + 1
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and (names is None or node.name in names)
+            and node.end_lineno - node.lineno + 1 >= self.LIMIT
+        }
+
+    def test_save_resolution_and_its_helpers_stay_under_fifty_lines(self):
+        from portfolio_research import resolutions, service
+
+        self.assertEqual(
+            self.oversized(service, {"save_resolution", "_resolved_supplemental", "_mapping_date"}),
+            {},
+        )
+        self.assertEqual(self.oversized(resolutions), {})

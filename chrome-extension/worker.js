@@ -12,7 +12,7 @@ async function request(path, body) {
   const config = await settings();
   const response = await fetch(config.server + path, {
     method: body === undefined ? 'GET' : 'POST',
-    headers: {'X-Companion-Key': config.key, 'X-Companion-Version':'1.1.6', ...(body === undefined ? {} : {'Content-Type': 'application/json'})},
+    headers: {'X-Companion-Key': config.key, 'X-Companion-Version':'1.2.0', ...(body === undefined ? {} : {'Content-Type': 'application/json'})},
     body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(12000)
   });
   const result = await response.json();

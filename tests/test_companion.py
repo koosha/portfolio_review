@@ -216,6 +216,58 @@ class CompanionTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(self.store.snapshot(result["snapshot_id"])["source_id"], source)
 
+    def listing_capture(self, job):
+        payload = self.capture(job, b"Symbol,Shares,Yahoo quote symbol\nRY,2,RY.TO\n")
+        payload["table"]["capture_version"] = 2
+        return payload
+
+    def test_status_reports_required_version_and_listing_capture_support(self):
+        status = self.browser.status()
+        self.assertEqual(status["required_extension_version"], "1.2.0")
+        self.assertFalse(status["listing_capture_supported"])
+        for version, supported in (
+            ("1.1.6", False),
+            (None, False),
+            ("1.2.0", True),
+            ("2.0.1", True),
+        ):
+            with self.subTest(version=version):
+                self.browser.take(version)
+                self.assertEqual(self.browser.status()["listing_capture_supported"], supported)
+                self.assertEqual(self.browser.status()["required_extension_version"], "1.2.0")
+
+    def test_complete_passes_extension_version_to_listing_capture(self):
+        self.browser.submit("refresh", [self.source])
+        job = self.browser.take("1.2.0")
+        result = self.browser.complete(self.listing_capture(job))
+        self.assertTrue(result["ok"])
+        snapshot = self.store.snapshot(result["snapshot_id"])
+        self.assertEqual(snapshot["capture"]["capture_version"], 2)
+        self.assertEqual(snapshot["rows"][0]["quote_symbol"], "RY.TO")
+
+    def test_the_claiming_client_version_decides_the_capture_not_a_later_poll(self):
+        """A second paired profile polling while a capture runs must not downgrade it."""
+        self.browser.submit("refresh", [self.source])
+        job = self.browser.take("1.2.0")
+        self.assertIsNone(self.browser.take("1.1.6"))  # another profile, older extension
+        result = self.browser.complete(self.listing_capture(job))
+        snapshot = self.store.snapshot(result["snapshot_id"])
+        self.assertEqual(snapshot["capture"]["capture_version"], 2)
+        self.assertEqual(snapshot["rows"][0]["quote_symbol"], "RY.TO")
+        self.assertFalse(any("Listing metadata ignored" in w for w in result["warnings"]))
+        self.assertEqual(self.browser.status()["extension_version"], "1.1.6")
+
+    def test_older_extension_listing_capture_is_saved_without_quote_symbols(self):
+        self.browser.submit("refresh", [self.source])
+        job = self.browser.take("1.1.6")
+        result = self.browser.complete(self.listing_capture(job))
+        self.assertTrue(result["ok"])
+        snapshot = self.store.snapshot(result["snapshot_id"])
+        self.assertEqual(snapshot["capture"]["capture_version"], 1)
+        self.assertIsNone(snapshot["rows"][0]["quote_symbol"])
+        self.assertTrue(any("Listing metadata ignored" in w for w in result["warnings"]))
+        self.assertEqual(self.store.positions()[0]["quantity"], "2")
+
 
 class CompanionHTTPTests(unittest.TestCase):
     def setUp(self):

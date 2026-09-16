@@ -4,15 +4,47 @@ Captured amounts stay exact Decimal strings and are shown as observed. The colle
 receipt time is a server receipt time, never a quote time; the source valuation time is
 unknown unless supplemental evidence attests it. Subtotals are grouped by explicit value
 currency without FX conversion and are never labeled reconciled NAV.
+
+Beside the captured amounts, listing identity and a USD presentation are derived from
+cached provider metadata and dated FX observations only (this view never refreshes a
+provider). Amounts that cannot be presented stay unconverted and become open exceptions
+an owner can resolve.
 """
 
 from decimal import Decimal, localcontext
+from pathlib import Path
 
 from .adapter import load_collector
 from .calendar import review_context
 from .public import _clean
 
 SCHEMA_VERSION = 1
+LISTED_STATUSES = frozenset({"mapped", "resolved", "resolved_from_display", "resolved_by_search"})
+OPEN_STATUSES = frozenset({"ambiguous", "unresolved"})
+PRESENTED_POSITION_FIELDS = (
+    "quote_symbol",
+    "quote_currency",
+    "quote_unit_factor",
+    "price_major",
+    "price_usd",
+    "market_value_usd",
+    "value_currency_basis",
+    "value_currency_ratio",
+    "value_currency_fx_pair",
+    "value_currency_fx_rate",
+    "value_currency_fx_date",
+    "fx_rate",
+    "fx_pair",
+    "fx_observation_date",
+    "fx_source_id",
+    "presentation_currency",
+)
+USD_LABEL = (
+    "{currency} presentation of covered amounts using dated FX observations; not reconciled NAV"
+)
+NO_CURRENCY_LABEL = (
+    "No base currency is configured; captured amounts are shown exactly as collected."
+)
 DECIMAL_PRECISION = 512
 CAPTURE_COMPLETENESS = {"count-verified", "end-observed"}
 SEVERITY_ORDER = {"error": 0, "warning": 1}
@@ -52,6 +84,87 @@ def _exceptions(issues):
         ):
             unique[key] = record
     return list(unique.values())
+
+
+def _provider_config(source_path, config):
+    """The given configuration, else the default one beside the collector database."""
+    if config is not None:
+        return config
+    from .service import default_config
+
+    return default_config(Path(source_path).expanduser().resolve().parent)
+
+
+def _presented(bundle, config, timeline, supplemental):
+    """Identity and USD presentation of the collection from cached providers only."""
+    from portfolio_lab.pipeline import _normalize_collector
+
+    presented, _ = _normalize_collector(bundle, config, False, "current", timeline, supplemental)
+    return presented
+
+
+def _sum_text(amounts):
+    with localcontext() as context:
+        context.prec = DECIMAL_PRECISION
+        return _decimal_text(sum((Decimal(amount) for amount in amounts), Decimal(0)))
+
+
+def _account_usd(presented_account, held, unconverted_accounts):
+    """Covered USD holdings and cash of one account; unconverted amounts are counted."""
+    covered = [row["market_value_usd"] for row in held if row.get("market_value_usd") is not None]
+    cash = presented_account.get("cash_usd")
+    unconverted = len(held) - len(covered)
+    return {
+        "covered_total": _sum_text([*covered, *([cash] if cash is not None else [])]),
+        "holdings": _sum_text(covered),
+        "cash": cash,
+        "covered_position_count": len(covered),
+        "unconverted_position_count": unconverted,
+        "reported_currency": presented_account.get("reported_currency"),
+        "currency_basis": presented_account.get("currency_basis"),
+        "fx_pair": presented_account.get("fx_pair"),
+        "fx_observation_date": presented_account.get("fx_observation_date"),
+        "fully_covered": unconverted == 0
+        and presented_account.get("account_id") not in unconverted_accounts,
+    }
+
+
+def _identity_counts(held):
+    statuses = [row.get("resolution_status") for row in held]
+    return {
+        "resolved": sum(status in LISTED_STATUSES for status in statuses),
+        "open": sum(status in OPEN_STATUSES for status in statuses),
+    }
+
+
+def _usd_totals(presented):
+    normalization = presented["normalization"]
+    positions = presented["ledger"]["positions"]
+    currency = normalization["presentation_currency"]
+    if currency is None:
+        return {
+            "currency": None,
+            "covered_total": None,
+            "covered_position_count": 0,
+            "unconverted_position_count": len(positions),
+            "unconverted_accounts": [],
+            "method_version": normalization["method_version"],
+            "label": NO_CURRENCY_LABEL,
+        }
+    return {
+        "currency": currency,
+        "covered_total": normalization["covered_value_usd"],
+        "covered_position_count": sum(row["market_value_usd"] is not None for row in positions),
+        "unconverted_position_count": normalization["unconverted_positions"],
+        "unconverted_accounts": list(normalization.get("unconverted_account_ids", [])),
+        "method_version": normalization["method_version"],
+        "label": USD_LABEL.format(currency=currency),
+    }
+
+
+def _public_exceptions(records):
+    """Owner-facing exception records; the stable key is a digest, not a credential."""
+    return [{"key": record["key"], **_clean(record)} for record in records]
 
 
 def _empty_subtotal():
@@ -126,7 +239,7 @@ def _totals(accounts):
     return {"by_currency": by_currency, "label": TOTALS_LABEL, "reconciled_nav": False}
 
 
-def _account(account, ledger, capture, account_codes):
+def _account(account, ledger, capture, account_codes, presentation):
     aid = account["account_id"]
     held = [row for row in ledger["positions"] if row["account_id"] == aid]
     cash, cash_currency = account["cash"], account["captured_cash_currency"]
@@ -154,18 +267,36 @@ def _account(account, ledger, capture, account_codes):
         # The collector tags each account-scoped issue it raised; portfolio-wide codes (for
         # example NO_COMPLETE_BATCH) appear only in the top-level exception list.
         "exceptions": list(account_codes.get(aid, [])),
+        "usd": _account_usd(
+            presentation["accounts"].get(aid, {}),
+            presentation["held"].get(aid, []),
+            presentation["unconverted_accounts"],
+        ),
+        "identity": _identity_counts(presentation["held"].get(aid, [])),
+        "open_exception_count": sum(
+            record.get("account_id") == aid for record in presentation["exceptions"]
+        ),
     }
 
 
-def _position(position, capture, securities):
+def _resolution_status(presented, security):
+    """Listing status; an owner mapping keeps the collector's own mapping status."""
+    status = presented.get("resolution_status")
+    if status is None or status == "mapped":
+        return security.get("resolution_status", "unresolved")
+    return status
+
+
+def _position(position, capture, securities, presented, presented_securities):
     security = securities.get(position["security_id"], {})
+    listing = presented_securities.get(presented["security_id"], {})
     return {
         "account_id": position["account_id"],
         "source_id": position["source_id"],
         "snapshot_id": position["snapshot_id"],
         "row_number": position["row_number"],
         "symbol": position["raw_symbol"],
-        "name": security.get("name"),
+        "name": listing.get("name") or security.get("name"),
         "quantity": position["quantity"],
         "price": position["price"],
         "market_value": position["market_value"],
@@ -174,8 +305,10 @@ def _position(position, capture, securities):
         "total_cost": position["total_cost"],
         "observed_at": capture["captured_at"] if capture else None,
         "value_basis": "captured_as_observed",
-        "security_id": position["security_id"],
-        "resolution_status": security.get("resolution_status", "unresolved"),
+        "security_id": presented["security_id"],
+        "resolution_status": _resolution_status(presented, security),
+        "value_currency": presented.get("reported_currency"),
+        **{field: presented.get(field) for field in PRESENTED_POSITION_FIELDS},
     }
 
 
@@ -200,6 +333,18 @@ def _collection(collector, accounts, codes):
     }
 
 
+def collection_facts(bundle) -> dict:
+    """Receipt facts of a collected bundle: what status needs, with nothing presented."""
+    collector = bundle["collector"]
+    codes = {issue["code"] for issue in bundle.get("issues") or []}
+    collection = _collection(collector, bundle["ledger"]["accounts"], codes)
+    return {
+        "collection_received_at": collector["collection_received_at"],
+        "status": collection["status"],
+        "account_count": collection["account_count"],
+    }
+
+
 def _dates(timeline, collector, bundle):
     return {
         "collection_received_at": collector["collection_received_at"],
@@ -212,28 +357,53 @@ def _dates(timeline, collector, bundle):
     }
 
 
-def _projection(bundle):
-    """Accounts and positions projected from the exact ledger with their capture dates."""
+def _projection(bundle, presented):
+    """Accounts and positions projected from the exact ledger with their capture dates.
+
+    Captured fields come from the collector ledger unchanged; identity and USD fields
+    come from the presented ledger, which keeps the collector's position order.
+    """
     ledger, collector = bundle["ledger"], bundle["collector"]
+    shown = presented["ledger"]
+    if len(shown["positions"]) != len(ledger["positions"]):
+        raise ValueError("The USD presentation does not match the collected positions.")
     securities = {row["security_id"]: row for row in ledger["securities"]}
+    presented_securities = {row["security_id"]: row for row in shown["securities"]}
     captures = {row["account_id"]: row for row in ledger["captures"]}
     account_codes = collector.get("account_issue_codes") or {}
+    held = {}
+    for row in shown["positions"]:
+        held.setdefault(row["account_id"], []).append(row)
+    presentation = {
+        "accounts": {row["account_id"]: row for row in shown["accounts"]},
+        "held": held,
+        "unconverted_accounts": set(presented["normalization"].get("unconverted_account_ids", [])),
+        "exceptions": presented["exceptions"],
+    }
     accounts = [
-        _account(account, ledger, captures.get(account["account_id"]), account_codes)
+        _account(account, ledger, captures.get(account["account_id"]), account_codes, presentation)
         for account in ledger["accounts"]
     ]
     positions = [
-        _position(row, captures.get(row["account_id"]), securities) for row in ledger["positions"]
+        _position(row, captures.get(row["account_id"]), securities, shown_row, presented_securities)
+        for row, shown_row in zip(ledger["positions"], shown["positions"], strict=True)
     ]
     return accounts, positions
 
 
-def current_snapshot(source_path, *, supplemental=None, account_ids=None, generated_at=None):
+def current_snapshot(
+    source_path, *, supplemental=None, account_ids=None, generated_at=None, config=None
+):
     """Project the newest completed collector publication as current holdings.
 
     The caller must supply a collector database. Source receipts are accepted through the
     generation instant, so a Sunday capture stays current on Sunday while the market
     observation date remains the last completed session.
+
+    ``config`` locates the provider cache and selects listing and FX providers; without
+    it the default configuration beside ``source_path`` is used. Providers are read from
+    their cache only. ``exceptions`` lists collection issues; ``open_exceptions`` lists
+    the identity and currency exceptions an owner can resolve.
     """
     timeline = review_context("current", generated_at=generated_at)
     bundle = load_collector(
@@ -246,8 +416,9 @@ def current_snapshot(source_path, *, supplemental=None, account_ids=None, genera
     )
     collector = bundle["collector"]
     timeline["collection_received_at"] = collector["collection_received_at"]
-    exceptions = _exceptions(bundle["issues"])
-    accounts, positions = _projection(bundle)
+    presented = _presented(bundle, _provider_config(source_path, config), timeline, supplemental)
+    exceptions = _exceptions(presented["issues"])
+    accounts, positions = _projection(bundle, presented)
     response = {
         "schema_version": SCHEMA_VERSION,
         "review_kind": "current",
@@ -256,8 +427,12 @@ def current_snapshot(source_path, *, supplemental=None, account_ids=None, genera
         "collection": _collection(collector, accounts, {issue["code"] for issue in exceptions}),
         "accounts": accounts,
         "positions": positions,
-        "totals": _totals(accounts),
+        "totals": {**_totals(accounts), "usd": _usd_totals(presented)},
         "exceptions": exceptions,
+        "identity": dict(presented["identity"]),
+        "fx_observations": presented["fx_observations"],
         "excluded_rows": bundle["ledger"]["excluded_rows"],
     }
-    return _clean(response)
+    public = _clean(response)
+    public["open_exceptions"] = _public_exceptions(presented["exceptions"])
+    return public

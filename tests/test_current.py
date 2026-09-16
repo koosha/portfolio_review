@@ -1,6 +1,9 @@
+import copy
 import json
+import re
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import patch
@@ -8,6 +11,19 @@ from unittest.mock import patch
 from portfolio.storage import Store
 from portfolio_research.adapter import _receipt_before, account_id, load_collector
 from portfolio_research.current import current_snapshot
+from portfolio_research.service import default_config
+from tests.test_normalize import (
+    A_ROWS,
+    B_ROWS,
+    CADUSD,
+    FX_DAY,
+    LISTINGS,
+    STALE_DAY,
+    cad_table,
+    fx_table,
+    issuer_lookup,
+    usd_table,
+)
 
 SUNDAY_RECEIPT = "2026-09-13T20:00:00+00:00"
 SUNDAY_GENERATED = "2026-09-13T21:00:00+00:00"
@@ -15,6 +31,55 @@ FRIDAY = "2026-09-11"
 MONDAY = "2026-09-14"
 MONDAY_RECEIPT = "2026-09-14T19:00:00+00:00"
 MONDAY_GENERATED = "2026-09-14T19:30:00+00:00"
+EXCEPTION_KEY = re.compile(r"[0-9a-f]{40}")
+EXCEPTION_FIELDS = {
+    "key",
+    "code",
+    "severity",
+    "scope",
+    "source_id",
+    "snapshot_id",
+    "account_id",
+    "raw_symbol",
+    "message",
+    "proposed",
+    "candidates",
+    "resolution",
+}
+
+
+@contextmanager
+def cached_providers(fx=None, listings=None, search=None):
+    """Listing, search, FX and issuer providers answering from fixture data only.
+
+    Every provider call is recorded with its ``refresh`` flag; a network fetch fails.
+    """
+    known = LISTINGS if listings is None else listings
+    table = fx_table() if fx is None else fx
+    candidates = search or {}
+    calls = []
+
+    def metadata(config, symbol, *, refresh, issues):
+        calls.append(("listing", symbol, refresh))
+        found = known.get(symbol)
+        return copy.deepcopy(found) if found else None
+
+    def searcher(config, text, *, refresh, issues, limit=5):
+        calls.append(("search", text, refresh))
+        return copy.deepcopy(candidates.get(text, []))
+
+    def fx_loader(config, currencies, start_date, end_date, *, refresh, issues):
+        calls.append(("fx", tuple(currencies), refresh))
+        return table
+
+    with (
+        patch("portfolio_research.market_listings.listing_metadata", side_effect=metadata),
+        patch("portfolio_research.market_listings.search_listings", side_effect=searcher),
+        patch("portfolio_research.fx_providers.load_fx_table", side_effect=fx_loader),
+        patch("portfolio_research.issuers.sec_issuer_lookup", return_value=issuer_lookup),
+        patch("portfolio_lab.providers._fetch_json", side_effect=AssertionError("network")),
+    ):
+        yield calls
 
 
 def table(symbol="DEMO", value="10", currency="USD"):
@@ -536,3 +601,187 @@ class CurrentSnapshotTests(unittest.TestCase):
         self.assertFalse(_receipt_before("2026-09-14T15:00:01+00:00", cutoff))
         for value in ("2026-09-14T14:00:00", "not a time", None, 7):
             self.assertFalse(_receipt_before(value, cutoff))
+
+    def test_identity_and_usd_presentation_use_cached_providers_only(self):
+        self.publish(self.captures())
+        with patch("portfolio_lab.providers._fetch_json", side_effect=AssertionError("network")):
+            response = self.snapshot()
+        records = response["open_exceptions"]
+        self.assertEqual(
+            sorted((record["code"], record["raw_symbol"]) for record in records),
+            [
+                ("UNKNOWN_VALUE_CURRENCY", "OTHER"),
+                ("UNRESOLVED_LISTING", "DEMO"),
+                ("UNRESOLVED_LISTING", "OTHER"),
+            ],
+        )
+        for record in records:
+            self.assertLessEqual(EXCEPTION_FIELDS, set(record))
+            self.assertRegex(record["key"], EXCEPTION_KEY)
+        self.assertEqual(response["identity"]["unresolved"], 2)
+        self.assertEqual(response["fx_observations"], [])
+        usd = response["totals"]["usd"]
+        self.assertEqual(usd["covered_total"], "12.03")
+        self.assertEqual(usd["covered_position_count"], 1)
+        self.assertEqual(usd["unconverted_position_count"], 1)
+        self.assertEqual(usd["unconverted_accounts"], [account_id(self.b)])
+        self.assertIn("not reconciled NAV", usd["label"])
+        symbols = {position["symbol"]: position for position in response["positions"]}
+        self.assertEqual(symbols["DEMO"]["market_value_usd"], "10")
+        self.assertEqual(symbols["DEMO"]["value_currency"], "USD")
+        self.assertEqual(symbols["DEMO"]["value_currency_basis"], "row")
+        self.assertIsNone(symbols["OTHER"]["market_value_usd"])
+        self.assertIsNone(symbols["OTHER"]["value_currency"])
+        self.assertEqual(symbols["OTHER"]["market_value"], "10")
+        accounts = self.by_source(response)
+        self.assertEqual(accounts[self.a]["open_exception_count"], 1)
+        self.assertEqual(accounts[self.b]["open_exception_count"], 2)
+        self.assertEqual(accounts[self.b]["identity"], {"resolved": 0, "open": 1})
+        serialized = json.dumps(response, allow_nan=False)
+        self.assertNotIn(self.temp.name, serialized)
+        self.assertNotIn("finance.yahoo.com", serialized)
+
+
+class CurrentUsdPresentationTests(unittest.TestCase):
+    """The normalization gate fixture seen through the current holdings projection."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = Store(self.temp.name)
+        self.a = self.store.add_source(
+            "USD portfolio", url="https://finance.yahoo.com/portfolio/p_fixture_current_usd"
+        )
+        self.b = self.store.add_source(
+            "CAD portfolio", url="https://finance.yahoo.com/portfolio/p_fixture_current_cad"
+        )
+        with patch("portfolio.storage.now", return_value=SUNDAY_RECEIPT):
+            batch = self.store.begin_batch([self.a, self.b])
+            self.store.ingest_table(self.a, usd_table(A_ROWS), batch_id=batch)
+            self.store.ingest_table(
+                self.b, cad_table(B_ROWS), batch_id=batch, extension_version="1.2.0"
+            )
+
+    def snapshot(self, **kwargs):
+        return current_snapshot(self.store.path, generated_at=SUNDAY_GENERATED, **kwargs)
+
+    @staticmethod
+    def by_symbol(response):
+        return {(row["source_id"], row["symbol"]): row for row in response["positions"]}
+
+    def test_usd_totals_cover_positions_and_cash_once(self):
+        with cached_providers() as calls:
+            response = self.snapshot()
+        self.assertTrue(calls)
+        self.assertFalse(any(refresh for _, _, refresh in calls))
+        usd = response["totals"]["usd"]
+        self.assertEqual(usd["covered_total"], "3990.102100")
+        self.assertEqual(usd["covered_position_count"], 4)
+        self.assertEqual(usd["unconverted_position_count"], 0)
+        self.assertEqual(usd["unconverted_accounts"], [])
+        self.assertIn("dated FX observations", usd["label"])
+        self.assertFalse(response["totals"]["reconciled_nav"])
+        self.assertEqual([row["currency"] for row in response["totals"]["by_currency"]], [None])
+        self.assertEqual(
+            response["identity"],
+            {
+                "mapped": 0,
+                "resolved": 2,
+                "resolved_from_display": 2,
+                "resolved_by_search": 0,
+                "ambiguous": 0,
+                "unresolved": 0,
+            },
+        )
+        self.assertEqual(response["open_exceptions"], [])
+        used = {(row["pair"], row["date"]) for row in response["fx_observations"]}
+        self.assertEqual(used, {("CADUSD", FX_DAY), ("GBPCAD", FX_DAY)})
+        accounts = {row["source_id"]: row for row in response["accounts"]}
+        a, b = accounts[self.a]["usd"], accounts[self.b]["usd"]
+        self.assertEqual(a["holdings"], "2656.30")
+        self.assertEqual(a["cash"], "100")
+        self.assertEqual(a["covered_total"], "2756.30")
+        self.assertEqual(a["reported_currency"], "USD")
+        self.assertEqual(a["currency_basis"], "inferred_from_positions")
+        self.assertTrue(a["fully_covered"])
+        expected_b = (Decimal("1426.00") + Decimal("235.00") + Decimal("50")) * CADUSD
+        self.assertEqual(Decimal(b["covered_total"]), expected_b)
+        self.assertEqual(b["cash"], format(Decimal("50") * CADUSD, "f"))
+        self.assertEqual(b["covered_position_count"], 2)
+        self.assertEqual(b["unconverted_position_count"], 0)
+        self.assertEqual(accounts[self.b]["identity"], {"resolved": 2, "open": 0})
+        self.assertEqual(accounts[self.b]["open_exception_count"], 0)
+        self.assertEqual(accounts[self.b]["cash"], {"amount": "50", "currency": None})
+
+    def test_positions_keep_captured_amounts_beside_their_usd_presentation(self):
+        with cached_providers():
+            held = self.by_symbol(self.snapshot())
+        a_ry, b_ry, b_vod = (
+            held[(self.a, "RY.TO")],
+            held[(self.b, "RY.TO")],
+            held[(self.b, "VOD.L")],
+        )
+        self.assertEqual(b_ry["market_value"], "1426.00")
+        self.assertEqual(b_ry["price"], "285.20")
+        self.assertIsNone(b_ry["currency"])
+        self.assertEqual(b_ry["quote_symbol"], "RY.TO")
+        self.assertEqual(b_ry["quote_currency"], "CAD")
+        self.assertEqual(b_ry["value_currency"], "CAD")
+        self.assertEqual(b_ry["value_currency_basis"], "arithmetic_quote")
+        self.assertEqual(b_ry["market_value_usd"], "1028.288600")
+        self.assertEqual(b_ry["fx_rate"], "0.7211")
+        self.assertEqual(b_ry["fx_pair"], "CADUSD")
+        self.assertEqual(b_ry["fx_observation_date"], FX_DAY)
+        self.assertEqual(b_ry["security_id"], "RY.TO")
+        self.assertEqual(b_ry["resolution_status"], "resolved")
+        self.assertEqual(b_ry["name"], "RY.TO fixture listing")
+
+        self.assertIsNone(a_ry["quote_symbol"])
+        self.assertEqual(a_ry["value_currency"], "USD")
+        self.assertEqual(a_ry["value_currency_basis"], "arithmetic_fx")
+        self.assertEqual(a_ry["market_value_usd"], "2056.30")
+        self.assertEqual(a_ry["market_value"], "2056.30")
+        self.assertIsNone(a_ry["fx_pair"])
+        self.assertEqual(a_ry["resolution_status"], "resolved_from_display")
+
+        self.assertEqual(b_vod["price"], "128.75")
+        self.assertEqual(b_vod["quote_currency"], "GBp")
+        self.assertEqual(b_vod["quote_unit_factor"], 100)
+        self.assertEqual(b_vod["price_major"], "1.2875")
+        self.assertEqual(b_vod["value_currency"], "CAD")
+        self.assertEqual(b_vod["market_value_usd"], format(Decimal("235.00") * CADUSD, "f"))
+        for row in held.values():
+            self.assertEqual(row["presentation_currency"], "USD")
+
+    def test_stale_fx_leaves_foreign_amounts_unconverted_and_open(self):
+        with cached_providers(fx=fx_table(STALE_DAY)):
+            response = self.snapshot()
+        usd = response["totals"]["usd"]
+        self.assertEqual(usd["covered_total"], "600")
+        self.assertEqual(usd["covered_position_count"], 1)
+        self.assertEqual(usd["unconverted_position_count"], 3)
+        self.assertEqual(usd["unconverted_accounts"], [account_id(self.a), account_id(self.b)])
+        stale = [row for row in response["open_exceptions"] if row["code"] == "STALE_FX"]
+        self.assertEqual(sorted(row["pair"] for row in stale), ["CADUSD", "GBPCAD"])
+        for record in stale:
+            self.assertRegex(record["key"], EXCEPTION_KEY)
+            self.assertEqual(record["scope"], "fx")
+            self.assertEqual(record["resolution"]["kind"], "fx_manual")
+        held = self.by_symbol(response)
+        self.assertEqual(held[(self.a, "AAPL")]["market_value_usd"], "600")
+        self.assertIsNone(held[(self.b, "RY.TO")]["market_value_usd"])
+        self.assertEqual(held[(self.b, "RY.TO")]["market_value"], "1426.00")
+        accounts = {row["source_id"]: row for row in response["accounts"]}
+        self.assertFalse(accounts[self.b]["usd"]["fully_covered"])
+        self.assertIsNone(accounts[self.b]["usd"]["cash"])
+
+    def test_explicit_configuration_selects_the_listing_provider(self):
+        config = default_config(self.temp.name)
+        config["data"]["listing_provider"] = "none"
+        with cached_providers() as calls:
+            response = self.snapshot(config=config)
+        self.assertEqual([call for call in calls if call[0] == "listing"], [])
+        self.assertEqual(response["identity"]["unresolved"], 4)
+        self.assertEqual(response["totals"]["usd"]["covered_total"], "0")
+        codes = [row["code"] for row in response["open_exceptions"]]
+        self.assertEqual(codes.count("UNRESOLVED_LISTING"), 4)

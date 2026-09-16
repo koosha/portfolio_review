@@ -655,9 +655,13 @@ def exposures(bundle: dict, config: dict) -> dict:
             item["sources"].append(source)
         sectors[sector] = sectors.get(sector, 0.0) + value
 
+    unconverted = 0
     for position in reconciliation["holdings"]:
         value = _number(position.get("market_value"))
-        if value is None or position.get("currency") != summary["currency"]:
+        if position.get("currency") != summary["currency"]:
+            unconverted += 1
+            continue
+        if value is None:
             continue
         sid = position["security_id"]
         security = metadata.get(sid, {})
@@ -694,6 +698,14 @@ def exposures(bundle: dict, config: dict) -> dict:
             )
         else:
             unknown += value
+    if unconverted:
+        issues.append(
+            _issue(
+                "unconverted_positions",
+                f"{unconverted} positions without a verified {summary['currency']} value "
+                "were excluded from exposure totals",
+            )
+        )
     unclassified = summary.get("unclassified_value")
     unknown += max(0.0, unclassified or 0.0)
     if unknown:

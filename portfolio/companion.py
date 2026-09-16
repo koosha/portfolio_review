@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from .storage import yahoo_url
+from .storage import LISTING_CAPTURE_VERSION, version_at_least, yahoo_url
 from .yahoo import discover_links
 
 
@@ -50,6 +50,10 @@ class ChromeCompanion:
                 extension_dir=str(Path(__file__).resolve().parent.parent / "chrome-extension"),
             )
             result["extension_version"] = self.extension_version
+            result["required_extension_version"] = LISTING_CAPTURE_VERSION
+            result["listing_capture_supported"] = version_at_least(
+                self.extension_version, LISTING_CAPTURE_VERSION
+            )
             result["progress"] = {
                 "total": len(self.jobs),
                 "completed": sum(j["status"] in ("done", "failed") for j in self.jobs),
@@ -160,6 +164,9 @@ class ChromeCompanion:
                 if job["status"] == "pending":
                     job["status"] = "running"
                     job["started"] = time.time()
+                    # The capture belongs to the client that claimed it, not to whichever
+                    # paired profile happened to poll last while it was running.
+                    job["extension_version"] = self.extension_version
                     self.state["message"] = "Chrome is opening " + job["name"] + "…"
                     return {
                         **{
@@ -199,7 +206,10 @@ class ChromeCompanion:
                         )
                     result.update(
                         self.store.ingest_table(
-                            job["source_id"], payload.get("table"), batch_id=job.get("batch_id")
+                            job["source_id"],
+                            payload.get("table"),
+                            batch_id=job.get("batch_id"),
+                            extension_version=job.get("extension_version"),
                         )
                     )
                     self.state["results"].append(

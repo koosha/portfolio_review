@@ -3,7 +3,7 @@
 // not test browser layout, accessibility APIs, Chrome policy or extension behavior.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {launch, until} from './support/dom-http.mjs';
+import {launch, namedInput, setInput, until} from './support/dom-http.mjs';
 
 // Two synthetic accounts published in one batch on a Sunday: A labels every row in USD,
 // B carries no currency column, so captured subtotals must stay separate and unconverted.
@@ -58,6 +58,20 @@ const pullingScript = script(`
         store.ingest_table(a, table('SIMC', 'USD'), batch_id=pulling)
 `);
 
+// Supplemental dated mappings identify both held symbols, so no listing question remains.
+// Account A labels its values in USD; account B carries no currency column and no listing
+// metadata or FX observation explains its values, so exactly one account_currency
+// exception stays open until the owner attests the currency.
+const exceptionScript = script(`
+    from portfolio_research.adapter import validate_supplemental
+    def mapping(source, symbol):
+        return {'source_id': source, 'raw_symbol': symbol, 'security_id': 'SIM-' + symbol,
+            'issuer_id': 'issuer:' + symbol, 'ticker': symbol, 'instrument_type': 'equity',
+            'eligible': False, 'valid_from': '2026-01-01'}
+    server.research.store.append_record('supplemental', validate_supplemental({'version': 1,
+        'accounts': [], 'securities': [mapping(a, 'SIMA'), mapping(b, 'SIMB')], 'tax_lots': []}))
+`);
+
 const pages = ['holdings', 'research', 'scenarios', 'review', 'data', 'settings', 'overview'];
 const accountCards = $ => $('current-accounts').querySelectorAll('.account-card').length;
 
@@ -109,3 +123,80 @@ test('a pull in progress is not shown as a failed collection', {timeout: 120000}
   assert.deepEqual(runtimeErrors, []);
 });
 
+const exceptionForms = $ => $('current-exception-forms').querySelectorAll('form.exception-form');
+const coveredMetric = $ => [...$('current-totals').querySelectorAll('.metric')]
+  .find(node => node.querySelector('.metric-label')?.textContent === 'Covered value (USD)');
+const unlabeledCard = $ => [...$('current-accounts').querySelectorAll('.account-card')]
+  .find(node => node.textContent.includes('Synthetic unlabeled account'));
+
+test('an open account currency exception is resolved from Overview', {timeout: 120000}, async t => {
+  const {window, $, runtimeErrors} = await launch(t, exceptionScript, {
+    ready: $ => $('current-collection-state')?.textContent === 'Published',
+  });
+
+  await until(() => exceptionForms($).length === 1, 'one open exception form');
+  // Nothing in the unlabeled account is converted yet, so no USD subtotal is claimed.
+  assert.doesNotMatch(unlabeledCard($).textContent, /USD 0/);
+  const form = exceptionForms($)[0];
+  assert.match(form.textContent, /SIMB/);
+  assert.equal(form.dataset.kind, 'account_currency');
+  const headers = [...$('current-positions').querySelectorAll('th')].map(th => th.textContent);
+  for (const column of ['Quote currency', 'Value currency', 'USD value', 'FX (pair · date)']) {
+    assert.ok(headers.includes(column), `Missing positions column ${column}: ${headers.join(', ')}`);
+  }
+
+  setInput(window, namedInput(window, 'Currency of reported values'), 'USD');
+  const save = [...form.querySelectorAll('button')].find(node => node.textContent === 'Save');
+  assert.ok(save, 'The exception form has a Save button');
+  save.click();
+
+  await until(() => $('current-exception-forms').textContent.includes('No open exceptions'),
+    'the resolved exception to disappear');
+  assert.equal(exceptionForms($).length, 0);
+  await until(() => coveredMetric($)?.querySelector('.metric-value')?.textContent === '48.5',
+    'covered USD value including the attested account');
+  assert.match(unlabeledCard($).textContent, /USD 24.25/);
+  assert.match(coveredMetric($).querySelector('.metric-note').textContent, /not reconciled NAV/);
+  assert.equal($('research-error').hidden, true, $('research-error').textContent);
+  assert.deepEqual(runtimeErrors, []);
+});
+
+// The forms are keyed to the snapshot behind them, so the panel has to be reloaded
+// whenever that snapshot can have moved on: after a review or a new pull, and after the
+// service refuses an answer because the exception it named is already closed.
+test('open exceptions reload after a refused answer and after a sources change',
+  {timeout: 120000}, async t => {
+  const {window, $, runtimeErrors} = await launch(t, exceptionScript, {
+    ready: $ => $('current-collection-state')?.textContent === 'Published',
+  });
+  await until(() => exceptionForms($).length === 1, 'one open exception form');
+
+  const requested = [];
+  const live = window.fetch;
+  let refuse = true;
+  window.fetch = (path, options = {}) => {
+    requested.push(String(path));
+    if (refuse && String(path).includes('/api/research/resolutions')) {
+      return Promise.resolve({ok: false, json: async () => ({error: 'This exception is no longer open.'})});
+    }
+    return live(path, options);
+  };
+
+  setInput(window, namedInput(window, 'Currency of reported values'), 'USD');
+  const save = [...exceptionForms($)[0].querySelectorAll('button')]
+    .find(node => node.textContent === 'Save');
+  save.click();
+  await until(() => requested.some(path => path.includes('/api/research/exceptions')),
+    'the exceptions panel to reload after the service refused the answer');
+  await until(() => /no longer open/.test($('research-error').textContent),
+    'the refused answer to be reported to the owner');
+  assert.equal(exceptionForms($).length, 1, 'the still-open exception survives the reload');
+
+  refuse = false;
+  requested.length = 0;
+  window.document.dispatchEvent(new window.Event('portfolio:sources-changed'));
+  await until(() => requested.some(path => path.includes('/api/research/exceptions')),
+    'the exceptions panel to reload when the holdings behind it change');
+  assert.equal(exceptionForms($).length, 1);
+  assert.deepEqual(runtimeErrors, []);
+});
