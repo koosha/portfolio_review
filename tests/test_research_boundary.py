@@ -12,7 +12,12 @@ from portfolio.storage import Store
 from portfolio_lab.ingestion import ResearchStore
 from portfolio_research.calendar import decision_context
 from portfolio_research.operations import restore_backup
-from portfolio_research.public import public_result, public_sources, public_workspace
+from portfolio_research.public import (
+    _safe_text,
+    public_result,
+    public_sources,
+    public_workspace,
+)
 from portfolio_research.repository import ResearchRepository
 from portfolio_research.service import ResearchService, default_config
 
@@ -58,6 +63,40 @@ class PublicBoundaryTests(unittest.TestCase):
         }
         self.assertNotIn("fixture-api-secret", json.dumps(public_workspace(workspace)))
         self.assertNotIn("fixture@example.invalid", json.dumps(public_workspace(workspace)))
+
+    def test_local_paths_are_redacted_whatever_volume_or_root_they_sit_on(self):
+        """A data directory may live anywhere; none of its roots may reach a response."""
+        for path in (
+            "/Volumes/Backup/portfolio/portfolio.sqlite3",
+            "/opt/portfolio/data/research.sqlite3",
+            "/Library/Application Support/portfolio/research.sqlite3",
+            "/etc/portfolio/credentials.json",
+            "/Applications/Portfolio.app/Contents/data.sqlite3",
+            "/Users/synthetic/My Drive (fixture@example.invalid)/code/secret.sqlite3",
+            "/private/var/folders/t7/synthetic/portfolio.sqlite3",
+        ):
+            with self.subTest(path=path):
+                message = f"Portfolio SQLite database does not exist: {path}. No demo data."
+                self.assertEqual(
+                    _safe_text(message),
+                    "Portfolio SQLite database does not exist: [local path]",
+                )
+        self.assertEqual(_safe_text("file:///opt/portfolio/x.json"), "[local path]")
+        self.assertEqual(
+            _safe_text(r"Read C:\Data\portfolio\research.sqlite3 first"),
+            "Read [local path]",
+        )
+
+    def test_redaction_leaves_authored_message_text_and_approved_urls_alone(self):
+        """Redaction must not eat the sentences the owner is meant to read."""
+        for text in (
+            "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany",
+            "2 account/currency/identity exceptions need your answer in Overview.",
+            "Choose current / historical / demo before starting.",
+            "Pair the extension in Data / Yahoo Finance.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_safe_text(text), text)
 
     def test_approved_source_domains_still_reject_userinfo_credentials(self):
         for locator in (

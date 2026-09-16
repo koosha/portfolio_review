@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -31,6 +32,65 @@ SUBMITTED_REVIEW_KIND = "historical"
 UNSUPPORTED_CURRENT = "Current holdings come from the Yahoo collector; this configured source is analyzed only through saved reviews."
 CURRENT_NOTE = "Current holdings and the last completed analysis are dated separately; they do not share a denominator."
 UNREADABLE_COLLECTION = "Collector holdings could not be read. Saved reviews remain available."
+LISTING_CACHE = "yahoo_listing"
+FX_CACHE = "bank_of_canada_fx"
+WORKFLOW_FIELDS = (
+    "workflow_id",
+    "operation_key",
+    "status",
+    "stage",
+    "review_kind",
+    "stages",
+    "providers",
+    "batch_id",
+    "run_id",
+    "error",
+    "created_at",
+    "updated_at",
+    "cancel_requested",
+)
+# The states an operation can still be worked on in; everything else is final.
+LIVE_WORKFLOW = ("queued", "running", "waiting")
+WORKFLOW_SWEEP = 50  # Recent operations examined when the application stops.
+EXTENSION_ACTIONS = {
+    "connected": None,
+    "offline": "Open Chrome with the extension enabled; Yahoo stays signed in there.",
+    "unpaired": "Install the Chrome extension and pair it with the key shown in Data → Yahoo Finance.",
+}
+
+
+def _public_workflow(record):
+    """The browser's view of one operation: progress and next steps, nothing local."""
+    projection = {key: record.get(key) for key in WORKFLOW_FIELDS}
+    projection["cancel_requested"] = bool(record.get("cancel_requested"))
+    return _clean(projection)
+
+
+def _cache_health(config, provider):
+    """How much this provider has already answered, from its own archived receipts."""
+    from .provider_cache import cache_root, newest_sources
+
+    root = cache_root(config, provider)
+    try:
+        responses = sum(1 for _ in root.glob("*.source.json")) if root.is_dir() else 0
+        received = [
+            source.get("received_at") for source in newest_sources(config, provider).values()
+        ]
+    except OSError:
+        responses, received = 0, []
+    return {
+        "cached_responses": responses,
+        "last_received_at": max(received) if received else None,
+    }
+
+
+def _installed(package):
+    from importlib.util import find_spec
+
+    try:
+        return find_spec(package) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _mapping_date(snapshot, record):
@@ -49,6 +109,13 @@ def _mapping_date(snapshot, record):
     return min([requested, *valuations])
 
 
+def _companion_busy(companion):
+    """Whether the paired browser is collecting, when one was supplied."""
+    if companion is None:
+        return lambda: False
+    return lambda: bool(companion.status().get("busy"))
+
+
 def default_config(directory):
     directory = Path(directory).resolve()
     config = deepcopy(DEFAULTS)
@@ -62,20 +129,34 @@ def default_config(directory):
 
 
 class ResearchService:
-    def __init__(self, config, *, collector_busy=None, recover=False):
+    def __init__(self, config, *, collector_busy=None, recover=False, companion=None):
         self.config = validate_config(deepcopy(config))
         distinct_databases(self.config)
         self.store = ResearchRepository(self.config["research"]["path"])
         self.collector = is_collector(self.config["source"]["path"])
-        self.collector_busy = collector_busy or (lambda: False)
+        self.companion = companion
+        self.collector_busy = collector_busy or _companion_busy(companion)
         self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="portfolio-review")
+        # The monthly operation waits on a collection it does not control, so it runs on its
+        # own thread; a sleeping collection must never hold a worker a preview job needs.
+        self.workflow_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="portfolio-operation"
+        )
         self.lock = threading.RLock()
         self.futures = {}
+        # Every polling loop watches this, so shutting down is a cancellation rather than a
+        # wait for a source that may never answer.
+        self.stopping = threading.Event()
         if recover:
             self.store.recover_jobs()
+            self.store.recover_workflows()
 
     def close(self):
+        """Stop the waiting first, then finish anything no worker will ever finish."""
+        self.stopping.set()
+        self.workflow_executor.shutdown(wait=True, cancel_futures=True)
         self.executor.shutdown(wait=True, cancel_futures=False)
+        self._cancel_unfinished_workflows()
 
     def resolved_config(self):
         config = dashboard_patch(self.config, self.store.latest("configuration", {}))
@@ -113,8 +194,18 @@ class ResearchService:
             "latest_collection": self._latest_collection(),
             "review_kinds": list(REVIEW_KINDS),
             "default_review_kind": DEFAULT_REVIEW_KIND,
+            "active_workflow": self._active_workflow(),
+            "last_workflow": self._last_workflow(),
             "schema_version": 1,
         }
+
+    def _active_workflow(self):
+        active = self.store.active_workflow()
+        return _public_workflow(active) if active else None
+
+    def _last_workflow(self):
+        recent = self.store.workflows(limit=1)
+        return _public_workflow(recent[0]) if recent else None
 
     def _latest_collection(self):
         """Receipt facts of the newest collection; a read failure never breaks status.
@@ -470,6 +561,166 @@ class ResearchService:
         if future:
             future.result(timeout=timeout)
         return self.job(job_id)
+
+    def start_workflow(self, payload):
+        """Start the one monthly operation, or hand back the one already running.
+
+        A second click during an operation is the same operation: the active one is
+        returned as reused, and its operation key keeps it identifiable across restarts.
+        """
+        request = self._workflow_request(payload)
+        review_kind = request.pop("review_kind")
+        with self.lock:
+            active = self.store.active_workflow()
+            if active:
+                return {**_public_workflow(active), "reused": True}
+            workflow_id, created = self.store.create_workflow(
+                payload.get("operation_key"), review_kind, request
+            )
+            if created:
+                from .workflow import HANDOFF_FAILED, ReviewWorkflow
+
+                try:
+                    self.futures[workflow_id] = self.workflow_executor.submit(
+                        ReviewWorkflow(self, workflow_id).run
+                    )
+                except Exception:
+                    # The durable row is already committed. A hand-off that never reached a
+                    # worker would leave it live forever and block every later review.
+                    self._finish_workflow(workflow_id, "failed", HANDOFF_FAILED)
+                    raise
+        return {**self.workflow(workflow_id), "reused": not created}
+
+    def _workflow_request(self, payload):
+        """The supplied operation request, validated before anything durable exists."""
+        allowed = {"operation_key", "review_kind", "month", "collect", "refresh"}
+        if not isinstance(payload, dict) or set(payload) - allowed:
+            raise ValueError(
+                "An operation accepts only an operation key, review kind, month, collect and refresh."
+            )
+        review_kind = payload.get("review_kind", DEFAULT_REVIEW_KIND)
+        if review_kind not in REVIEW_KINDS:
+            raise ValueError("Review kind must be current or historical.")
+        month = payload.get("month")
+        if month is not None:
+            if review_kind != SUBMITTED_REVIEW_KIND:
+                raise ValueError(
+                    "Current reviews use the latest collection; choose a historical review for a month."
+                )
+            # The calendar owns the month contract and its error messages.
+            review_context(SUBMITTED_REVIEW_KIND, month=str(month))
+        collect, refresh = payload.get("collect", True), payload.get("refresh")
+        if type(collect) is not bool or (refresh is not None and type(refresh) is not bool):
+            raise ValueError("collect and refresh must be true or false.")
+        return {
+            "review_kind": review_kind,
+            "month": month,
+            "collect": collect,
+            "refresh": refresh,
+        }
+
+    def workflow(self, workflow_id):
+        return _public_workflow(self.store.workflow(str(workflow_id)))
+
+    def workflows(self, limit=20):
+        return [_public_workflow(record) for record in self.store.workflows(limit)]
+
+    def cancel_workflow(self, workflow_id):
+        """Ask a live operation to stop before it publishes; a finished one is unchanged."""
+        workflow_id = str(workflow_id)
+        with self.lock:
+            record = self.store.workflow(workflow_id)
+            self.store.request_cancel(workflow_id)
+            future = self.futures.get(workflow_id)
+            if record["status"] in LIVE_WORKFLOW and (future is None or future.done()):
+                # Nothing is left to read the flag, so the cancellation is written here:
+                # an operation without a worker must still have a way out of the way.
+                self._finish_workflow(workflow_id, "cancelled")
+        return self.workflow(workflow_id)
+
+    def _cancel_unfinished_workflows(self):
+        """Finish operations this application will not run; a live row blocks the next one."""
+        for record in self.store.workflows(limit=WORKFLOW_SWEEP):
+            if record["status"] in LIVE_WORKFLOW:
+                self._finish_workflow(record["workflow_id"], "cancelled")
+
+    def _finish_workflow(self, workflow_id, status, error=None):
+        """Write a terminal state for an operation no worker will finish."""
+        try:
+            self.store.update_workflow(workflow_id, status=status, error=error)
+        except (ValueError, KeyError):
+            pass  # Already finished or gone; nothing is holding up a later review.
+
+    def provider_health(self):
+        """Each source's own state and the next step when it cannot answer."""
+        config = self.resolved_config()
+        data = config["data"]
+        environment = data.get("fred_api_key_env", "FRED_API_KEY")
+        return {
+            "mode": data["mode"],
+            "providers": [
+                self._extension_health(),
+                {
+                    "name": "yahoo_listings",
+                    "enabled": data["listing_provider"] == "yahoo",
+                    **_cache_health(config, LISTING_CACHE),
+                    "action": None
+                    if data["listing_provider"] == "yahoo"
+                    else "Listing identity is off; turn it on in Data to resolve held symbols.",
+                },
+                {
+                    "name": "bank_of_canada_fx",
+                    "enabled": "bank_of_canada" in data.get("fx_providers", []),
+                    **_cache_health(config, FX_CACHE),
+                    "action": None,
+                },
+                {
+                    "name": "yahoo_prices",
+                    "enabled": data["price_provider"] == "yahoo",
+                    "dependency_installed": _installed("yfinance"),
+                    **_cache_health(config, "yahoo"),
+                    "action": None
+                    if _installed("yfinance")
+                    else "Install the optional yfinance package to fetch Yahoo price history.",
+                },
+                {
+                    "name": "sec",
+                    "enabled": bool(data["sec_enabled"]),
+                    "contact_configured": bool(str(data.get("sec_user_agent", "")).strip()),
+                    **_cache_health(config, "sec"),
+                    "action": None
+                    if str(data.get("sec_user_agent", "")).strip()
+                    else "Set an application name and contact email in Data before fetching SEC filings.",
+                },
+                {
+                    "name": "fred",
+                    "enabled": bool(data["fred_enabled"]),
+                    "credential_present": bool(os.environ.get(environment)),
+                    "env_var": environment,
+                    **_cache_health(config, "fred"),
+                    "action": None
+                    if os.environ.get(environment)
+                    else f"Set the {environment} environment variable before starting the app; keys are never stored here.",
+                },
+            ],
+        }
+
+    def _extension_health(self):
+        state = self.companion.status() if self.companion else {}
+        version = state.get("extension_version")
+        if state.get("browser_open"):
+            status = "connected"
+        elif version:
+            status = "offline"
+        else:
+            status = "unpaired"
+        return {
+            "name": "chrome_extension",
+            "status": status,
+            "version": version,
+            "required_version": state.get("required_extension_version"),
+            "action": EXTENSION_ACTIONS.get(status),
+        }
 
     def save_settings(self, patch):
         with self.lock:

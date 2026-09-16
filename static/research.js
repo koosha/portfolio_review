@@ -30,7 +30,7 @@ function el(tag, content, className) {
   return node;
 }
 function replace(id, ...children) { $(id).replaceChildren(...children.filter(Boolean)); }
-function empty(message='Start a monthly review to calculate this view.', heading='No calculated result') {
+function empty(message='Run Update & analyze to calculate this view.', heading='No calculated result') {
   const node=el('div',null,'empty-state'); node.append(el('strong',heading),el('span',message)); return node;
 }
 function badge(value) { return el('span',friendly(value || 'unavailable'),`badge ${value || ''}`); }
@@ -192,13 +192,16 @@ function renderState(writeStatus=false) {
   const state=busy?'calculating':unapplied?'dirty':previewReady(draft)?'preview':draft.dirty?'dirty':draft.baseRunId?'saved':'empty';
   $('draft-state').textContent=friendly(state);$('draft-state').className=`badge ${state}`;
   $('recalculate').disabled=busy || !draft.baseRunId || !!unapplied;
-  $('recalculate').title=!draft.baseRunId?'Start a monthly review to retain base inputs.':unapplied?'Apply or discard advanced JSON edits first.':'';
+  $('recalculate').title=!draft.baseRunId?'Run Update & analyze to retain base inputs.':unapplied?'Apply or discard advanced JSON edits first.':'';
   $('save-run').disabled=busy || !previewReady(draft) || !!unapplied;
   $('save-run').title=previewReady(draft)?'Save this calculation as an immutable child run.':'Recalculate the current draft before saving.';
-  $('monthly-review').disabled=busy || !!unapplied;
-  $('refresh-research').disabled=busy || !!unapplied;
+  $('update-analyze').disabled=busy || workflowBusy || !!unapplied;
+  $('update-analyze').title=unapplied?'Apply or discard advanced JSON edits first.':workflowBusy?'This operation is already running.':'Collect the newest holdings, fetch provider data and save one review.';
+  $('cancel-workflow').disabled=!workflowRecord || !liveWorkflow(workflowRecord.status) || !!workflowRecord.cancel_requested;
+  $('monthly-review').disabled=busy || workflowBusy || !!unapplied;
+  $('refresh-research').disabled=busy || workflowBusy || !!unapplied;
   $('reset-draft').disabled=busy || !draft.dirty;
-  if(!busy && writeStatus) announce(unapplied?'Advanced JSON has unapplied edits. Apply or discard them before calculating.':draft.dirty && !previewReady(draft)?'Draft changed · displayed results are out of date until recalculated.':previewReady(draft)?'Preview calculated · save a new run to retain this result.':draft.baseRunId?'Saved inputs · display filters leave the analytical scope unchanged.':'Run a monthly review to create the first retained input set.');
+  if(!busy && writeStatus) announce(unapplied?'Advanced JSON has unapplied edits. Apply or discard them before calculating.':draft.dirty && !previewReady(draft)?'Draft changed · displayed results are out of date until recalculated.':previewReady(draft)?'Preview calculated · save a new run to retain this result.':draft.baseRunId?'Saved inputs · display filters leave the analytical scope unchanged.':'Run Update & analyze to create the first retained input set.');
 }
 function renderDiff() {
   const changes=differences(draft.baseConfig,resolved());
@@ -460,7 +463,7 @@ function renderOverview() {
     metric('Coverage',pct(summary.coverage),summary.complete?'Accounts reconciled':'Unresolved amounts remain visible'),
     metric('Unclassified',money(summary.unclassified_value,currency),'Not assumed to be cash'));
   $('overview-caption').textContent=result?`${text(result.metadata?.valuation_date)} · ${summary.position_count ?? '—'} positions · ${friendly(result.metadata?.scope)}`:'Run a review to reconcile completed holdings and available research inputs.';
-  $('analysis-caption').textContent=result?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}`:'No completed analysis yet · Current holdings above are shown from the newest collection.';
+  $('analysis-caption').textContent=result?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}${analysisOperationNote()}`:'No completed analysis yet · Current holdings above are shown from the newest collection.';
   $('exposure-state').replaceChildren(badge(result?.exposure_status));
   replace('issuer-chart',barChart(result?.issuer_exposure,'weight','issuer_id','Top issuer weights · portfolio NAV · direct and fund look-through'));
   replace('sector-chart',barChart(result?.sector_exposure,'weight','sector','Additive sector weights · portfolio NAV · unknown exposure retained'));
@@ -764,6 +767,7 @@ function renderSettings() {
   jsonEditor('settings-json','Resolved editable configuration',config,value=>patch(value));renderDiff();
 }
 function renderData() {
+  renderProviderHealth();
   const status=service.providers || {};
   const providerDraft={...status};
   const providerFields=form([
@@ -774,7 +778,7 @@ function renderData() {
     field('SEC contact user agent (stored privately)','',value=>providerDraft.sec_user_agent=value,{help:'Name and contact email for SEC requests; existing private setting is not displayed.'}),
   ]);
   replace('provider-status',providerFields,button('Save provider settings',async()=>{
-    await api('/api/research/providers',providerDraft);await refreshService();renderData();announce('Provider settings saved for the next explicit refresh.');
+    await api('/api/research/providers',providerDraft);await refreshService();renderData();await loadProviderHealth();announce('Provider settings saved for the next explicit refresh.');
   }),el('p',`${service.dataset || 'Source unavailable'} · ${service.mode || 'Mode unavailable'} · provider failures never substitute synthetic data.`,'muted'));
   if(!supplementalSupported || !supplemental){replace('supplemental-forms',empty('The configured source supplies canonical account records, or a holdings pull is needed first.','No supplemental template'));$('save-supplemental').disabled=true;}
   else {
@@ -855,7 +859,7 @@ async function loadRun(id,ask=true) {
   try {
     const response=await api(`/api/research/runs/${encodeURIComponent(id)}`);if(!gate.current(ticket))return;
     saved=response;result=response.result;draft=restoreDraft(sessionStorage,id,response.config,response.workspace);selectedCandidate='';latestEvaluation=null;
-    $('comparator-records')?.replaceChildren();$('run-comparison').replaceChildren();renderAll();await loadDecisions();
+    $('comparator-records')?.replaceChildren();$('run-comparison').replaceChildren();renderAll();await loadDecisions();loadOperationBehindRun();
   } catch(failure){error(`${failure.message} The previous result remains visible.`);}
   finally{if(gate.current(ticket)){busy=false;renderState(true);}}
 }
@@ -898,6 +902,186 @@ async function monthly(refresh=false) {
   }
   await submitJob('monthly',{as_of:$('review-date').value || service.default_as_of,refresh,patch:draft.patch,workspace:draft.workspace});
 }
+// One monthly operation: collect, resolve, fetch, analyze, publish. The page follows the
+// durable workflow record rather than its own memory, so a reload during an operation
+// resumes the same progress and a duplicate click stays the same operation.
+const stageLabels={collecting:'Collecting',resolving:'Resolving',fetching:'Fetching',analyzing:'Analyzing',publishing:'Publishing'};
+const stageOrder=Object.keys(stageLabels);
+const stageClasses={pending:'',running:'dirty',complete:'complete',skipped:'warning',failed:'failed',cancelled:'warning'};
+const workflowHeadlines={queued:'Update & analyze queued…',running:'Update & analyze running…',waiting:'Waiting for a collection that is already running…',complete:'Review saved.',failed:'The review did not complete; the last usable review is unchanged.',cancelled:'Cancelled before publishing; the last usable review is unchanged.'};
+const liveWorkflow = status => ['queued','running','waiting'].includes(status);
+let workflowRecord=null, workflowTicket=0, workflowBusy=false, workflowRendered=null;
+// Operations behind previously saved runs, read once each so an older run still names
+// what its own operation could and could not do.
+const workflowNotes=new Map();
+function workflowHeadline(workflow) {
+  const stage=workflow?.stage?` · ${stageLabels[workflow.stage] || friendly(workflow.stage)}`:'';
+  return `${workflowHeadlines[workflow?.status] || friendly(workflow?.status)}${liveWorkflow(workflow?.status)?stage:''}`;
+}
+// Stage and provider states the owner still has to act on; an operation that answered
+// everything says so rather than listing five completed stages.
+function workflowSummary(workflow) {
+  const stages=workflow?.stages || {}, providers=workflow?.providers || {};
+  const stalled=stageOrder.filter(name=>['skipped','failed','cancelled'].includes(stages[name]?.status))
+    .map(name=>`${stageLabels[name].toLowerCase()} ${stages[name].status}`);
+  const partial=Object.entries(providers).filter(([,record])=>['failed','partial'].includes(record?.status))
+    .map(([name,record])=>`${friendly(name).toLowerCase()} ${record.status}`);
+  return [stalled.length?`stages: ${stalled.join(', ')}`:'',partial.length?`providers: ${partial.join(', ')}`:''].filter(Boolean).join(' · ');
+}
+function operationBehindRun() {
+  const id=result?.metadata?.workflow_id;
+  if(!id)return null;
+  return workflowRecord?.workflow_id===id?workflowRecord:workflowNotes.get(id) || null;
+}
+function analysisOperationNote() {
+  const operation=operationBehindRun();
+  if(!operation)return '';
+  const summary=workflowSummary(operation);
+  return ` · operation ${friendly(operation.status).toLowerCase()}${summary?` · ${summary}`:' · every stage completed'}`;
+}
+async function loadOperationBehindRun() {
+  const id=result?.metadata?.workflow_id;
+  if(!id || operationBehindRun() || workflowNotes.has(id))return;
+  // An operation record that cannot be read is simply not described in the caption.
+  try { workflowNotes.set(id,await api(`/api/research/workflows/${encodeURIComponent(id)}`)); }
+  catch { workflowNotes.set(id,null); }
+  try { renderOverview(); } catch { /* the caption keeps its last state */ }
+}
+function stageChip(name,record) {
+  const state=record?.status || 'pending';
+  const node=el('div',null,`stage-chip ${state}`);node.dataset.stage=name;node.dataset.status=state;
+  node.append(el('span',stageLabels[name],'stage-name'),el('span',friendly(state),`badge ${stageClasses[state] ?? ''}`));
+  if(record?.message)node.append(el('span',record.message,'stage-message'));
+  return node;
+}
+// The record is read once a second for the whole operation. Rebuilding an unchanged strip
+// would restate the same progress to assistive technology on every poll, so only a real
+// change to what the strip says redraws it.
+const workflowShape = workflow => JSON.stringify({status:workflow.status,stage:workflow.stage,
+  stages:workflow.stages,providers:workflow.providers,error:workflow.error});
+function renderWorkflow(workflow) {
+  workflowRecord=workflow && typeof workflow==='object'?workflow:null;
+  const strip=$('workflow-progress');
+  if(!workflowRecord){workflowRendered=null;strip.replaceChildren();strip.hidden=true;$('cancel-workflow').hidden=true;renderState();return;}
+  const shape=workflowShape(workflowRecord);
+  if(shape!==workflowRendered){
+    workflowRendered=shape;
+    const stages=workflowRecord.stages || {};
+    const chips=el('div',null,'stage-chips');chips.append(...stageOrder.map(name=>stageChip(name,stages[name])));
+    const actions=stageOrder.map(name=>stages[name]?.action_needed).filter(Boolean)
+      .filter((message,index,all)=>all.indexOf(message)===index).map(message=>el('p',message,'notice'));
+    replace('workflow-progress',el('p',workflowHeadline(workflowRecord),'stage-headline'),chips,...actions,
+      workflowRecord.error?el('p',workflowRecord.error,'notice'):null);
+  }
+  strip.hidden=false;$('cancel-workflow').hidden=!liveWorkflow(workflowRecord.status);
+  renderState();
+}
+async function pollWorkflow(workflowId) {
+  const ticket=++workflowTicket;
+  let workflow;
+  while(true){
+    workflow=await api(`/api/research/workflows/${encodeURIComponent(workflowId)}`);
+    if(ticket!==workflowTicket)return;
+    renderWorkflow(workflow);
+    if(!liveWorkflow(workflow.status))break;
+    // The stage strip carries the progress; the one spoken region is left alone until the
+    // operation starts and finishes, so a long collection is not narrated once a second.
+    await wait(1000);
+    if(ticket!==workflowTicket)return;
+  }
+  workflowBusy=false;renderState();
+  await finishWorkflow(workflow);
+}
+// A completed operation publishes exactly one run, so the page loads that run instead of
+// guessing; a cancelled or failed one leaves the previously loaded review in place.
+async function finishWorkflow(workflow) {
+  if(workflow.status==='complete' && workflow.run_id){
+    await refreshService();
+    await loadRun(workflow.run_id,false);
+  } else if(workflow.status==='failed'){
+    error(`${workflow.error || 'The review did not complete.'} The last usable review and your draft have been retained.`);
+  }
+  // A completed review repopulates the FX and listing caches and can change every
+  // snapshot id, so the open exceptions reload with the holdings.
+  await loadCurrent();await loadExceptions();await loadProviderHealth();
+  renderWorkflow(workflow);
+  const summary=workflowSummary(workflow);
+  announce(workflow.status==='complete' && workflow.run_id
+    ?`Review saved · run ${String(workflow.run_id).slice(0,12)}${summary?` · ${summary}`:''}`
+    :workflowHeadline(workflow));
+}
+async function startWorkflow() {
+  if(workflowBusy)return;  // A second click during an operation is the same operation.
+  if(Object.keys(draft.rawEditors).length)throw new Error('Apply or discard advanced JSON edits first.');
+  workflowBusy=true;renderState();
+  try {
+    if(draft.dirty){
+      const choice=await draftChoice('Update & analyze collects and analyzes fresh holdings using saved settings, separate from your frozen draft. Retain keeps the draft for later; discard clears it.');
+      if(choice==='cancel')return;
+      if(choice==='discard'){sessionStorage.removeItem(draftKey(draft.baseRunId));draft=newDraft(draft.baseRunId,saved?.config || service.config,saved?.workspace || {});}
+      else persist();
+    }
+    const workflow=await api('/api/research/workflows',{operation_key:crypto.randomUUID(),review_kind:'current',collect:true});
+    renderWorkflow(workflow);announce(workflowHeadline(workflow));
+    await pollWorkflow(workflow.workflow_id);
+  } finally { workflowBusy=false;renderState(); }
+}
+// Restart safety: the operation outlives this page, so a reload rejoins the one the
+// service reports as active and otherwise shows what the last one did.
+function resumeWorkflow() {
+  const active=service.active_workflow;
+  if(active && liveWorkflow(active.status)){
+    workflowBusy=true;renderWorkflow(active);
+    pollWorkflow(active.workflow_id).catch(failure=>{
+      workflowBusy=false;renderState();error(`${failure.message} The last usable review is unchanged.`);
+    });
+    return;
+  }
+  if(service.last_workflow)renderWorkflow(service.last_workflow);
+}
+// Provider health: what each source has already answered and the next step when it
+// cannot. Names of credentials are shown, never their values.
+let providerHealth=null;
+function providerState(row) {
+  if(typeof row.status==='string' && row.status)return row.status;
+  if(row.enabled===false)return 'off';
+  if(row.action)return 'attention';
+  return numeric(row.cached_responses)?'ready':'enabled';
+}
+function providerFacts(row) {
+  const facts=[];
+  if(row.version)facts.push(`Extension ${row.version}`);
+  if(row.required_version)facts.push(`Requires ${row.required_version}`);
+  if(typeof row.dependency_installed==='boolean')facts.push(row.dependency_installed?'Optional package installed':'Optional package not installed');
+  if(typeof row.contact_configured==='boolean')facts.push(row.contact_configured?'Contact configured':'Contact not configured');
+  if(row.env_var)facts.push(`${row.env_var} ${row.credential_present?'is set':'is not set'}`);
+  if(typeof row.cached_responses==='number')facts.push(`${row.cached_responses} archived responses`);
+  if(row.last_received_at)facts.push(`Last answer ${when(row.last_received_at)}`);
+  return facts;
+}
+function providerCard(row) {
+  const node=el('article',null,'provider-card');node.dataset.provider=row.name || '';
+  const heading=el('div',null,'section-heading');
+  heading.append(el('h3',friendly(row.name || 'provider')),badge(providerState(row)));
+  node.append(heading,el('p',providerFacts(row).join(' · ') || 'No archived responses yet.','muted'));
+  if(row.action)node.append(el('p',row.action,'notice'));
+  return node;
+}
+function renderProviderHealth() {
+  if(!providerHealth){replace('provider-health',el('p','Loading provider status…','muted'));return;}
+  if(providerHealth.unavailable){replace('provider-health',el('p',providerHealth.unavailable,'muted'));return;}
+  const cards=objectRows(providerHealth.providers).map(providerCard);
+  replace('provider-health',...(cards.length?cards:[empty('No providers are configured for this source.','No providers')]));
+}
+async function loadProviderHealth() {
+  try {
+    const response=await api('/api/research/providers/health');
+    providerHealth=response && typeof response==='object'?response:{unavailable:'The provider status response was unreadable.'};
+  } catch(failure){ providerHealth={unavailable:`Provider status could not be loaded. ${failure?.message || ''}`.trim()}; }
+  try { renderProviderHealth(); }
+  catch(failure){ providerHealth={unavailable:`Provider status could not be displayed: ${failure?.message || failure}`};
+    try { renderProviderHealth(); } catch { /* the panel keeps its last state */ } }
+}
 for(const node of document.querySelectorAll('[data-page]'))node.addEventListener('click',()=>navigate(node.dataset.page));
 for(const node of document.querySelectorAll('[data-go]'))node.addEventListener('click',()=>navigate(node.dataset.go));
 document.addEventListener('portfolio:holdings',()=>navigate('holdings'));
@@ -920,9 +1104,15 @@ function wire(id,action) {
     try{error();await action();}catch(failure){error(failure.message);}finally{renderState();}
   });
 }
+wire('update-analyze',()=>startWorkflow());
+wire('cancel-workflow',async()=>{
+  if(!workflowRecord)throw new Error('No operation is running.');
+  renderWorkflow(await api(`/api/research/workflows/${encodeURIComponent(workflowRecord.workflow_id)}/cancel`,{}));
+  announce('Cancellation requested. The operation stops before publishing and the last usable review is unchanged.');
+});
 wire('monthly-review',()=>monthly(false));wire('refresh-research',()=>monthly(true));
 wire('recalculate',async()=>{
-  if(!draft.baseRunId)throw new Error('Start a monthly review before recalculating frozen inputs.');
+  if(!draft.baseRunId)throw new Error('Run Update & analyze before recalculating frozen inputs.');
   await submitJob('preview',{base_run_id:draft.baseRunId,patch:draft.patch,workspace:draft.workspace});
 });
 wire('save-run',async()=>{
@@ -985,6 +1175,7 @@ async function initialize() {
   try {
     const [local,status]=await Promise.all([api('/api/state'),api('/api/research'),loadCurrent().then(loadExceptions)]);token=local.token;service=status;
     try{const response=await api('/api/research/supplemental');supplementalSupported=response.supported;supplemental=clone(response.saved || response.template || null);}catch(failure){error(`Supplemental input is unavailable: ${failure.message}`);}
+    resumeWorkflow();loadProviderHealth();
     if(service.latest_run_id)await loadRun(service.latest_run_id,false);
     else{draft=restoreDraft(sessionStorage,null,service.config,{});renderAll();}
   } catch(failure){error(`Research could not load: ${failure.message} Yahoo collection remains available in Data and Holdings.`);renderAll();}

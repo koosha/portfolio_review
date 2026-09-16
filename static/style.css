@@ -1359,3 +1359,123 @@ footer {
     grid-template-columns:1fr
   }
 }
+/* One monthly operation: a stage strip that reads as progress, not decoration. */
+.stage-strip {
+  margin:0 0 17px;
+  padding:14px 16px;
+  background:#fff;
+  border:1px solid var(--border);
+  border-left:4px solid var(--green);
+  border-radius:10px
+}
+.stage-headline {
+  margin:0 0 10px;
+  font-size:12px;
+  font-weight:500;
+  color:var(--ink)
+}
+.stage-chips {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px
+}
+.stage-chip {
+  flex:1 1 150px;
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  padding:9px 11px;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:#f8faf6
+}
+.stage-chip .stage-name {
+  font-size:10px;
+  letter-spacing:.09em;
+  text-transform:uppercase;
+  color:var(--muted)
+}
+.stage-chip .stage-message {
+  font-size:11px;
+  color:var(--muted)
+}
+.stage-chip.running {
+  border-color:#d9c48c;
+  animation:stage-pulse 1.6s ease-in-out infinite
+}
+.stage-chip.complete {
+  border-color:#bcd3b2
+}
+.stage-chip.failed {
+  border-color:#e2b8ab
+}
+.stage-chip.skipped,.stage-chip.cancelled {
+  border-color:#e6ceac
+}
+.stage-strip .notice {
+  margin:11px 0 0
+}
+@keyframes stage-pulse {
+  0%,100% {
+    opacity:1
+  }
+  50% {
+    opacity:.62
+  }
+}
+@media (prefers-reduced-motion:reduce) {
+  .stage-chip.running {
+    animation:none
+  }
+}
+/* Provider health: one card per source, each carrying its own next step. */
+.provider-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
+  gap:12px;
+  margin-bottom:17px
+}
+.provider-card {
+  padding:13px 15px;
+  border:1px solid var(--border);
+  border-radius:10px;
+  background:#fbfcfa
+}
+.provider-card .section-heading {
+  margin-bottom:7px
+}
+.provider-card h3 {
+  margin:0;
+  font-size:13px;
+  font-weight:500
+}
+.provider-card p {
+  margin:0;
+  font-size:11px
+}
+.provider-card .notice {
+  margin:9px 0 0;
+  padding:9px 11px;
+  font-size:11px
+}
+.badge.attention,.badge.offline,.badge.unpaired {
+  background:#faf0d8;
+  color:#8f6824
+}
+.badge.off {
+  background:#eef0ec;
+  color:var(--muted)
+}
+.badge.enabled {
+  background:#e5efdf;
+  color:#416639
+}
+@media (max-width:720px) {
+  .stage-chip {
+    flex:1 1 100%
+  }
+  .provider-grid {
+    grid-template-columns:1fr
+  }
+}

@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 
 from portfolio_lab.ingestion import ResearchStore, _dumps
 
+WORKFLOW_STATUSES = ("queued", "running", "waiting", "complete", "failed", "cancelled")
+INTERRUPTED_WORKFLOW = "Interrupted by application restart; start a new review."
 RECORD_KINDS = {
     "configuration",
     "supplemental",
@@ -23,6 +25,16 @@ RECORD_KINDS = {
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def _workflow_record(row):
+    """One durable operation row with its JSON columns decoded."""
+    record = dict(row)
+    record["request"] = json.loads(record.pop("request_json"))
+    record["stages"] = json.loads(record.pop("stages_json"))
+    record["providers"] = json.loads(record.pop("providers_json"))
+    record["cancel_requested"] = bool(record["cancel_requested"])
+    return record
 
 
 class ResearchRepository(ResearchStore):
@@ -50,6 +62,18 @@ class ResearchRepository(ResearchStore):
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL, output_json TEXT, error TEXT
                 );
+                CREATE TABLE IF NOT EXISTS review_workflows (
+                    workflow_id TEXT PRIMARY KEY, operation_key TEXT UNIQUE NOT NULL,
+                    status TEXT NOT NULL
+                        CHECK(status IN ('queued','running','waiting','complete','failed','cancelled')),
+                    stage TEXT, review_kind TEXT NOT NULL, request_json TEXT NOT NULL,
+                    stages_json TEXT NOT NULL, providers_json TEXT NOT NULL,
+                    batch_id TEXT, run_id TEXT, error TEXT,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, owner_pid INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS review_workflows_created
+                    ON review_workflows(created_at DESC);
             """)
             versions = connection.execute("SELECT schema_version FROM review_metadata").fetchall()
             if [row[0] for row in versions] != [1]:
@@ -185,4 +209,144 @@ class ResearchRepository(ResearchStore):
                 connection.execute(
                     "UPDATE review_jobs SET status='failed',updated_at=?,error='Interrupted by application restart; submit a new request.' WHERE job_id=? AND status IN ('queued','running')",
                     (now(), job["job_id"]),
+                )
+
+    def create_workflow(self, operation_key, review_kind, request):
+        """``(workflow_id, created)``: one durable operation per operation key."""
+        if not isinstance(operation_key, str) or not 8 <= len(operation_key) <= 128:
+            raise ValueError("An operation key of 8–128 characters is required.")
+        if not isinstance(request, dict):
+            raise ValueError("Send an object describing the review operation.")
+        from .workflow import STAGES
+
+        stages = {stage: {"status": "pending"} for stage in STAGES}
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT workflow_id FROM review_workflows WHERE operation_key=?", (operation_key,)
+            ).fetchone()
+            if row:
+                return row["workflow_id"], False
+            workflow_id = uuid.uuid4().hex
+            connection.execute(
+                "INSERT INTO review_workflows (workflow_id,operation_key,status,stage,review_kind,"
+                "request_json,stages_json,providers_json,batch_id,run_id,error,cancel_requested,"
+                "created_at,updated_at,owner_pid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    workflow_id,
+                    operation_key,
+                    "queued",
+                    None,
+                    str(review_kind),
+                    _dumps(request),
+                    _dumps(stages),
+                    _dumps({}),
+                    None,
+                    None,
+                    None,
+                    0,
+                    now(),
+                    now(),
+                    os.getpid(),
+                ),
+            )
+        return workflow_id, True
+
+    def update_workflow(
+        self,
+        workflow_id,
+        *,
+        status=None,
+        stage=None,
+        stages=None,
+        providers=None,
+        batch_id=None,
+        run_id=None,
+        error=None,
+    ):
+        """Record progress while the operation is still live; a finished one is frozen."""
+        if status is not None and status not in WORKFLOW_STATUSES:
+            raise ValueError("Invalid review operation state.")
+        fields, values = ["updated_at=?"], [now()]
+        for column, value in (
+            ("status", status),
+            ("stage", stage),
+            ("batch_id", batch_id),
+            ("run_id", run_id),
+            ("error", error),
+        ):
+            if value is not None:
+                fields.append(f"{column}=?")
+                values.append(value)
+        for column, value in (("stages_json", stages), ("providers_json", providers)):
+            if value is not None:
+                fields.append(f"{column}=?")
+                values.append(_dumps(value))
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE review_workflows SET {','.join(fields)} WHERE workflow_id=? "
+                "AND status IN ('queued','running','waiting')",
+                (*values, workflow_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("This review operation is already finished or does not exist.")
+
+    def request_cancel(self, workflow_id):
+        """Ask a live operation to stop; a finished one is never rewritten."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE review_workflows SET cancel_requested=1,updated_at=? WHERE workflow_id=? "
+                "AND status IN ('queued','running','waiting')",
+                (now(), workflow_id),
+            )
+        return cursor.rowcount == 1
+
+    def workflow(self, workflow_id):
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM review_workflows WHERE workflow_id=?", (workflow_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError("Review operation not found.")
+        return _workflow_record(row)
+
+    def workflows(self, limit=20):
+        limit = min(max(int(limit), 1), 100)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM review_workflows ORDER BY created_at DESC, workflow_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_workflow_record(row) for row in rows]
+
+    def active_workflow(self):
+        """The newest operation that has not finished, or ``None``."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM review_workflows WHERE status IN ('queued','running','waiting') "
+                "ORDER BY created_at DESC, workflow_id DESC LIMIT 1"
+            ).fetchone()
+        return _workflow_record(row) if row else None
+
+    def recover_workflows(self):
+        """Fail operations whose owning application is gone, never a live one."""
+        with self.connect() as connection:
+            unfinished = connection.execute(
+                "SELECT workflow_id,owner_pid FROM review_workflows "
+                "WHERE status IN ('queued','running','waiting')"
+            ).fetchall()
+            for workflow in unfinished:
+                if workflow["owner_pid"]:
+                    try:
+                        os.kill(workflow["owner_pid"], 0)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        continue  # Liveness cannot be disproved; leave it alone.
+                    else:
+                        continue
+                connection.execute(
+                    "UPDATE review_workflows SET status='failed',updated_at=?,error=? "
+                    "WHERE workflow_id=? AND status IN ('queued','running','waiting')",
+                    (now(), INTERRUPTED_WORKFLOW, workflow["workflow_id"]),
                 )

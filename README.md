@@ -34,13 +34,22 @@ Selections persist. Unchecked accounts retain history but are excluded from pull
 
 ## Monthly review
 
+One action runs the month. **Update & analyze** in the header collects the newest holdings through Chrome, resolves identity and currency, fetches the configured providers, analyzes and publishes one review. The stage strip under the header reports what each step did and what it could not do; **Cancel** stops the operation before it publishes. A duplicate click rejoins the operation already running, reloading the page rejoins it as well, and an operation that is cancelled or fails writes nothing — the last usable review stays exactly as it was.
+
+1. **Update & analyze** — collect, resolve, fetch, analyze and publish as one operation.
+2. **Answer the exceptions** — Overview lists only the questions the sources and provider metadata could not answer; each answer is saved as dated supplemental evidence.
+3. **Read the results** — Overview, Holdings and Research show the saved review beside the newest collection, each with its own dates.
+4. **Adjust the assumptions** — Research and Scenarios hold the company workspace and explicit assumptions; edits stay in a draft until they are calculated.
+5. **Recalculate** — **Scenarios → Recalculate** re-runs the draft against that run's frozen inputs and **Save run** archives an immutable child run.
+6. **Record the decision** — **Review** holds candidate baskets, funding, no-action rationale, run comparisons, exports and outcome evaluation.
+
+**Data → Historical month-end review (advanced)** recalculates a past month end from saved and cached inputs; it is not part of the monthly flow. **Data → Provider health** shows what each source has already answered and the next step when it cannot, without displaying any credential.
+
 **Overview** shows the newest collected holdings as soon as a collection finishes, with no saved review or mandate required. Each account lists its capture and server receipt times; a receipt time is not a quote time. Captured amounts are shown as observed, grouped by explicit value currency without FX conversion and never labeled NAV, and the source valuation time stays unknown unless dated account evidence attests it. The last completed analysis appears separately with its own market date, information cutoff and generation time, so current holdings and saved reviews never share a denominator.
 
 Use **Data** to reconcile dated account NAV/cash, currency and security identity. Import missing facts and scenarios through validated forms/CSV/JSON. Use **Settings** to supply your actual mandate, account permissions and explicit sleeve allocation.
 
 Reporting and combined totals default to USD. Listing identity and value currencies are established automatically from Yahoo quote symbols, provider listing metadata and dated FX observations (Bank of Canada Valet and Yahoo FX). Amounts are presented in USD beside the original amount and currency, each conversion names its FX pair and observation date, and an amount already reported in USD is never converted again. Overview lists only the genuine exceptions: an ambiguous or unknown listing, a value currency that the quantity × price arithmetic cannot establish, or a missing or stale FX observation. Listing and currency answers are saved as dated supplemental evidence; FX exceptions clear once refreshed market data supplies a dated observation. Holdings that cannot be presented in USD are counted as unconverted, never silently dropped. Reload the Local Portfolio Chrome extension (1.2.0 or newer) so collections capture Yahoo quote symbols.
-
-Then **Run monthly review** creates an immutable record. **Research** contains the company workspace; **Scenarios → Recalculate** uses frozen inputs; **Save run** archives a new child. **Review** contains full candidate baskets, funding, no-action rationale, run comparisons, exports and outcome evaluation.
 
 The analytical layer reads the holdings database without changing it. A separate `data/research.sqlite3` contains jobs, versioned inputs, assumptions, runs, decisions and evaluations. Read-only JSON/HTML exports exclude internal paths, source SQL and credentials; their portfolio contents are still private financial information.
 

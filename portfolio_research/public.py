@@ -63,8 +63,14 @@ PRIVATE_KEYS = {
 
 def _safe_text(text):
     text = re.sub(r"(?i)(https?://)[^/\s@]+@", r"\1[redacted]@", text)
+    # Any absolute local path, whatever it is rooted at: a data directory may sit on an
+    # external volume or under /opt, /Library or /etc, and none of those may reach a
+    # response. A path inside a URL is left alone: the character before it rules out one
+    # preceded by a word character, a colon or another slash.
     text = re.sub(
-        r"(?:file://)?/(?:Users|private|home|tmp|var)/[^\r\n\"'<>]+", "[local path]", text
+        r"(?<![\w:/])(?:file://)?/(?:[^/\s\r\n\"'<>][^/\r\n\"'<>]*/)+[^\r\n\"'<>]*",
+        "[local path]",
+        text,
     )
     text = re.sub(r"\b[A-Za-z]:\\[^\r\n\"'<>]+", "[local path]", text)
     text = re.sub(

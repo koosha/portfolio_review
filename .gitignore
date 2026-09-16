@@ -85,6 +85,7 @@ build/
 *.zip
 *.tar.gz
 screenshots/
+.playwright-mcp/
 attachments/
 .DS_Store
 .idea/

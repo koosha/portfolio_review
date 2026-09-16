@@ -14,7 +14,9 @@ def make_server(config, port=8765, collector_directory=None):
     directory = Path(collector_directory or Path(config["research"]["path"]).parent / "collector")
     store = Store(directory)
     companion = ChromeCompanion(store)
-    research = ResearchService(config, collector_busy=lambda: companion.status().get("busy", False))
+    # Recovery on every serving entry point: an operation whose owning process is gone
+    # would otherwise stay active and block every later review.
+    research = ResearchService(config, companion=companion, recover=True)
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True

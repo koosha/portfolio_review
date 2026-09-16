@@ -217,6 +217,12 @@ def make_handler(store, browser, port, research=None):
                 self.reply(200, research.current())
             elif path == "/api/research/exceptions":
                 self.reply(200, research.exceptions())
+            elif path == "/api/research/workflows":
+                self.reply(200, research.workflows())
+            elif path.startswith("/api/research/workflows/"):
+                self.reply(200, research.workflow(path.rsplit("/", 1)[-1]))
+            elif path == "/api/research/providers/health":
+                self.reply(200, research.provider_health())
             elif path.startswith("/api/research/runs/"):
                 self.reply(200, research.run(path.rsplit("/", 1)[-1]))
             elif path.startswith("/api/research/jobs/"):
@@ -259,6 +265,10 @@ def make_handler(store, browser, port, research=None):
         def research_post(self, path, body):
             if path == "/api/research/jobs":
                 self.reply(202, research.submit(body))
+            elif path == "/api/research/workflows":
+                self.reply(202, research.start_workflow(body))
+            elif path.startswith("/api/research/workflows/") and path.endswith("/cancel"):
+                self.reply(200, research.cancel_workflow(path.split("/")[4]))
             elif path == "/api/research/settings":
                 self.reply(200, research.save_settings(body.get("patch", {})))
             elif path == "/api/research/inputs":
@@ -311,9 +321,7 @@ def main(argv=None):
     default_path = directory / "research-config.json"
     config_path = args.research_config or (str(default_path) if default_path.is_file() else None)
     config = load_config(config_path) if config_path else default_config(directory)
-    research = ResearchService(
-        config, collector_busy=lambda: browser.status().get("busy", False), recover=True
-    )
+    research = ResearchService(config, companion=browser, recover=True)
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port), make_handler(store, browser, args.port, research)
     )

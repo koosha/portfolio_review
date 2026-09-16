@@ -12,6 +12,8 @@ import pandas as pd
 from .ingestion import ResearchStore, _open_source, _source_path, load_portfolio
 from .providers import enrich_bundle
 
+PRESENTATION_FX = "presentation_fx"  # In-memory only; removed before enrichment.
+
 
 def is_collector(path):
     connection = _open_source(_source_path(path))
@@ -180,7 +182,7 @@ def _presented(enriched, c, fx, live):
     return present_prices(enriched, c, table)
 
 
-def load_inputs(
+def load_source_bundle(
     config,
     as_of=None,
     refresh=False,
@@ -190,12 +192,13 @@ def load_inputs(
     review_kind="historical",
     generated_at=None,
 ):
-    """Load dated inputs for a historical month-end review or a current review.
+    """Read the dated holdings and resolve their identity and presentation.
 
-    A current review takes the newest completed collection received by the generation
-    instant and observes the last completed session; a historical review keeps the
-    month-end contract and only accepts receipts through its decision date. The calendar
-    owns the kind/date contract and its error messages.
+    This is the first half of :func:`load_inputs`: the collection (or configured
+    source), its timeline and the increment-2 normalization, with no provider
+    enrichment. The FX table the normalization used travels under
+    :data:`PRESENTATION_FX` so :func:`enrich_inputs` can convert the fetched price
+    series on the same observations; that key never reaches a saved bundle.
     """
     from portfolio_research.calendar import review_context
 
@@ -223,10 +226,54 @@ def load_inputs(
     if received:
         timeline["collection_received_at"] = received
     bundle["timeline"] = timeline
-    enriched = enrich_bundle(bundle, c, as_of)
+    bundle[PRESENTATION_FX] = fx
+    return bundle
+
+
+def enrich_inputs(bundle, config, as_of=None, refresh=False):
+    """Fetch provider data for a loaded bundle and present its price series.
+
+    The second half of :func:`load_inputs`. Provider failures become issues inside
+    the bundle; this step never invents data for a source that did not answer.
+    """
+    fx = bundle.get(PRESENTATION_FX)
+    source = {key: value for key, value in bundle.items() if key != PRESENTATION_FX}
+    c = deepcopy(config)
+    c["data"]["refresh_network"] = bool(refresh)
+    as_of = as_of or source.get("timeline", {}).get("decision_date") or source["as_of"]
+    enriched = enrich_bundle(source, c, as_of)
     if fx is None:
         return enriched
     return _presented(enriched, c, fx, bool(refresh) and c["data"]["mode"] == "live")
+
+
+def load_inputs(
+    config,
+    as_of=None,
+    refresh=False,
+    *,
+    supplemental=None,
+    account_ids=None,
+    review_kind="historical",
+    generated_at=None,
+):
+    """Load dated inputs for a historical month-end review or a current review.
+
+    A current review takes the newest completed collection received by the generation
+    instant and observes the last completed session; a historical review keeps the
+    month-end contract and only accepts receipts through its decision date. The calendar
+    owns the kind/date contract and its error messages.
+    """
+    bundle = load_source_bundle(
+        config,
+        as_of,
+        refresh,
+        supplemental=supplemental,
+        account_ids=account_ids,
+        review_kind=review_kind,
+        generated_at=generated_at,
+    )
+    return enrich_inputs(bundle, config, bundle["timeline"]["decision_date"], refresh)
 
 
 def save_analysis(result, config, bundle):

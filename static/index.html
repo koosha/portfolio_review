@@ -49,9 +49,12 @@
 </div>
 <div class="header-actions">
 <span id="research-mode" class="badge">Loading source…</span>
-<button id="monthly-review">Run monthly review</button>
+<button id="update-analyze">Update &amp; analyze</button>
+<button id="cancel-workflow" class="quiet" hidden>Cancel</button>
 </div>
 </header>
+<div id="workflow-progress" class="stage-strip" role="status" aria-live="off" hidden>
+</div>
 <div class="context-bar" aria-label="Shared research context">
 <label>Account display<select id="account-scope">
 <option value="">All accounts</option>
@@ -477,15 +480,26 @@
 </section>
 <section class="panel">
 <div class="section-heading">
-<h2>Research refresh</h2>
-<button id="refresh-research" class="secondary">Refresh inputs &amp; run review</button>
+<h2>Provider health</h2>
 </div>
+<p class="muted">What each source has answered and the next step when it cannot. Credentials are never displayed here; only whether one is configured.</p>
+<div id="provider-health" class="provider-grid">
+</div>
+<div id="provider-status">
+</div>
+</section>
+<section class="panel">
+<div class="section-heading">
+<h2>Historical month-end review (advanced)</h2>
+</div>
+<p class="muted">Update &amp; analyze reviews the newest collection. Use these only to recalculate a past month end from saved and cached inputs; saved runs and retained drafts stay available.</p>
 <div class="form-grid">
 <label>Intended review date<input id="review-date" type="date">
 </label>
-<p class="muted">Uses completed holdings and configured providers. Saved runs and retained drafts stay available.</p>
 </div>
-<div id="provider-status">
+<div class="actions">
+<button id="monthly-review" class="secondary">Run month-end review</button>
+<button id="refresh-research" class="secondary">Refresh inputs &amp; run review</button>
 </div>
 </section>
 <section class="panel">
