@@ -328,6 +328,13 @@ def reconcile(bundle: dict, config: dict) -> dict:
     return _clean({"summary": summary, "issues": issues, "holdings": holdings})
 
 
+def _by_security(frame: pd.DataFrame) -> dict:
+    """One grouped view of a panel, keyed by security, built once for the whole pass."""
+    if frame.empty or "security_id" not in frame.columns:
+        return {}
+    return dict(tuple(frame.groupby("security_id", sort=False)))
+
+
 def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
     """Cross-sectional Q/V/M ranks over unique eligible issuers, not held names.
 
@@ -359,14 +366,15 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
     liquidity_days = set(trailing_sessions(bundle["as_of"], 60))
     momentum_start_day = month_end_session(str(old_month))
     momentum_end_day = month_end_session(str(recent_month))
+    # One pass over each panel, not one pass per security: the screened universe is up
+    # to a thousand issuers with three years of daily bars, and a per-security filter
+    # over the whole panel turns that into a quadratic scan.
+    price_rows = _by_security(prices)
+    fundamental_rows = _by_security(fundamentals)
     for _, security in securities.iterrows():
         sid, reasons = security.security_id, []
-        p = prices[prices.security_id == sid] if not prices.empty else prices
-        f = (
-            fundamentals[fundamentals.security_id == sid]
-            if not fundamentals.empty
-            else fundamentals
-        )
+        p = price_rows.get(sid, prices.iloc[0:0])
+        f = fundamental_rows.get(sid, fundamentals.iloc[0:0])
         frow = f.iloc[-1] if not f.empty else pd.Series(dtype=object)
         row = {
             "security_id": sid,
@@ -939,9 +947,11 @@ def portfolio_covariance(bundle: dict, config: dict, security_ids: list[str]) ->
         prices.date
         >= cutoff - pd.DateOffset(years=int(config.get("risk", {}).get("lookback_years", 3)))
     ]
+    price_rows = _by_security(prices)
+    metadata_rows = _by_security(metadata)
     for sid in ids:
-        p = prices[prices.security_id == sid]
-        security = metadata[metadata.security_id == sid] if not metadata.empty else metadata
+        p = price_rows.get(sid, prices.iloc[0:0])
+        security = metadata_rows.get(sid, metadata.iloc[0:0])
         if (
             p.empty
             or security.empty

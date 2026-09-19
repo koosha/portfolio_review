@@ -8,9 +8,18 @@ from copy import deepcopy
 from datetime import date
 from pathlib import Path
 
+from portfolio_research.market_listings import SYMBOL_PATTERN
+from portfolio_research.scenarios import DEFAULT_SHARED_STATE, validate_shared_state
+
 FX_PROVIDERS = ("bank_of_canada", "yahoo")
 # The versioned research adapter, or the inline connector kept for existing runs.
 MARKET_ADAPTERS = ("yfinance-adapter-1", "legacy")
+# How an account admits securities it does not already hold: only the ones named in
+# account_permissions, or every security the screen marked eligible.
+CANDIDATE_POLICIES = ("none", "eligible_universe")
+# An owner-kept watchlist, not a second universe: bounded so a pasted list cannot
+# quietly become the review's scope.
+MAX_WATCHLIST = 500
 
 DEFAULTS = {
     "source": {
@@ -55,6 +64,14 @@ DEFAULTS = {
         "assumed_publication_lag_days": 90,
         "model_provider": None,
         "news_limit": 20,
+        # The candidate screen: how many issuers are acquired, how many of them are in
+        # scope, and the bounds the fetching stage may not exceed. The enrichment limit
+        # caps identity resolution as well as enrichment, and the time budget is one
+        # budget for the whole fetch rather than one per half of it.
+        "universe_acquire_size": 1500,
+        "universe_size": 1000,
+        "candidate_enrichment_limit": 1000,
+        "provider_time_budget_seconds": 1800,
     },
     "mandate": {
         "confirmed": False,
@@ -68,6 +85,10 @@ DEFAULTS = {
         "max_stress_loss": None,
         "allow_taxable_proposals": False,
         "account_permissions": {},
+        # Accounts whose candidate set is the screened eligible universe instead of a
+        # hand-listed one. Screened candidates carry their own exclusions, so a gap in
+        # one of them never withholds the whole comparison.
+        "account_candidate_policy": {},
         "locked_security_ids": [],
         "dealing_rules": {},
     },
@@ -82,6 +103,10 @@ DEFAULTS = {
         "minimum_dollar_volume": 10_000_000.0,
         "excluded_sectors": ["Financials", "Real Estate"],
         "min_quality_metrics": 2,
+        # Symbols the owner always wants researched, whatever the screen returns.
+        "watchlist": [],
+        "require_consistent_issuer_cap": True,
+        "candidate_brief_limit": 20,
     },
     "risk": {
         "lookback_years": 3,
@@ -120,6 +145,7 @@ DEFAULTS = {
         "incumbent_gap_weight": 0.005,
         "incumbent_gap_fraction": 0.25,
         "valuation_tolerance": 0.001,
+        "shared_state": DEFAULT_SHARED_STATE,
     },
     "tax": {
         "enabled": False,
@@ -140,10 +166,14 @@ REPLACE_MAPS = {
     "prior_returns",
     "stress_sector_shocks",
     "account_permissions",
+    "account_candidate_policy",
     "column_map",
     "dealing_rules",
     "sleeve_membership",
     "new_flows",
+    # The shared scenario state is one versioned statement: an edit replaces it whole
+    # rather than leaving half of a previous world view merged underneath.
+    "shared_state",
 }
 
 
@@ -220,6 +250,7 @@ def validate_config(config: dict) -> dict:
     for group, keys in {
         "mandate": ["confirmed", "allow_taxable_proposals"],
         "data": ["sec_enabled", "fred_enabled", "require_received_by_cutoff", "refresh_network"],
+        "signals": ["require_consistent_issuer_cap"],
         "allocation": ["optimize", "use_probabilities"],
         "tax": ["enabled", "wash_sale_window_verified"],
     }.items():
@@ -260,6 +291,7 @@ def validate_config(config: dict) -> dict:
     _number(c["allocation"]["transaction_cost_bps"], "transaction_cost_bps", 0, 500)
     _number(c["allocation"]["min_trade_value"], "min_trade_value", 0, 1e9)
     _number(c["allocation"]["valuation_tolerance"], "allocation.valuation_tolerance", 0, 0.1)
+    validate_shared_state(c["allocation"]["shared_state"], name="allocation.shared_state")
     if c["allocation"]["horizon_months"] not in {6, 12, 18}:
         raise ValueError("horizon_months must be 6, 12 or 18")
     if c["allocation"]["retention_quantile"] > c["allocation"]["entry_quantile"]:
@@ -269,6 +301,10 @@ def validate_config(config: dict) -> dict:
         ("signals", "momentum_months", 3, 36),
         ("signals", "momentum_skip_months", 0, 6),
         ("signals", "min_quality_metrics", 2, 3),
+        ("signals", "candidate_brief_limit", 0, 200),
+        ("data", "universe_acquire_size", 1, 5000),
+        ("data", "universe_size", 1, 5000),
+        ("data", "candidate_enrichment_limit", 0, 5000),
         ("allocation", "max_names", 1, 20),
         ("risk", "min_weekly_observations", 26, 520),
         ("risk", "bootstrap_samples", 50, 5000),
@@ -287,6 +323,24 @@ def validate_config(config: dict) -> dict:
         raise ValueError("Winsorization bounds must be increasing")
     for key in ["minimum_price", "minimum_dollar_volume"]:
         _number(c["signals"][key], key, 0)
+    _number(
+        c["data"]["provider_time_budget_seconds"], "data.provider_time_budget_seconds", 1, 86400
+    )
+    if c["data"]["universe_size"] > c["data"]["universe_acquire_size"]:
+        # The in-scope universe is chosen out of what was acquired; a larger figure
+        # would name a scope the screen never reached.
+        raise ValueError("data.universe_size cannot exceed data.universe_acquire_size")
+    watchlist = c["signals"]["watchlist"]
+    if not isinstance(watchlist, list) or len(watchlist) > MAX_WATCHLIST:
+        raise ValueError(
+            f"signals.watchlist must be a list of at most {MAX_WATCHLIST} listing symbols"
+        )
+    for entry in watchlist:
+        if not isinstance(entry, str) or not SYMBOL_PATTERN.fullmatch(entry):
+            raise ValueError(
+                "Each signals.watchlist entry must be an exact listing symbol of 1-20 "
+                "capital letters, digits, '.', '-', '=' or '^'."
+            )
     weights = c["signals"]["family_weights"]
     if set(weights) != {"quality", "value", "momentum"}:
         raise ValueError("Provide quality, value, and momentum weights")
@@ -345,6 +399,14 @@ def validate_config(config: dict) -> dict:
     for account, permitted in c["mandate"]["account_permissions"].items():
         if not isinstance(permitted, list) or not all(isinstance(x, str) for x in permitted):
             raise ValueError(f"account_permissions.{account} must be a list of security IDs")
+    policies = c["mandate"]["account_candidate_policy"]
+    if not isinstance(policies, dict):
+        raise ValueError("account_candidate_policy must map account IDs to a policy name")
+    for account, policy in policies.items():
+        if policy not in CANDIDATE_POLICIES:
+            raise ValueError(
+                f"account_candidate_policy.{account} must be one of {sorted(CANDIDATE_POLICIES)}"
+            )
     if c["allocation"]["sleeve_budget_basis"] not in {None, "account_nav"}:
         raise ValueError("sleeve_budget_basis must be null or account_nav")
     if c["allocation"]["flow_policy"] not in {None, "approved_benchmark"}:

@@ -15,6 +15,10 @@ from .repository import now
 
 STAGES = ("collecting", "resolving", "fetching", "analyzing", "publishing")
 POLL_SECONDS = 1.0
+# How often a long provider fetch may look up from its work: once a second to see
+# whether the owner asked it to stop, once every few seconds to say how far it is.
+PROBE_SECONDS = 1.0
+PROGRESS_SECONDS = 3.0
 BUSY_WAIT_SECONDS = 600  # Wait out a pull someone else started.
 COLLECT_TIMEOUT_SECONDS = 900  # Give up on this pull and use the last published one.
 FETCH_INTERRUPTED = "PROVIDER_FETCH_INTERRUPTED"
@@ -197,6 +201,27 @@ def _research_status(bundle, *, refresh, interrupted=None):
     return status
 
 
+def _previous_review(store):
+    """What prioritisation compares this review against, or ``None`` when there is none.
+
+    Prioritisation explains what changed since the last run — a revised estimate, say —
+    and reads the previous run's ``research`` and nothing else, so only that field is
+    extracted. A saved run carries a brief per researched security; parsing all of it to
+    reach one subtree would cost every review the size of the one before it.
+
+    A first review, a missing archive, a damaged one, or a stage running without an
+    archive at all costs that comparison and nothing else.
+    """
+    try:
+        runs = store.list_runs()
+        if not runs:
+            return None
+        research = store.load_run_part(runs[0]["run_id"], "research")
+        return {"research": research} if isinstance(research, dict) else {"research": {}}
+    except Exception:
+        return None
+
+
 def _priced_config(config, bundle, review_kind):
     """``(config for this review, accepted quantity×price difference)``.
 
@@ -255,6 +280,10 @@ class ReviewWorkflow:
         self.run_id = None
         self.refresh = False
         self.started = monotonic()
+        self.probed = 0.0
+        self.stop_seen = False
+        self.reported = 0.0
+        self.progress = None
 
     def run(self):
         """Run the stages once. Cancellation and failure both leave the last review."""
@@ -507,20 +536,30 @@ class ReviewWorkflow:
         """Ask every configured provider once; a provider that fails is recorded, not fatal."""
         from portfolio_lab.pipeline import PRESENTATION_FX, enrich_inputs
 
+        from .enrichment import fetch_controls
+
         self._begin("fetching")
         as_of = self.bundle["timeline"]["decision_date"]
         interrupted = None
-        try:
-            self.bundle = enrich_inputs(self.bundle, self.config, as_of, self.refresh)
-        except Exception as exc:  # One provider must never end the review.
-            interrupted = _safe_text(str(exc))
-            self.bundle = self._cached_only(as_of, PRESENTATION_FX)
+        # Discovery and enrichment are one bounded fetch: the candidate screen is
+        # acquired and qualified first, so the securities the review compares against
+        # are researched by the same pass that researches the holdings.
+        with fetch_controls(should_stop=self._fetch_stopping, progress=self._fetch_progress):
+            self._acquire(as_of)
+            try:
+                self.bundle = enrich_inputs(self.bundle, self.config, as_of, self.refresh)
+            except Exception as exc:  # One provider must never end the review.
+                interrupted = _safe_text(str(exc))
+                self.bundle = self._cached_only(as_of, PRESENTATION_FX)
         self.providers = provider_status(
             self.bundle, self.config, refresh=self.refresh, interrupted=interrupted
         )
         failed = sorted(
             name for name, record in self.providers.items() if record["status"] == "failed"
         )
+        detail = {name: record["status"] for name, record in self.providers.items()}
+        if self.progress is not None:
+            detail["progress"] = dict(self.progress)
         self._end(
             "fetching",
             "complete",
@@ -528,8 +567,69 @@ class ReviewWorkflow:
             if not interrupted
             else "Some providers were unavailable; cached data was used.",
             action_needed=PROVIDER_ACTION.format(names=", ".join(failed)) if failed else None,
-            detail={name: record["status"] for name, record in self.providers.items()},
+            detail=detail,
         )
+
+    def _acquire(self, as_of):
+        """Acquire and qualify the dated candidate screen; discovery is never fatal."""
+        from .enrichment import acquire_candidates
+        from .market_values import _issue
+
+        try:
+            acquire_candidates(self.bundle, self.config, as_of, refresh=self.refresh)
+        except Exception as exc:
+            _issue(
+                self.bundle.setdefault("issues", []),
+                "UNIVERSE_UNAVAILABLE",
+                None,
+                f"Candidate discovery failed ({_safe_text(str(exc))}); "
+                "this review compares the securities it already knows.",
+                "error",
+            )
+
+    def _fetch_stopping(self):
+        """Whether the owner has asked this operation to stop, probed once a second.
+
+        The probe answers rather than raises: a provider loop unwound by an exception
+        would throw away the answers it already has. The fetch finishes with what it
+        collected and the run's own cancellation check ends the operation before
+        anything is published.
+
+        A cancellation once seen is latched. A store that cannot answer — a lock, a row
+        being rewritten — has told the review nothing, and "nothing" may not overwrite
+        "the owner asked us to stop".
+        """
+        if self.stop_seen:
+            return True
+        now_seconds = monotonic()
+        if now_seconds < self.probed + PROBE_SECONDS:
+            return False
+        self.probed = now_seconds
+        try:
+            self.stop_seen = bool(
+                self._stopping() or self.store.workflow(self.workflow_id)["cancel_requested"]
+            )
+        except Exception:  # A store that cannot answer is not new information.
+            pass
+        return self.stop_seen
+
+    def _fetch_progress(self, progress):
+        """Publish how far the fetch has got, at most once every few seconds."""
+        if not isinstance(progress, dict):
+            return
+        self.progress = {"done": progress.get("done"), "total": progress.get("total")}
+        record = self.stages.get("fetching") or {}
+        record["detail"] = {**(record.get("detail") or {}), "progress": dict(self.progress)}
+        self.stages["fetching"] = record
+        now_seconds = monotonic()
+        finished = progress.get("done") == progress.get("total")
+        if not finished and now_seconds < self.reported + PROGRESS_SECONDS:
+            return
+        self.reported = now_seconds
+        try:
+            self._save(stage="fetching")
+        except Exception:  # A durable progress note is never worth losing the fetch.
+            pass
 
     def _cached_only(self, as_of, presentation_fx):
         """Re-read the same inputs with connectors off after a provider raised."""
@@ -549,7 +649,9 @@ class ReviewWorkflow:
 
         self._begin("analyzing")
         config, tolerance = _priced_config(self.config, self.bundle, self.review_kind)
-        result = analyze_review(self.bundle, config)
+        result = analyze_review(
+            self.bundle, config, previous=_previous_review(getattr(self, "store", None))
+        )
         result["metadata"]["valuation_tolerance"] = tolerance
         _settle_execution(result, self.bundle, self.started)
         result["run_id"] = uuid.uuid4().hex

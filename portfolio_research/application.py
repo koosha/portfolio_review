@@ -56,7 +56,12 @@ def validate_workspace_revision(workspace, previous):
             raise ValueError("An edited assessment cannot reuse its previous review timestamp.")
 
 
-def analyze_review(bundle, config):
+def analyze_review(bundle, config, *, previous=None):
+    """The published review: engine outputs, the owner's workspace and what to look at.
+
+    ``previous`` is the last published run's result when there is one. It is read only
+    to explain what changed since then; nothing in this run depends on it existing.
+    """
     from .evidence import validate_assessment
     from .readiness import readiness
     from .valuation import calculate_dcf, calculate_eps, dcf_sensitivity, eps_sensitivity
@@ -139,5 +144,16 @@ def analyze_review(bundle, config):
     # output of this run actually has.
     if bundle.get("research"):
         result["research"] = deepcopy(bundle["research"])
+    # What the review discovered, what it refused and why, stated beside the analysis:
+    # the scope it acquired, the rows it excluded by name, and the holdings and
+    # candidates whose evidence says look here first.
+    if bundle.get("universe"):
+        result["universe"] = deepcopy(bundle["universe"])
+    if bundle.get("exclusions") is not None:
+        result["exclusions"] = deepcopy(bundle["exclusions"])
+    if bundle.get("research"):
+        from .priorities import review_priorities
+
+        result["priorities"] = review_priorities(result, bundle, config, previous=previous)
     result["readiness"] = readiness(result, bundle, config)
     return json_safe(result)

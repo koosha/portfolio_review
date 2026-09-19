@@ -141,15 +141,26 @@ def _guarded(name, sid, issues, build, default=None):
         return default
 
 
-def build_research(records: dict, bundle: dict, config: dict, as_of: str) -> dict:
-    """A dated brief and reviewable proposals for every enriched security."""
+def build_research(records: dict, bundle: dict, config: dict, as_of: str, brief_ids=None) -> dict:
+    """A dated brief and reviewable proposals for the securities a reader will read.
+
+    ``brief_ids`` names them — the holdings and the ``signals.candidate_brief_limit``
+    largest candidates. A screened candidate past that bound reports its coverage and
+    nothing else: a brief nobody asked for costs roughly twelve kilobytes in every saved
+    run, and the prioritisation and signals read only the coverage. ``None`` means every
+    enriched security, which is what a caller without a bound wants.
+    """
     from .briefs import build_brief
 
     previous = bundle.get("previous_research") or {}
     generated_at = (bundle.get("timeline") or {}).get("generated_at")
     issues = bundle.setdefault("issues", [])
+    wanted = None if brief_ids is None else {str(sid) for sid in brief_ids}
     research = {}
     for sid, record in records.items():
+        if wanted is not None and str(sid) not in wanted:
+            research[sid] = {"brief": None, "proposals": None, "coverage": dict(record["coverage"])}
+            continue
         statements = record.get("statements") or {}
         ttm = statements.get("ttm")
         if isinstance(ttm, dict):

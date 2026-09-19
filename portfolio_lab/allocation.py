@@ -42,7 +42,13 @@ def _frame(bundle: dict, key: str) -> pd.DataFrame:
     return value.copy() if isinstance(value, pd.DataFrame) else pd.DataFrame()
 
 
-def _blocked(issues: list[dict], comparison: list | None = None) -> dict:
+def _blocked(
+    issues: list[dict],
+    comparison: list | None = None,
+    *,
+    excluded: list | None = None,
+    admission: dict | None = None,
+) -> dict:
     return {
         "status": "blocked",
         "issues": issues,
@@ -53,7 +59,12 @@ def _blocked(issues: list[dict], comparison: list | None = None) -> dict:
             if issue.get("severity") == "error"
         ],
         "comparison": comparison or [],
-        "solver": {"status": "not_run", "executable": False},
+        "excluded_candidates": excluded or [],
+        "solver": {
+            "status": "not_run",
+            "executable": False,
+            "candidate_admission": admission or {"admitted": 0, "excluded": 0},
+        },
     }
 
 
@@ -383,6 +394,260 @@ def _exposure_coefficients(
     return issuer_coeffs, sector_coeffs, issues
 
 
+# A screened candidate is admitted by an account-wide policy rather than named by the
+# owner, so a gap in its own record is a fact about that candidate. These are the gaps
+# that drop one candidate from the comparison instead of withholding the comparison.
+CANDIDATE_EXCLUSION_REASONS = (
+    "missing_forecast",
+    "missing_price",
+    "insufficient_history",
+    "missing_stress",
+    "missing_exposure_coefficients",
+    "not_permitted",
+)
+
+
+def _known_price(
+    bundle: dict,
+    config: dict,
+    prices: pd.DataFrame,
+    sid: str,
+    cutoff: pd.Timestamp,
+    selected: pd.DataFrame | None = None,
+) -> tuple[float | None, str | None]:
+    """The latest known, current raw close for one security, or why there is none.
+
+    ``selected`` is this security's rows when the caller already grouped the panel. A
+    comparison against a thousand screened candidates prices each of them, and filtering
+    the whole panel once per security is what makes that pass quadratic.
+    """
+    from .metrics import _observed
+
+    if selected is None:
+        selected = prices[prices.security_id == sid]
+    rows = _observed(selected.copy(), bundle, "date", "available_at", config)
+    if not rows.empty:
+        rows["_date"] = rows.date.map(_date)
+        rows = rows[rows._date.notna() & (rows._date <= cutoff)]
+    if rows.empty:
+        return None, "missing_trade_prices"
+    latest = rows.sort_values("_date").iloc[-1]
+    if (
+        (cutoff.normalize() - latest._date.normalize()).days
+        > int(config.get("data", {}).get("max_price_age_days", 5))
+        or not _finite(latest.close)
+        or float(latest.close) <= 0
+    ):
+        return None, "stale_trade_price"
+    return float(latest.close), None
+
+
+def _candidate_forecast_gaps(
+    bundle: dict, config: dict, *, screened: set[str], required: list[str], cutoff: pd.Timestamp
+) -> set[str]:
+    """Screened candidates the dated joint scenario set does not actually cover.
+
+    The terms are those of ``_forecast_panel``: horizon, observability, staleness, basis,
+    unique nonempty labels, a usable total return and a probability that agrees with the
+    rest of the set. A candidate that fails any of them is not part of that joint set, so
+    it is named here instead of turning the shared set into a mixed one — which is the
+    difference between excluding one screened name and withholding the whole comparison.
+    """
+    from .metrics import _observed
+
+    needed = {"security_id", "scenario", "horizon_months", "return_value", "basis", "forecast_date"}
+    forecasts = _frame(bundle, "forecasts")
+    if forecasts.empty or not needed.issubset(forecasts.columns):
+        return set(screened)
+    horizon = int(config.get("allocation", {}).get("horizon_months", 12))
+    forecasts = forecasts[
+        pd.to_numeric(forecasts.horizon_months, errors="coerce") == horizon
+    ].copy()
+    forecasts["_parsed_date"] = pd.to_datetime(
+        forecasts.forecast_date, utc=True, errors="coerce", format="mixed"
+    )
+    forecasts = _observed(
+        forecasts[forecasts._parsed_date.notna()], bundle, "forecast_date", None, config
+    )
+    max_age = int(config.get("data", {}).get("max_forecast_age_days", 45))
+
+    def latest(sid: str) -> pd.DataFrame | None:
+        rows = forecasts[forecasts.security_id == sid]
+        return None if rows.empty else rows[rows._parsed_date == rows._parsed_date.max()]
+
+    reference = next((r for r in (latest(sid) for sid in required) if r is not None), None)
+    allocation = config.get("allocation", {})
+    return_overrides = allocation.get("return_overrides", {}) or {}
+    # The panel reads a common distribution from any row of a scenario, so a candidate
+    # whose probabilities disagree with the rest would make the whole panel inconsistent.
+    # Explicit overrides replace every per-row probability, so there is nothing to agree.
+    compare_probabilities = bool(allocation.get("use_probabilities", True)) and not (
+        allocation.get("probability_overrides", {}) or {}
+    )
+    stated = _distribution(reference) if reference is not None else {}
+    gaps: set[str] = set()
+    for sid in sorted(screened):
+        rows = latest(sid)
+        if rows is None:
+            gaps.add(sid)
+            continue
+        labels = rows.scenario
+        if (
+            labels.isna().any()
+            or labels.astype(str).str.strip().eq("").any()
+            or labels.duplicated().any()
+            or not rows.basis.isin(["subjective", "calibrated"]).all()
+            or (cutoff - rows._parsed_date.max()).days > max_age
+        ):
+            gaps.add(sid)
+            continue
+        if reference is not None and (
+            set(labels) != set(reference.scenario)
+            or rows._parsed_date.max() != reference._parsed_date.max()
+        ):
+            gaps.add(sid)
+            continue
+        overrides = return_overrides.get(sid, {})
+        values = [overrides.get(str(row.scenario), row.return_value) for row in rows.itertuples()]
+        if any(not _finite(value) or float(value) < -1 for value in values):
+            gaps.add(sid)
+            continue
+        if compare_probabilities and not _probabilities_agree(_distribution(rows), stated):
+            gaps.add(sid)
+    return gaps
+
+
+def _distribution(rows: pd.DataFrame) -> dict[str, float]:
+    """One scenario-labelled probability column, however sparsely it was filled in."""
+    values = pd.to_numeric(
+        rows.get("probability", pd.Series(index=rows.index, dtype=float)), errors="coerce"
+    )
+    return dict(zip(rows.scenario.astype(str), values, strict=False))
+
+
+def _probabilities_agree(candidate: dict[str, float], stated: dict[str, float]) -> bool:
+    """Whether one candidate's distribution is the same statement the set already makes.
+
+    Blank everywhere agrees with blank everywhere; a number agrees with the same number.
+    A blank beside a stated probability is a different statement, and the panel refuses
+    the whole set over it, so the candidate is named here instead.
+    """
+    for label, value in candidate.items():
+        other = stated.get(label)
+        known, other_known = _finite(value), _finite(other)
+        if known != other_known:
+            return False
+        if known and abs(float(value) - float(other)) > 1e-10:
+            return False
+    return True
+
+
+def _admit_candidates(
+    bundle: dict, config: dict, *, ids: list[str], screened: set[str], cutoff: pd.Timestamp
+) -> tuple[list[str], dict[str, set[str]], dict | None, dict[str, float]]:
+    """Partition screened candidates into the comparison and a named exclusion list.
+
+    Returns the surviving ids, the reasons per excluded candidate, the covariance
+    estimate for the surviving set, and the prices it read while deciding, so the caller
+    repeats none of them. With nothing screened this is a no-op returning no covariance
+    and no prices: the comparison is built, and blocked, exactly as it was before any
+    candidate policy existed.
+    """
+    from .metrics import _by_security, portfolio_covariance, stress_returns
+
+    reasons: dict[str, set[str]] = {}
+    known: dict[str, float] = {}
+    if not screened:
+        return ids, reasons, None, known
+
+    def exclude(names: set[str], reason: str) -> None:
+        for sid in names:
+            reasons.setdefault(sid, set()).add(reason)
+
+    def survivors(current: list[str]) -> tuple[list[str], set[str]]:
+        return [sid for sid in current if sid not in reasons], screened - set(reasons)
+
+    prices = _frame(bundle, "prices")
+    priced = not prices.empty and {"security_id", "date", "close", "available_at"}.issubset(
+        prices.columns
+    )
+    by_security = _by_security(prices) if priced else {}
+    exclude(
+        _candidate_forecast_gaps(
+            bundle,
+            config,
+            screened=screened,
+            required=[sid for sid in ids if sid not in screened],
+            cutoff=cutoff,
+        ),
+        "missing_forecast",
+    )
+    unpriced = set()
+    for sid in screened:
+        price = (
+            None
+            if not priced
+            else _known_price(
+                bundle, config, prices, sid, cutoff, by_security.get(sid, prices.iloc[0:0])
+            )[0]
+        )
+        if price is None:
+            unpriced.add(sid)
+        else:
+            known[sid] = price
+    exclude(unpriced, "missing_price")
+    ids, screened = survivors(ids)
+    if screened and any(
+        issue["severity"] == "error" for issue in _exposure_coefficients(bundle, config, ids)[2]
+    ):
+        # Probe only when the shared pass failed, so the common case stays one pass.
+        exclude(
+            {
+                sid
+                for sid in screened
+                if any(
+                    issue["severity"] == "error"
+                    for issue in _exposure_coefficients(bundle, config, [sid])[2]
+                )
+            },
+            "missing_exposure_coefficients",
+        )
+        ids, screened = survivors(ids)
+    if screened:
+        stress = stress_returns(bundle, config, ids)
+        exclude(
+            {
+                sid
+                for sid in screened
+                if any(sid not in values or not _finite(values[sid]) for values in stress.values())
+            },
+            "missing_stress",
+        )
+        ids, screened = survivors(ids)
+    covariance = portfolio_covariance(bundle, config, ids)
+    while screened and covariance.get("complete") is not True:
+        named = {
+            sid
+            for sid in screened
+            for issue in covariance.get("issues", [])
+            if issue.get("code") in {"missing_risk_asset", "stale_risk_prices"}
+            and str(issue.get("message", "")).startswith(f"{sid}:")
+        }
+        if not named:
+            # The aligned weekly panel is one joint estimate, so when it falls under the
+            # observation floor no single candidate owns the shortfall. The screened set
+            # gives way as a set, and every name is reported; the securities the owner
+            # actually named still have to clear the gate on their own.
+            required_only = [sid for sid in ids if sid not in screened]
+            if portfolio_covariance(bundle, config, required_only).get("complete") is not True:
+                break
+            named = set(screened)
+        exclude(named, "insufficient_history")
+        ids, screened = survivors(ids)
+        covariance = portfolio_covariance(bundle, config, ids)
+    return ids, reasons, covariance, {sid: known[sid] for sid in ids if sid in known}
+
+
 @dataclass
 class _Problem:
     accounts: list[str]
@@ -578,7 +843,7 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
     All output is research. Subjective forecasts are never marked executable;
     taxable alternatives require complete lots and conditional tax assumptions.
     """
-    from .metrics import _cutoff, _observed, portfolio_covariance, stress_returns
+    from .metrics import _cutoff, portfolio_covariance, stress_returns
     from .taxes import estimate_sale
 
     issues: list[dict] = []
@@ -656,13 +921,48 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
     account_ids = sorted(accounts.account_id.tolist())
     accounts = accounts.set_index("account_id")
     security_map = securities.set_index("security_id")
+    # An account may admit the screened eligible universe instead of a hand-listed set.
+    # Those candidates are a policy, not an instruction about a particular security, so
+    # each one carries its own exclusions. Securities the owner holds, the benchmark and
+    # securities named in account_permissions are never screened: staying silent about a
+    # gap in one of those would hide it rather than report it.
+    policy_accounts = {
+        aid
+        for aid, policy in (mandate.get("account_candidate_policy", {}) or {}).items()
+        if policy == "eligible_universe"
+    } & set(account_ids)
+    eligible_ids = {
+        sid for sid, value in security_map.eligible.items() if value in (True, np.bool_(True))
+    }
+    named_ids = {
+        sid
+        for aid in account_ids
+        if isinstance(permissions.get(aid), list)
+        for sid in permissions[aid]
+    }
+    screened_ids = (
+        (eligible_ids if policy_accounts else set())
+        - named_ids
+        - set(positions.security_id)
+        - {mandate.get("benchmark_id")}
+    )
+    candidate_reasons: dict[str, set[str]] = {}
+
+    def permitted_in(aid: str, sid: str) -> bool:
+        """Named by the owner for this account, or admitted by its candidate policy."""
+        return sid in (permissions.get(aid) or []) or (
+            aid in policy_accounts and sid in eligible_ids
+        )
+
     navs: list[float] = []
     taxable_locked: set[str] = set()
     taxable_unverified: set[str] = set()
     taxable_enabled: set[str] = set()
     for aid in account_ids:
         row = accounts.loc[aid]
-        if aid not in permissions or not isinstance(permissions[aid], list):
+        if aid not in policy_accounts and (
+            aid not in permissions or not isinstance(permissions[aid], list)
+        ):
             issues.append(
                 _issue(
                     "missing_account_permissions",
@@ -742,9 +1042,12 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 )
             )
     pair_ids: list[tuple[str, str]] = []
+    paired_ids: set[str] = set()
     for aid in account_ids:
         owned_ids = set(positions.loc[positions.account_id == aid, "security_id"])
         permitted = set(permissions.get(aid, []))
+        if aid in policy_accounts:
+            permitted |= eligible_ids
         for sid in sorted(owned_ids | permitted):
             if sid not in security_map.index:
                 issues.append(
@@ -753,6 +1056,9 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 continue
             security = security_map.loc[sid]
             if security.currency != base:
+                if sid in screened_ids:
+                    candidate_reasons.setdefault(sid, set()).add("not_permitted")
+                    continue
                 issues.append(
                     _issue(
                         "security_currency",
@@ -763,13 +1069,29 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 security.get("eligible") in (True, np.bool_(True)) and aid not in taxable_locked
             ):
                 pair_ids.append((aid, sid))
+                paired_ids.add(sid)
+    for sid in sorted(screened_ids - paired_ids):
+        candidate_reasons.setdefault(sid, set()).add("not_permitted")
+    admitted_candidates: set[str] = set()
+
+    def partition() -> dict:
+        """Everything known about the screened candidates at this point."""
+        excluded = [
+            {"security_id": sid, "reasons": sorted(found)}
+            for sid, found in sorted(candidate_reasons.items())
+        ]
+        return {
+            "excluded": excluded,
+            "admission": {"admitted": len(admitted_candidates), "excluded": len(excluded)},
+        }
+
     benchmark = mandate.get("benchmark_id")
     if not isinstance(benchmark, str) or benchmark not in security_map.index:
         issues.append(
             _issue("missing_benchmark", "The benchmark must have a resolved security ID.")
         )
     if any(i["severity"] == "error" for i in issues):
-        return _blocked(issues)
+        return _blocked(issues, **partition())
     cash_return = allocation.get("cash_return")
     if allocation.get("optimize", False) and not _finite(cash_return):
         return _blocked(
@@ -779,13 +1101,21 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                     "missing_cash_return",
                     "An explicit horizon cash-return assumption is required for optimization.",
                 )
-            ]
+            ],
+            **partition(),
         )
     cash_rate = (
         float(cash_return) if _finite(cash_return) else 0.0
     )  # Internal feasibility only; unknown results stay null.
     ids = sorted({sid for _, sid in pair_ids} | {benchmark})
     # Benchmark is a comparison instrument even when an account cannot buy it.
+    ids, data_reasons, covariance_result, admitted_prices = _admit_candidates(
+        bundle, config, ids=ids, screened=screened_ids & set(ids), cutoff=cutoff
+    )
+    for sid, found in data_reasons.items():
+        candidate_reasons.setdefault(sid, set()).update(found)
+    pair_ids = [(aid, sid) for aid, sid in pair_ids if sid not in data_reasons]
+    admitted_candidates = screened_ids & set(ids)
     panel, forecast_issues = _forecast_panel(
         bundle, config, ids, require_probabilities=bool(allocation.get("optimize", False))
     )
@@ -804,24 +1134,24 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
             )
         )
     else:
+        from .metrics import _by_security
+
+        # Group once and read each security's own rows; admission already priced the
+        # candidates it admitted, so no security is priced twice in one run.
+        price_rows = _by_security(prices)
         for sid in ids:
-            rows = prices[prices.security_id == sid].copy()
-            rows = _observed(rows, bundle, "date", "available_at", config)
-            rows["_date"] = rows.date.map(_date)
-            rows = rows[rows._date.notna() & (rows._date <= cutoff)]
-            if rows.empty:
-                issues.append(_issue("missing_trade_prices", f"No known raw price for {sid}."))
+            if sid in admitted_prices:
+                last_prices[sid] = admitted_prices[sid]
                 continue
-            latest = rows.sort_values("_date").iloc[-1]
-            if (
-                (cutoff.normalize() - latest._date.normalize()).days
-                > int(data.get("max_price_age_days", 5))
-                or not _finite(latest.close)
-                or float(latest.close) <= 0
-            ):
+            price, gap = _known_price(
+                bundle, config, prices, sid, cutoff, price_rows.get(sid, prices.iloc[0:0])
+            )
+            if gap == "missing_trade_prices":
+                issues.append(_issue("missing_trade_prices", f"No known raw price for {sid}."))
+            elif gap == "stale_trade_price":
                 issues.append(_issue("stale_trade_price", f"Invalid or stale raw price for {sid}."))
             else:
-                last_prices[sid] = float(latest.close)
+                last_prices[sid] = price
     for name in (
         "issuer_cap",
         "sector_cap",
@@ -837,7 +1167,7 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 _issue("missing_risk_limit", f"Explicit valid mandate.{name} is required.")
             )
     if any(i["severity"] == "error" for i in issues):
-        return _blocked(issues)
+        return _blocked(issues, **partition())
     # Taxable accounts stay fixed unless full holdings are covered by valid lots
     # and explicit user-supplied tax rates. A modeled reserve is not a tax bill.
     tax_lots = _frame(bundle, "tax_lots")
@@ -895,8 +1225,9 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 )
             )
     if any(i["severity"] == "error" for i in issues):
-        return _blocked(issues)
-    covariance_result = portfolio_covariance(bundle, config, ids)
+        return _blocked(issues, **partition())
+    if covariance_result is None:
+        covariance_result = portfolio_covariance(bundle, config, ids)
     covariance = covariance_result.get("matrix")
     if covariance is None or covariance_result.get("complete", True) is False:
         issues.extend(covariance_result.get("issues", []))
@@ -906,13 +1237,14 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 "A complete aligned weekly covariance panel is required for the volatility limit.",
             )
         )
-        return _blocked(issues)
+        return _blocked(issues, **partition())
     cov_ids = covariance_result.get("ids", ids)
     reorder = [cov_ids.index(sid) for sid in ids]
     covariance = np.asarray(covariance, dtype=float)[np.ix_(reorder, reorder)]
     if covariance.shape != (len(ids), len(ids)) or not np.isfinite(covariance).all():
         return _blocked(
-            issues + [_issue("invalid_covariance", "Invalid covariance dimensions or values.")]
+            issues + [_issue("invalid_covariance", "Invalid covariance dimensions or values.")],
+            **partition(),
         )
     stress = stress_returns(bundle, config, ids)
     for name, values in stress.items():
@@ -924,7 +1256,7 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 )
             )
     if any(i["severity"] == "error" for i in issues):
-        return _blocked(issues)
+        return _blocked(issues, **partition())
     n, a, total_nav = len(pair_ids), len(account_ids), float(sum(navs))
     nav_array = np.asarray(navs)
     account_index = {aid: j for j, aid in enumerate(account_ids)}
@@ -971,7 +1303,7 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
         locked = (
             sid in locked_ids or aid in taxable_locked or dealing.get("dealing_allowed") is False
         )
-        can_add = sid in permissions[aid] and security_map.loc[sid, "eligible"] in (
+        can_add = permitted_in(aid, sid) and security_map.loc[sid, "eligible"] in (
             True,
             np.bool_(True),
         )
@@ -1645,7 +1977,7 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
             incumbent, entrant = [], []
             for sid, j in indices.items():
                 if (
-                    sid not in permissions[aid]
+                    not permitted_in(aid, sid)
                     or sid in locked_ids
                     or problem.bounds[j][0] == problem.bounds[j][1]
                     or not score_column
@@ -1694,7 +2026,7 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 residual = allocation.get("residual_security_id")
                 if (
                     residual in indices
-                    and residual in permissions[aid]
+                    and permitted_in(aid, residual)
                     and problem.bounds[indices[residual]][1] > problem.bounds[indices[residual]][0]
                 ):
                     selected = [residual]
@@ -1794,6 +2126,7 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
     ]:
         solver[key] = selected.get(key)
     issues.extend(selected.get("issues", []))
+    solver["candidate_admission"] = partition()["admission"]
     return {
         "status": selected["status"],
         "issues": issues,
@@ -1802,5 +2135,6 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
         "decisions": selected.get("decisions", []),
         "comparison": candidates + [reference],
         "candidates": candidates,
+        "excluded_candidates": partition()["excluded"],
         "solver": solver,
     }

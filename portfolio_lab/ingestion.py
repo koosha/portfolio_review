@@ -832,6 +832,24 @@ class ResearchStore:
         result["input_manifest"] = json.loads(row[3])
         return result
 
+    def load_run_part(self, run_id, name: str):
+        """One top-level field of an archived result, extracted by the database.
+
+        A saved run carries every security's research, which at the documented candidate
+        scope is megabytes. A caller that needs one field — the previous run's research,
+        say — should not parse the rest of the archive to reach it.
+        """
+        if not str(name).isidentifier():
+            raise ValueError("A result field name must be a plain identifier.")
+        with sqlite3.connect(self.path) as connection:
+            row = connection.execute(
+                "SELECT json_extract(result_json,?) FROM research_runs WHERE run_id=?",
+                (f"$.{name}", str(run_id)),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"No archived research run: {run_id}")
+        return None if row[0] is None else json.loads(row[0])
+
     def load_bundle(self, run_id) -> dict:
         """Restore the frozen normalized inputs for network-free scenario replay."""
         row = self._row(run_id)

@@ -375,7 +375,13 @@ def _candidates(result: dict, holdings: list[dict]) -> dict:
     eligible = [row for row in signals if row.get("eligible")]
     complete_eligible = [row for row in eligible if row.get("data_status") == "complete"]
     unowned = [row for row in scored if str(row.get("security_id")) not in held]
-    scope_label = ((result.get("metadata") or {}).get("scope")) or "unstated universe"
+    # The scope the review actually used, which the fetch rewrote to say how much of it
+    # was enriched. The configured scope name is only the setting that was asked for.
+    scope_label = (
+        ((result.get("universe") or {}).get("scope_label"))
+        or ((result.get("metadata") or {}).get("scope"))
+        or "unstated universe"
+    )
     return _row(
         "candidates",
         [
