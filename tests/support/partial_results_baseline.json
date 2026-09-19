@@ -1,0 +1,1125 @@
+{
+ "risk": {
+  "annualized_volatility": 0.12004218559718145,
+  "benchmark_observations": 156,
+  "beta": 0.8446916808138066,
+  "covariance_asset_count": 9,
+  "covariance_method": "Ledoit-Wolf shrinkage, common weekly panel, annualized \u00d752",
+  "covariance_security_ids": [
+   "SIM01",
+   "SIM01B",
+   "SIM03",
+   "SIM06",
+   "SIM09",
+   "SIM12",
+   "SIM16",
+   "SIM18",
+   "SIMETF"
+  ],
+  "five_year_sensitivity": {
+   "annualized_volatility": 0.11647348231241536,
+   "issues": [],
+   "observations": 260,
+   "requested_years": 5,
+   "scope": "Same held assets and NAV weights; five-year common-panel covariance",
+   "status": "complete"
+  },
+  "history": [
+   {
+    "benchmark": 0.9946334788682523,
+    "date": "2023-09-08",
+    "value": 0.9962322200366012
+   },
+   {
+    "benchmark": 0.9885383451525263,
+    "date": "2023-09-15",
+    "value": 0.9885854690617815
+   },
+   {
+    "benchmark": 0.9963261775278893,
+    "date": "2023-09-22",
+    "value": 0.9919384459544784
+   },
+   {
+    "benchmark": 0.9951746416339046,
+    "date": "2023-09-29",
+    "value": 0.9939773742186123
+   },
+   {
+    "benchmark": 0.9959514370355674,
+    "date": "2023-10-06",
+    "value": 0.990692830464536
+   },
+   {
+    "benchmark": 1.0031271470786254,
+    "date": "2023-10-13",
+    "value": 0.9969568821658514
+   },
+   {
+    "benchmark": 1.0054637264922637,
+    "date": "2023-10-20",
+    "value": 1.0077325818688667
+   },
+   {
+    "benchmark": 0.9951456251957007,
+    "date": "2023-10-27",
+    "value": 0.9939660345372772
+   },
+   {
+    "benchmark": 0.9898656740129244,
+    "date": "2023-11-03",
+    "value": 0.9910621538341836
+   },
+   {
+    "benchmark": 0.9781732129159203,
+    "date": "2023-11-10",
+    "value": 0.9776894284147396
+   },
+   {
+    "benchmark": 1.0143615610511394,
+    "date": "2023-11-17",
+    "value": 0.9992532687005465
+   },
+   {
+    "benchmark": 0.9912914356614932,
+    "date": "2023-11-24",
+    "value": 0.9827604807913279
+   },
+   {
+    "benchmark": 1.0087249382685421,
+    "date": "2023-12-01",
+    "value": 0.9966981258877162
+   },
+   {
+    "benchmark": 1.0540306844407827,
+    "date": "2023-12-08",
+    "value": 1.0404264060983488
+   },
+   {
+    "benchmark": 1.0429977449530476,
+    "date": "2023-12-15",
+    "value": 1.0277682815446039
+   },
+   {
+    "benchmark": 1.0363119300097814,
+    "date": "2023-12-22",
+    "value": 1.024033181270371
+   },
+   {
+    "benchmark": 1.0356038935080116,
+    "date": "2023-12-29",
+    "value": 1.0217099629657624
+   },
+   {
+    "benchmark": 1.0231681330683418,
+    "date": "2024-01-05",
+    "value": 1.0115816491981384
+   },
+   {
+    "benchmark": 1.0199168412093729,
+    "date": "2024-01-12",
+    "value": 1.0040649313966288
+   },
+   {
+    "benchmark": 0.9950114796943363,
+    "date": "2024-01-19",
+    "value": 0.9807581227152083
+   },
+   {
+    "benchmark": 0.9730478508557511,
+    "date": "2024-01-26",
+    "value": 0.9604804773249677
+   },
+   {
+    "benchmark": 0.984733086948114,
+    "date": "2024-02-02",
+    "value": 0.9736131739530421
+   },
+   {
+    "benchmark": 0.9804352139212602,
+    "date": "2024-02-09",
+    "value": 0.9643830557842703
+   },
+   {
+    "benchmark": 0.9896923629366146,
+    "date": "2024-02-16",
+    "value": 0.9705134112046833
+   },
+   {
+    "benchmark": 0.969481132362917,
+    "date": "2024-02-23",
+    "value": 0.9509271289202368
+   },
+   {
+    "benchmark": 0.9847857396616443,
+    "date": "2024-03-01",
+    "value": 0.9626048930840024
+   },
+   {
+    "benchmark": 0.9981066818630908,
+    "date": "2024-03-08",
+    "value": 0.9768718740184164
+   },
+   {
+    "benchmark": 0.9982657873647729,
+    "date": "2024-03-15",
+    "value": 0.9754774460040923
+   },
+   {
+    "benchmark": 0.9628884726599882,
+    "date": "2024-03-22",
+    "value": 0.9481445916428494
+   },
+   {
+    "benchmark": 0.9849690045251314,
+    "date": "2024-03-29",
+    "value": 0.9703247848824841
+   },
+   {
+    "benchmark": 1.0073230439231273,
+    "date": "2024-04-05",
+    "value": 0.9899378050808907
+   },
+   {
+    "benchmark": 0.9843701678787536,
+    "date": "2024-04-12",
+    "value": 0.9714335004167691
+   },
+   {
+    "benchmark": 0.9697572748228525,
+    "date": "2024-04-19",
+    "value": 0.9534459236316454
+   },
+   {
+    "benchmark": 0.9742014496647863,
+    "date": "2024-04-26",
+    "value": 0.9486060659840188
+   },
+   {
+    "benchmark": 1.0032663608205856,
+    "date": "2024-05-03",
+    "value": 0.9739742151260669
+   },
+   {
+    "benchmark": 1.0207166687219615,
+    "date": "2024-05-10",
+    "value": 0.9903808397297595
+   },
+   {
+    "benchmark": 1.0129325710627892,
+    "date": "2024-05-17",
+    "value": 0.9903441104043404
+   },
+   {
+    "benchmark": 1.0254025809542788,
+    "date": "2024-05-24",
+    "value": 1.0017075749723678
+   },
+   {
+    "benchmark": 1.0392181959468894,
+    "date": "2024-05-31",
+    "value": 1.0123535778925896
+   },
+   {
+    "benchmark": 1.016836761847456,
+    "date": "2024-06-07",
+    "value": 0.9961403765970961
+   },
+   {
+    "benchmark": 1.0407281024517443,
+    "date": "2024-06-14",
+    "value": 1.018294446491427
+   },
+   {
+    "benchmark": 1.0507227979175497,
+    "date": "2024-06-21",
+    "value": 1.0210812313568933
+   },
+   {
+    "benchmark": 1.0719278345165146,
+    "date": "2024-06-28",
+    "value": 1.037150001704724
+   },
+   {
+    "benchmark": 1.0770947812993834,
+    "date": "2024-07-05",
+    "value": 1.0456417655810697
+   },
+   {
+    "benchmark": 1.0668332683125683,
+    "date": "2024-07-12",
+    "value": 1.0393873060869983
+   },
+   {
+    "benchmark": 1.076724641568131,
+    "date": "2024-07-19",
+    "value": 1.0447226664640643
+   },
+   {
+    "benchmark": 1.0816858866998231,
+    "date": "2024-07-26",
+    "value": 1.0509470378143624
+   },
+   {
+    "benchmark": 1.057461581711167,
+    "date": "2024-08-02",
+    "value": 1.0332408469294279
+   },
+   {
+    "benchmark": 1.0655339728938,
+    "date": "2024-08-09",
+    "value": 1.0277362559448069
+   },
+   {
+    "benchmark": 1.0883562872436527,
+    "date": "2024-08-16",
+    "value": 1.0497741925260184
+   },
+   {
+    "benchmark": 1.0580545189472836,
+    "date": "2024-08-23",
+    "value": 1.033857861563344
+   },
+   {
+    "benchmark": 1.0764964320738288,
+    "date": "2024-08-30",
+    "value": 1.0453843733430905
+   },
+   {
+    "benchmark": 1.0900221713443508,
+    "date": "2024-09-06",
+    "value": 1.0568788583186994
+   },
+   {
+    "benchmark": 1.0748509908404869,
+    "date": "2024-09-13",
+    "value": 1.044598520667545
+   },
+   {
+    "benchmark": 1.106622310008642,
+    "date": "2024-09-20",
+    "value": 1.06628639835925
+   },
+   {
+    "benchmark": 1.1225162553068433,
+    "date": "2024-09-27",
+    "value": 1.0840226596142821
+   },
+   {
+    "benchmark": 1.1371374529459188,
+    "date": "2024-10-04",
+    "value": 1.1011403425083341
+   },
+   {
+    "benchmark": 1.0985688746871793,
+    "date": "2024-10-11",
+    "value": 1.0591257486596977
+   },
+   {
+    "benchmark": 1.0879113182781566,
+    "date": "2024-10-18",
+    "value": 1.0457208686745203
+   },
+   {
+    "benchmark": 1.05972147733636,
+    "date": "2024-10-25",
+    "value": 1.0246688967006765
+   },
+   {
+    "benchmark": 1.0496776141348787,
+    "date": "2024-11-01",
+    "value": 1.0152286394567533
+   },
+   {
+    "benchmark": 1.0384249237250163,
+    "date": "2024-11-08",
+    "value": 1.0061276974844346
+   },
+   {
+    "benchmark": 1.0316566479862914,
+    "date": "2024-11-15",
+    "value": 1.0013568499886152
+   },
+   {
+    "benchmark": 1.035083836105272,
+    "date": "2024-11-22",
+    "value": 1.0104855747015387
+   },
+   {
+    "benchmark": 1.0601082245337587,
+    "date": "2024-11-29",
+    "value": 1.0307525544393386
+   },
+   {
+    "benchmark": 1.0724187306302313,
+    "date": "2024-12-06",
+    "value": 1.0398821028310807
+   },
+   {
+    "benchmark": 1.0666995896272145,
+    "date": "2024-12-13",
+    "value": 1.0396794065078512
+   },
+   {
+    "benchmark": 1.1181561051401212,
+    "date": "2024-12-20",
+    "value": 1.0784067000131188
+   },
+   {
+    "benchmark": 1.1371691921946399,
+    "date": "2024-12-27",
+    "value": 1.0874572822740876
+   },
+   {
+    "benchmark": 1.1381056705804902,
+    "date": "2025-01-03",
+    "value": 1.0912286721559161
+   },
+   {
+    "benchmark": 1.150359010815901,
+    "date": "2025-01-10",
+    "value": 1.099473838670596
+   },
+   {
+    "benchmark": 1.148582536830676,
+    "date": "2025-01-17",
+    "value": 1.095031335604437
+   },
+   {
+    "benchmark": 1.1986901374223347,
+    "date": "2025-01-24",
+    "value": 1.1385319885334138
+   },
+   {
+    "benchmark": 1.1610911018525767,
+    "date": "2025-01-31",
+    "value": 1.1104101497225154
+   },
+   {
+    "benchmark": 1.200257128216938,
+    "date": "2025-02-07",
+    "value": 1.1407981741550328
+   },
+   {
+    "benchmark": 1.2196361239676792,
+    "date": "2025-02-14",
+    "value": 1.1502508733289323
+   },
+   {
+    "benchmark": 1.2387140362883016,
+    "date": "2025-02-21",
+    "value": 1.166847778767627
+   },
+   {
+    "benchmark": 1.2662086294005073,
+    "date": "2025-02-28",
+    "value": 1.1952333694449764
+   },
+   {
+    "benchmark": 1.2581148807959064,
+    "date": "2025-03-07",
+    "value": 1.1811506294229053
+   },
+   {
+    "benchmark": 1.297838997452912,
+    "date": "2025-03-14",
+    "value": 1.2108171802034178
+   },
+   {
+    "benchmark": 1.309364709468713,
+    "date": "2025-03-21",
+    "value": 1.2238947000924691
+   },
+   {
+    "benchmark": 1.3253854746082134,
+    "date": "2025-03-28",
+    "value": 1.2274073866764432
+   },
+   {
+    "benchmark": 1.2939367901305645,
+    "date": "2025-04-04",
+    "value": 1.2093457473924119
+   },
+   {
+    "benchmark": 1.2872215756751328,
+    "date": "2025-04-11",
+    "value": 1.19781950864126
+   },
+   {
+    "benchmark": 1.306685405754577,
+    "date": "2025-04-18",
+    "value": 1.2175033557802402
+   },
+   {
+    "benchmark": 1.3437093369244688,
+    "date": "2025-04-25",
+    "value": 1.254424917475577
+   },
+   {
+    "benchmark": 1.387637087701199,
+    "date": "2025-05-02",
+    "value": 1.2931013296133147
+   },
+   {
+    "benchmark": 1.3468378929639009,
+    "date": "2025-05-09",
+    "value": 1.2666775943206943
+   },
+   {
+    "benchmark": 1.348774255536741,
+    "date": "2025-05-16",
+    "value": 1.2738680807810219
+   },
+   {
+    "benchmark": 1.3282181520319274,
+    "date": "2025-05-23",
+    "value": 1.2615597199108262
+   },
+   {
+    "benchmark": 1.320577325516944,
+    "date": "2025-05-30",
+    "value": 1.25753282339416
+   },
+   {
+    "benchmark": 1.3486335405289993,
+    "date": "2025-06-06",
+    "value": 1.2774643660946023
+   },
+   {
+    "benchmark": 1.3466141411062238,
+    "date": "2025-06-13",
+    "value": 1.279949807770782
+   },
+   {
+    "benchmark": 1.3147686672520988,
+    "date": "2025-06-20",
+    "value": 1.2524414024207557
+   },
+   {
+    "benchmark": 1.3802028239893191,
+    "date": "2025-06-27",
+    "value": 1.306658315866484
+   },
+   {
+    "benchmark": 1.3520387622841092,
+    "date": "2025-07-04",
+    "value": 1.284073621890355
+   },
+   {
+    "benchmark": 1.3578638013113846,
+    "date": "2025-07-11",
+    "value": 1.280701701369546
+   },
+   {
+    "benchmark": 1.3623316037531255,
+    "date": "2025-07-18",
+    "value": 1.2799923561097524
+   },
+   {
+    "benchmark": 1.4124519094563812,
+    "date": "2025-07-25",
+    "value": 1.3155569155278457
+   },
+   {
+    "benchmark": 1.448187006063599,
+    "date": "2025-08-01",
+    "value": 1.3375672758158943
+   },
+   {
+    "benchmark": 1.401497014375741,
+    "date": "2025-08-08",
+    "value": 1.3002926460908548
+   },
+   {
+    "benchmark": 1.466936778219638,
+    "date": "2025-08-15",
+    "value": 1.3483420425034531
+   },
+   {
+    "benchmark": 1.4428055556805155,
+    "date": "2025-08-22",
+    "value": 1.3218267979310276
+   },
+   {
+    "benchmark": 1.4472587718379761,
+    "date": "2025-08-29",
+    "value": 1.3230409265622913
+   },
+   {
+    "benchmark": 1.5025695465031448,
+    "date": "2025-09-05",
+    "value": 1.3549418739635846
+   },
+   {
+    "benchmark": 1.4745007962586445,
+    "date": "2025-09-12",
+    "value": 1.3299096971534246
+   },
+   {
+    "benchmark": 1.4294027961094546,
+    "date": "2025-09-19",
+    "value": 1.3004666038306087
+   },
+   {
+    "benchmark": 1.4548133098000435,
+    "date": "2025-09-26",
+    "value": 1.3260510340605869
+   },
+   {
+    "benchmark": 1.478251452874062,
+    "date": "2025-10-03",
+    "value": 1.3427725324449908
+   },
+   {
+    "benchmark": 1.4912905553215268,
+    "date": "2025-10-10",
+    "value": 1.3394999463064825
+   },
+   {
+    "benchmark": 1.4989586554651266,
+    "date": "2025-10-17",
+    "value": 1.3471999931244694
+   },
+   {
+    "benchmark": 1.5242594267010536,
+    "date": "2025-10-24",
+    "value": 1.3611641254786058
+   },
+   {
+    "benchmark": 1.5575489794836483,
+    "date": "2025-10-31",
+    "value": 1.3779775553331026
+   },
+   {
+    "benchmark": 1.5416288769868367,
+    "date": "2025-11-07",
+    "value": 1.3653304143427694
+   },
+   {
+    "benchmark": 1.5000182358903784,
+    "date": "2025-11-14",
+    "value": 1.3355870186970258
+   },
+   {
+    "benchmark": 1.5347089755372085,
+    "date": "2025-11-21",
+    "value": 1.3625667790619684
+   },
+   {
+    "benchmark": 1.5308966403338033,
+    "date": "2025-11-28",
+    "value": 1.3671869067914548
+   },
+   {
+    "benchmark": 1.5257330343608608,
+    "date": "2025-12-05",
+    "value": 1.363430078365866
+   },
+   {
+    "benchmark": 1.5240747974514948,
+    "date": "2025-12-12",
+    "value": 1.3760081567746347
+   },
+   {
+    "benchmark": 1.550449011217597,
+    "date": "2025-12-19",
+    "value": 1.400602818795915
+   },
+   {
+    "benchmark": 1.5312760857625105,
+    "date": "2025-12-26",
+    "value": 1.3862236897626712
+   },
+   {
+    "benchmark": 1.5097081738091875,
+    "date": "2026-01-02",
+    "value": 1.360660324367782
+   },
+   {
+    "benchmark": 1.5258503462328834,
+    "date": "2026-01-09",
+    "value": 1.3660146348586133
+   },
+   {
+    "benchmark": 1.5720003570543029,
+    "date": "2026-01-16",
+    "value": 1.3930494002575275
+   },
+   {
+    "benchmark": 1.5303109286830918,
+    "date": "2026-01-23",
+    "value": 1.3479416536261108
+   },
+   {
+    "benchmark": 1.469628733589282,
+    "date": "2026-01-30",
+    "value": 1.2972456132619052
+   },
+   {
+    "benchmark": 1.5188916996096997,
+    "date": "2026-02-06",
+    "value": 1.3390421986315773
+   },
+   {
+    "benchmark": 1.5178769536781425,
+    "date": "2026-02-13",
+    "value": 1.3243926274573574
+   },
+   {
+    "benchmark": 1.5516497432457326,
+    "date": "2026-02-20",
+    "value": 1.3471827251492094
+   },
+   {
+    "benchmark": 1.5801981715975297,
+    "date": "2026-02-27",
+    "value": 1.3730443477284633
+   },
+   {
+    "benchmark": 1.5792348019556657,
+    "date": "2026-03-06",
+    "value": 1.371502990724033
+   },
+   {
+    "benchmark": 1.5310313655861574,
+    "date": "2026-03-13",
+    "value": 1.3411844879856494
+   },
+   {
+    "benchmark": 1.5556730239544954,
+    "date": "2026-03-20",
+    "value": 1.3557390742037374
+   },
+   {
+    "benchmark": 1.5732314412269224,
+    "date": "2026-03-27",
+    "value": 1.377765556106606
+   },
+   {
+    "benchmark": 1.6094821522249856,
+    "date": "2026-04-03",
+    "value": 1.4029585990597442
+   },
+   {
+    "benchmark": 1.6295807974244527,
+    "date": "2026-04-10",
+    "value": 1.4320833368605959
+   },
+   {
+    "benchmark": 1.6187028090142348,
+    "date": "2026-04-17",
+    "value": 1.417938273493238
+   },
+   {
+    "benchmark": 1.6558792510552998,
+    "date": "2026-04-24",
+    "value": 1.4461443505683889
+   },
+   {
+    "benchmark": 1.6875905206370443,
+    "date": "2026-05-01",
+    "value": 1.4726226397193058
+   },
+   {
+    "benchmark": 1.6846911586997155,
+    "date": "2026-05-08",
+    "value": 1.4714131375968535
+   },
+   {
+    "benchmark": 1.6959479865489144,
+    "date": "2026-05-15",
+    "value": 1.4711575245498223
+   },
+   {
+    "benchmark": 1.7297671930414773,
+    "date": "2026-05-22",
+    "value": 1.4959428784042061
+   },
+   {
+    "benchmark": 1.6961298151526791,
+    "date": "2026-05-29",
+    "value": 1.4702640176754962
+   },
+   {
+    "benchmark": 1.679168913555809,
+    "date": "2026-06-05",
+    "value": 1.4491712086423765
+   },
+   {
+    "benchmark": 1.6577454075731757,
+    "date": "2026-06-12",
+    "value": 1.4390398759824574
+   },
+   {
+    "benchmark": 1.6384871842998376,
+    "date": "2026-06-19",
+    "value": 1.4209959497155409
+   },
+   {
+    "benchmark": 1.6161771903538034,
+    "date": "2026-06-26",
+    "value": 1.4128221093235502
+   },
+   {
+    "benchmark": 1.6405990935608745,
+    "date": "2026-07-03",
+    "value": 1.4362506003730449
+   },
+   {
+    "benchmark": 1.6496430175594337,
+    "date": "2026-07-10",
+    "value": 1.4431282794710967
+   },
+   {
+    "benchmark": 1.6155557188470573,
+    "date": "2026-07-17",
+    "value": 1.41881829841781
+   },
+   {
+    "benchmark": 1.6266020105022614,
+    "date": "2026-07-24",
+    "value": 1.4195803233611786
+   },
+   {
+    "benchmark": 1.6126674046775682,
+    "date": "2026-07-31",
+    "value": 1.4074969915177706
+   },
+   {
+    "benchmark": 1.6154769917861365,
+    "date": "2026-08-07",
+    "value": 1.415910989391012
+   },
+   {
+    "benchmark": 1.6371782942235245,
+    "date": "2026-08-14",
+    "value": 1.4421636149252473
+   },
+   {
+    "benchmark": 1.662874962956561,
+    "date": "2026-08-21",
+    "value": 1.459834334327587
+   },
+   {
+    "benchmark": 1.6531209470328565,
+    "date": "2026-08-28",
+    "value": 1.4534388835120404
+   }
+  ],
+  "history_label": "Hypothetical constant-weight weekly replay; not actual investor performance",
+  "history_observations": 156,
+  "issues": [],
+  "max_drawdown": -0.0906183241751164,
+  "observations": 156,
+  "reserved_cost_weight": 0.0,
+  "risk_contributions": [
+   {
+    "contribution": 0.007021035589141157,
+    "security_id": "SIM01"
+   },
+   {
+    "contribution": 0.0017487478449189848,
+    "security_id": "SIM01B"
+   },
+   {
+    "contribution": 0.0077825328279902736,
+    "security_id": "SIM03"
+   },
+   {
+    "contribution": 0.011256109518732961,
+    "security_id": "SIM06"
+   },
+   {
+    "contribution": 0.007970901025811302,
+    "security_id": "SIM09"
+   },
+   {
+    "contribution": 0.015251665827367287,
+    "security_id": "SIM12"
+   },
+   {
+    "contribution": 0.012505470500786382,
+    "security_id": "SIM16"
+   },
+   {
+    "contribution": 0.017243410614397204,
+    "security_id": "SIM18"
+   },
+   {
+    "contribution": 0.03926231184803587,
+    "security_id": "SIMETF"
+   }
+  ],
+  "status": "complete",
+  "stresses": [
+   {
+    "basis": "User-defined mechanical shock; explicit cash including fund cash receives zero; unknown fund exposure receives full broad/rate shock",
+    "return": -0.27,
+    "scenario": "broad_equity",
+    "status": "complete"
+   },
+   {
+    "basis": "User-defined mechanical shock; explicit cash including fund cash receives zero; unknown fund exposure receives full broad/rate shock",
+    "return": -0.22124999999999992,
+    "scenario": "growth_reversal",
+    "status": "complete"
+   },
+   {
+    "basis": "User-defined mechanical shock; explicit cash including fund cash receives zero; unknown fund exposure receives full broad/rate shock",
+    "return": -0.135,
+    "scenario": "rate_repricing",
+    "status": "complete"
+   }
+  ],
+  "tracking_error": 0.037915723388338755,
+  "volatility_interval": {
+   "block_weeks": 13,
+   "level": 0.95,
+   "lower": 0.10854189085725556,
+   "method": "Moving-block percentile bootstrap of common-panel Ledoit-Wolf historical volatility; not a forecast interval",
+   "samples": 50,
+   "upper": 0.1364152952111337
+  },
+  "worst_stress_return": -0.27
+ },
+ "scenarios": {
+  "basis": "subjective",
+  "benchmark_objective_weighted_return": 0.0375,
+  "benchmark_weighted_return": 0.0375,
+  "cash_assumption": "Cash earns the explicit supplied horizon return; distributions are included in asset horizon returns and never added twice",
+  "cash_return": 0.0,
+  "cash_return_complete": true,
+  "distribution_convention": "Asset inputs are horizon total returns including distributions under the supplied reinvestment convention; no additional dividend or buyback yield is added",
+  "forecast_date": "2026-08-31 00:00:00+00:00",
+  "forecast_shrinkage": 0.0,
+  "horizon_months": 12,
+  "issues": [],
+  "label": "Subjective joint scenarios; weighted means require an explicit common distribution",
+  "net_objective_weighted_return": 0.045365624999999986,
+  "net_weighted_return": 0.045365624999999986,
+  "objective_label": "Scenario mean shrunk toward explicit horizon priors; unshrunk outcomes retained",
+  "objective_weighted_return": 0.045365624999999986,
+  "probability_status": "complete",
+  "reserved_cost_weight": 0.0,
+  "scenarios": [
+   {
+    "active_return": 0.04116250000000002,
+    "benchmark_return": -0.25,
+    "contributions": [
+     {
+      "contribution": -0.01875,
+      "return": -0.25,
+      "security_id": "SIM01",
+      "weight": 0.075
+     },
+     {
+      "contribution": -0.0046875,
+      "return": -0.25,
+      "security_id": "SIM01B",
+      "weight": 0.01875
+     },
+     {
+      "contribution": -0.0205625,
+      "return": -0.235,
+      "security_id": "SIM06",
+      "weight": 0.08750000000000001
+     },
+     {
+      "contribution": -0.02169999999999999,
+      "return": -0.2169999999999999,
+      "security_id": "SIM12",
+      "weight": 0.1
+     },
+     {
+      "contribution": -0.0223875,
+      "return": -0.199,
+      "security_id": "SIM18",
+      "weight": 0.1125
+     },
+     {
+      "contribution": -0.0734375,
+      "return": -0.25,
+      "security_id": "SIMETF",
+      "weight": 0.29375
+     },
+     {
+      "contribution": 0.0,
+      "return": 0.0,
+      "security_id": "CASH",
+      "weight": 0.1
+     },
+     {
+      "contribution": -0.01525,
+      "return": -0.244,
+      "security_id": "SIM03",
+      "weight": 0.0625
+     },
+     {
+      "contribution": -0.014124999999999993,
+      "return": -0.2259999999999999,
+      "security_id": "SIM09",
+      "weight": 0.0625
+     },
+     {
+      "contribution": -0.0179375,
+      "return": -0.205,
+      "security_id": "SIM16",
+      "weight": 0.0875
+     }
+    ],
+    "net_return": -0.20883749999999998,
+    "net_terminal_value": 126586.0,
+    "probability": 0.25,
+    "return": -0.20883749999999998,
+    "scenario": "Adverse",
+    "terminal_value": 126586.0
+   },
+   {
+    "active_return": -0.003962500000000049,
+    "benchmark_return": 0.08,
+    "contributions": [
+     {
+      "contribution": 0.0045,
+      "return": 0.06,
+      "security_id": "SIM01",
+      "weight": 0.075
+     },
+     {
+      "contribution": 0.001125,
+      "return": 0.06,
+      "security_id": "SIM01B",
+      "weight": 0.01875
+     },
+     {
+      "contribution": 0.006562499999999992,
+      "return": 0.0749999999999999,
+      "security_id": "SIM06",
+      "weight": 0.08750000000000001
+     },
+     {
+      "contribution": 0.00929999999999999,
+      "return": 0.0929999999999999,
+      "security_id": "SIM12",
+      "weight": 0.1
+     },
+     {
+      "contribution": 0.01248749999999999,
+      "return": 0.1109999999999999,
+      "security_id": "SIM18",
+      "weight": 0.1125
+     },
+     {
+      "contribution": 0.0235,
+      "return": 0.08,
+      "security_id": "SIMETF",
+      "weight": 0.29375
+     },
+     {
+      "contribution": 0.0,
+      "return": 0.0,
+      "security_id": "CASH",
+      "weight": 0.1
+     },
+     {
+      "contribution": 0.004125,
+      "return": 0.066,
+      "security_id": "SIM03",
+      "weight": 0.0625
+     },
+     {
+      "contribution": 0.00525,
+      "return": 0.084,
+      "security_id": "SIM09",
+      "weight": 0.0625
+     },
+     {
+      "contribution": 0.00918749999999999,
+      "return": 0.1049999999999999,
+      "security_id": "SIM16",
+      "weight": 0.0875
+     }
+    ],
+    "net_return": 0.07603749999999995,
+    "net_terminal_value": 172166.0,
+    "probability": 0.5,
+    "return": 0.07603749999999995,
+    "scenario": "Central",
+    "terminal_value": 172166.0
+   },
+   {
+    "active_return": -0.0017749999999999988,
+    "benchmark_return": 0.24,
+    "contributions": [
+     {
+      "contribution": 0.01875,
+      "return": 0.25,
+      "security_id": "SIM01",
+      "weight": 0.075
+     },
+     {
+      "contribution": 0.0046875,
+      "return": 0.25,
+      "security_id": "SIM01B",
+      "weight": 0.01875
+     },
+     {
+      "contribution": 0.023187500000000014,
+      "return": 0.2650000000000001,
+      "security_id": "SIM06",
+      "weight": 0.08750000000000001
+     },
+     {
+      "contribution": 0.028299999999999992,
+      "return": 0.2829999999999999,
+      "security_id": "SIM12",
+      "weight": 0.1
+     },
+     {
+      "contribution": 0.03386250000000001,
+      "return": 0.3010000000000001,
+      "security_id": "SIM18",
+      "weight": 0.1125
+     },
+     {
+      "contribution": 0.0705,
+      "return": 0.24,
+      "security_id": "SIMETF",
+      "weight": 0.29375
+     },
+     {
+      "contribution": 0.0,
+      "return": 0.0,
+      "security_id": "CASH",
+      "weight": 0.1
+     },
+     {
+      "contribution": 0.016,
+      "return": 0.256,
+      "security_id": "SIM03",
+      "weight": 0.0625
+     },
+     {
+      "contribution": 0.017125,
+      "return": 0.274,
+      "security_id": "SIM09",
+      "weight": 0.0625
+     },
+     {
+      "contribution": 0.025812499999999988,
+      "return": 0.2949999999999999,
+      "security_id": "SIM16",
+      "weight": 0.0875
+     }
+    ],
+    "net_return": 0.238225,
+    "net_terminal_value": 198116.0,
+    "probability": 0.25,
+    "return": 0.238225,
+    "scenario": "Favorable",
+    "terminal_value": 198116.0
+   }
+  ],
+  "status": "complete",
+  "weighted_return": 0.045365624999999986
+ }
+}

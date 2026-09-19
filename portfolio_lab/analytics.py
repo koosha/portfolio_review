@@ -90,6 +90,15 @@ def macro_panel(bundle, config):
     return json_safe(result)
 
 
+def covered_positions(reconciled: dict) -> bool:
+    """At least one position carries an explicit value in the reported base currency."""
+    base = reconciled["summary"].get("currency")
+    return any(
+        row.get("currency") == base and (metrics._number(row.get("market_value")) or 0) > 0
+        for row in reconciled.get("holdings", [])
+    )
+
+
 def analyze(bundle: dict, config: dict) -> dict:
     issues = list(bundle.get("issues", []))
     result = {
@@ -152,6 +161,26 @@ def analyze(bundle: dict, config: dict) -> dict:
     result["scenarios"] = stage(
         "scenarios", lambda: metrics.scenario_analysis(bundle, config), {"status": "incomplete"}
     )
+    # An unreconciled account does not erase the holdings that are valued: repeat the
+    # measurements on the covered denominator and label their scope. A reconciled run
+    # keeps exactly the reconciled-NAV results computed above.
+    if not reconciled["summary"].get("complete") and covered_positions(reconciled):
+        for name, function in (
+            ("risk", metrics.risk_analysis),
+            ("scenarios", metrics.scenario_analysis),
+        ):
+            reconciled_status = result[name].get("status")
+            covered = stage(
+                f"{name}_covered",
+                lambda f=function: f(bundle, config, basis="covered_value"),
+                None,
+            )
+            if covered:
+                result[name] = {
+                    **covered,
+                    "scope": "covered_holdings",
+                    "reconciled_result": reconciled_status,
+                }
     # Pass stage failures through to allocation; source ingestion issues are already present.
     allocator_bundle = dict(bundle)
     allocator_bundle["issues"] = list(issues)
@@ -196,6 +225,12 @@ def analyze(bundle: dict, config: dict) -> dict:
             forecast["basis"] = "subjective"
             forecast["calibration_id"] = None
             forecast["source"] = "Reviewed user scenario override; frozen with this run"
+    # What the providers actually answered travels with the numbers they produced.
+    if bundle.get("coverage"):
+        result["coverage"] = json_safe(bundle["coverage"])
+    sectors = bundle.get("fund_sectors")
+    if isinstance(sectors, pd.DataFrame) and not sectors.empty:
+        result["fund_sectors"] = json_safe(sectors)
     seen = set()
     result["issues"] = []
     for issue in issues:

@@ -9,6 +9,8 @@ from datetime import date
 from pathlib import Path
 
 FX_PROVIDERS = ("bank_of_canada", "yahoo")
+# The versioned research adapter, or the inline connector kept for existing runs.
+MARKET_ADAPTERS = ("yfinance-adapter-1", "legacy")
 
 DEFAULTS = {
     "source": {
@@ -46,6 +48,13 @@ DEFAULTS = {
         "max_fx_age_days": 7,
         "listing_provider": "yahoo",
         "max_listing_age_days": 30,
+        "market_adapter": "yfinance-adapter-1",
+        "provider_timeout_seconds": 30,
+        "provider_min_interval_seconds": 0.25,
+        "provider_refresh_hours": 20,
+        "assumed_publication_lag_days": 90,
+        "model_provider": None,
+        "news_limit": 20,
     },
     "mandate": {
         "confirmed": False,
@@ -110,6 +119,7 @@ DEFAULTS = {
         "flow_policy": None,
         "incumbent_gap_weight": 0.005,
         "incumbent_gap_fraction": 0.25,
+        "valuation_tolerance": 0.001,
     },
     "tax": {
         "enabled": False,
@@ -189,6 +199,20 @@ def validate_config(config: dict) -> dict:
         )
     if c["data"]["listing_provider"] not in {"yahoo", "none"}:
         raise ValueError("data.listing_provider must be yahoo or none")
+    if c["data"]["market_adapter"] not in MARKET_ADAPTERS:
+        raise ValueError("data.market_adapter must be " + " or ".join(MARKET_ADAPTERS))
+    _number(c["data"]["provider_timeout_seconds"], "data.provider_timeout_seconds", 0.1, 300)
+    _number(c["data"]["provider_min_interval_seconds"], "data.provider_min_interval_seconds", 0, 10)
+    _number(c["data"]["provider_refresh_hours"], "data.provider_refresh_hours", 0, 8760)
+    for key, low, high in [("assumed_publication_lag_days", 0, 365), ("news_limit", 1, 100)]:
+        _number(c["data"][key], f"data.{key}", low, high)
+        if int(c["data"][key]) != c["data"][key]:
+            raise ValueError(f"data.{key} must be an integer")
+    provider = c["data"]["model_provider"]
+    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+        raise ValueError(
+            "data.model_provider must be null or the import path of a model adapter class"
+        )
     if c["allocation"]["mode"] not in {"scenario", "calibrated"}:
         raise ValueError("allocation.mode must be scenario or calibrated")
     if c["risk"]["covariance"] != "ledoit_wolf":
@@ -235,6 +259,7 @@ def validate_config(config: dict) -> dict:
     _number(c["allocation"]["return_hurdle"], "return_hurdle", 0, 1)
     _number(c["allocation"]["transaction_cost_bps"], "transaction_cost_bps", 0, 500)
     _number(c["allocation"]["min_trade_value"], "min_trade_value", 0, 1e9)
+    _number(c["allocation"]["valuation_tolerance"], "allocation.valuation_tolerance", 0, 0.1)
     if c["allocation"]["horizon_months"] not in {6, 12, 18}:
         raise ValueError("horizon_months must be 6, 12 or 18")
     if c["allocation"]["retention_quantile"] > c["allocation"]["entry_quantile"]:

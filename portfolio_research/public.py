@@ -31,8 +31,16 @@ RESULT_FIELDS = {
     "prospective",
     "input_status",
     "observations",
+    "readiness",
+    "research",
+    "coverage",
+    "fund_sectors",
 }
 SOURCE_FIELDS = {"source_id", "provider", "received_at", "available_at", "sha256", "rows", "status"}
+# The only hosts a published locator may point at. A provider-supplied URL is data: an
+# unvetted scheme (javascript:, data:) is an injection vector wherever a locator is
+# rendered as a link, and an unvetted host is an unverifiable citation.
+LOCATOR_HOSTS = {"www.sec.gov", "data.sec.gov", "fred.stlouisfed.org", "api.stlouisfed.org"}
 PRIVATE_KEYS = {
     "saved_config",
     "input_manifest",
@@ -59,6 +67,28 @@ PRIVATE_KEYS = {
     "auth",
     "headers",
 }
+
+
+def safe_locator(locator):
+    """The locator when it is a citable ``https`` address, else ``None``.
+
+    One rule for every locator the application publishes, wherever it came from:
+    ``https``, an allowlisted host, no embedded credentials and no query string.
+    """
+    if not isinstance(locator, str):
+        return None
+    try:
+        parsed = urlsplit(locator)
+    except ValueError:
+        return None
+    usable = (
+        parsed.scheme == "https"
+        and parsed.hostname in LOCATOR_HOSTS
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.query
+    )
+    return locator if usable else None
 
 
 def _safe_text(text):
@@ -113,22 +143,9 @@ def public_sources(sources):
     records = []
     for source in sources:
         record = {key: source[key] for key in SOURCE_FIELDS if key in source}
-        locator = source.get("url") or source.get("locator")
-        if isinstance(locator, str):
-            try:
-                parsed = urlsplit(locator)
-            except ValueError:
-                records.append(_clean(record))
-                continue
-            if (
-                parsed.scheme == "https"
-                and parsed.hostname
-                in {"www.sec.gov", "data.sec.gov", "fred.stlouisfed.org", "api.stlouisfed.org"}
-                and parsed.username is None
-                and parsed.password is None
-                and not parsed.query
-            ):
-                record["locator"] = locator
+        locator = safe_locator(source.get("url") or source.get("locator"))
+        if locator is not None:
+            record["locator"] = locator
         records.append(_clean(record))
     return records
 

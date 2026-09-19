@@ -794,10 +794,13 @@ def _quote_currencies(ledger):
 def present_prices(bundle, config, fx):
     """Convert an enriched price series to the presentation currency at each row's date.
 
-    Enrichment labels every close with the security's major currency, but a listing quoted
-    in a subunit reports pence or cents, so rows are relabelled with the listing's quote
-    currency first and the conversion divides by its unit factor. Without a presentation
-    currency the series is left exactly as it was collected.
+    A price connector that does not state its own unit labels every close with the
+    security's major currency, but a listing quoted in a subunit reports pence or cents,
+    so those rows are relabelled with the listing's quote currency first and the
+    conversion divides by its unit factor. A row that carries its own
+    ``quote_unit_factor`` has already been expressed in major units by the adapter and
+    keeps the currency it states. Without a presentation currency the series is left
+    exactly as it was collected.
     """
     from .fx import convert_price_series
 
@@ -811,9 +814,16 @@ def present_prices(bundle, config, fx):
     quotes = _quote_currencies(bundle.get("ledger") or {})
     frame = prices.copy()
     if quotes:
+        stated = (
+            frame["quote_unit_factor"].notna()
+            if "quote_unit_factor" in frame.columns
+            else pd.Series(False, index=frame.index)
+        )
         frame["currency"] = [
-            quotes.get(security, currency)
-            for security, currency in zip(frame["security_id"], frame["currency"])
+            currency if own else quotes.get(security, currency)
+            for security, currency, own in zip(
+                frame["security_id"], frame["currency"], stated, strict=True
+            )
         ]
     converted, issues = convert_price_series(frame, fx, to_currency=presentation)
     return {**bundle, "prices": converted, "issues": [*(bundle.get("issues") or []), *issues]}

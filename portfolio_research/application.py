@@ -8,6 +8,20 @@ from portfolio_lab.providers import FRAME_COLUMNS
 
 from .calendar import decision_context
 
+# Where a saved valuation came from: the owner typed it, it was prefilled from a
+# proposal and left for review, or it arrived with an import. A proposal is never a
+# reviewed assumption until the owner keeps it.
+VALUATION_ORIGINS = {"manual", "prefill", "import"}
+VALUATION_KEYS = {
+    "eps",
+    "dcf",
+    "origin",
+    "proposal_meta",
+    "source",
+    "version",
+    "horizon_months",
+}
+
 
 def validate_workspace(payload):
     if not isinstance(payload, dict) or set(payload) - {"assessments", "valuations"}:
@@ -22,6 +36,10 @@ def validate_workspace(payload):
                 raise ValueError("Company records need nonempty security IDs and object values.")
             if key == "assessments" and value.get("security_id") != sid:
                 raise ValueError("The assessment security ID must match its workspace identity.")
+            if key == "valuations" and value.get("origin") not in VALUATION_ORIGINS | {None}:
+                raise ValueError(
+                    "A company valuation origin must be " + ", ".join(sorted(VALUATION_ORIGINS))
+                )
     return deepcopy(payload)
 
 
@@ -40,6 +58,7 @@ def validate_workspace_revision(workspace, previous):
 
 def analyze_review(bundle, config):
     from .evidence import validate_assessment
+    from .readiness import readiness
     from .valuation import calculate_dcf, calculate_eps, dcf_sensitivity, eps_sensitivity
 
     workspace = validate_workspace(bundle.get("workspace", {}))
@@ -77,14 +96,7 @@ def analyze_review(bundle, config):
                 strict_receipt=True,
             )
         values = workspace.get("valuations", {}).get(security_id, {})
-        if not isinstance(values, dict) or set(values) - {
-            "eps",
-            "dcf",
-            "origin",
-            "source",
-            "version",
-            "horizon_months",
-        }:
+        if not isinstance(values, dict) or set(values) - VALUATION_KEYS:
             raise ValueError(
                 "Company valuations accept EPS, DCF and explicit source/version/horizon fields."
             )
@@ -114,8 +126,18 @@ def analyze_review(bundle, config):
                     [discount + f for f in (-0.02, -0.01, 0, 0.01, 0.02) if discount + f > 0],
                     [growth + f for f in (-0.01, -0.005, 0, 0.005, 0.01)],
                 )
+        for field in ("origin", "proposal_meta"):
+            # A prefilled valuation keeps saying where it came from.
+            if values.get(field) is not None:
+                company[field] = deepcopy(values[field])
         result["company_research"][security_id] = company
     result["metadata"].update(product="Portfolio Review", method_version="portfolio-review-1")
     if "collector" in bundle:
         result["input_status"] = deepcopy(bundle["collector"])
+    # Automatic research is reported beside the owner's reviewed workspace, never inside
+    # it: briefs and proposals are proposed, and the requirements table says what each
+    # output of this run actually has.
+    if bundle.get("research"):
+        result["research"] = deepcopy(bundle["research"])
+    result["readiness"] = readiness(result, bundle, config)
     return json_safe(result)

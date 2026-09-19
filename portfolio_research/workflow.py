@@ -18,6 +18,8 @@ POLL_SECONDS = 1.0
 BUSY_WAIT_SECONDS = 600  # Wait out a pull someone else started.
 COLLECT_TIMEOUT_SECONDS = 900  # Give up on this pull and use the last published one.
 FETCH_INTERRUPTED = "PROVIDER_FETCH_INTERRUPTED"
+# A collected snapshot values its positions at its own receipt, not at the session close.
+COLLECTION_VALUATION_TOLERANCE = 0.02
 
 CANCELLED_MESSAGE = "Cancelled before publishing; the last usable review is unchanged."
 NOT_CONNECTED = (
@@ -162,7 +164,60 @@ def provider_status(bundle, config, *, refresh, interrupted=None):
             issues=_codes(issues, "FRED_") + (stopped if not macro else []),
             failed=bool(interrupted) and not macro,
         ),
+        **_research_status(bundle, refresh=refresh, interrupted=interrupted),
     }
+
+
+def _research_status(bundle, *, refresh, interrupted=None):
+    """Per-capability results the research adapter reported for this fetch.
+
+    The coverage report already counted what each capability was asked for and what
+    answered, per security; this states it in the same shape as every other provider so
+    one stage record names every source that did not answer.
+    """
+    coverage = bundle.get("coverage") or {}
+    capabilities = coverage.get("capabilities") or {}
+    issues = bundle.get("issues") or []
+    stopped = [FETCH_INTERRUPTED] if interrupted else []
+    status = {}
+    for name in ("prices", "statements", "estimates", "fund_disclosures", "events"):
+        record = capabilities.get(name)
+        if not isinstance(record, dict):
+            continue
+        covered = int(record.get("available") or 0)
+        status["research_" + name] = _capability(
+            enabled=True,
+            refresh=refresh,
+            covered=covered,
+            requested=int(record.get("requested") or 0),
+            issues=_codes(issues, "PROVIDER_", "INVALID_LISTING_")
+            + (stopped if not covered else []),
+            failed=bool(interrupted) and not covered,
+        )
+    return status
+
+
+def _priced_config(config, bundle, review_kind):
+    """``(config for this review, accepted quantity×price difference)``.
+
+    A current review is valued at the moment the collection was captured, while the
+    price series ends at the last completed session, so quantity×close legitimately
+    differs from the captured market value by more than a rounding step. The accepted
+    difference is explicit, applies only to collected snapshots, and is recorded in the
+    run's metadata rather than hidden in the check.
+    """
+    configured = float(config["allocation"]["valuation_tolerance"])
+    positions = (bundle.get("ledger") or {}).get("positions") or []
+    collected = any(
+        isinstance(row, dict) and row.get("valuation_basis") == "collection_receipt"
+        for row in positions
+    )
+    if review_kind != "current" or not collected:
+        return config, configured
+    tolerance = max(configured, COLLECTION_VALUATION_TOLERANCE)
+    priced = deepcopy(config)
+    priced["allocation"]["valuation_tolerance"] = tolerance
+    return priced, tolerance
 
 
 def _batch_record(companion, batch_id):
@@ -493,7 +548,9 @@ class ReviewWorkflow:
         from .application import analyze_review
 
         self._begin("analyzing")
-        result = analyze_review(self.bundle, self.config)
+        config, tolerance = _priced_config(self.config, self.bundle, self.review_kind)
+        result = analyze_review(self.bundle, config)
+        result["metadata"]["valuation_tolerance"] = tolerance
         _settle_execution(result, self.bundle, self.started)
         result["run_id"] = uuid.uuid4().hex
         result["metadata"]["workflow_id"] = self.workflow_id

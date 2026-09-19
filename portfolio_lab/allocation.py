@@ -881,11 +881,13 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                     "warning",
                 )
             )
-    # Every quantity calculation uses the same prices as the position ledger.
+    # Every quantity calculation uses the same prices as the position ledger. A collected
+    # snapshot values positions at its own receipt, so the accepted difference is explicit.
+    valuation_tolerance = float(config["allocation"]["valuation_tolerance"])
     for position in positions.to_dict("records"):
         implied = float(position["quantity"]) * last_prices[position["security_id"]]
         value = float(position["market_value"])
-        if abs(implied - value) > max(0.02, abs(value) * 1e-3):
+        if abs(implied - value) > max(0.02, abs(value) * valuation_tolerance):
             issues.append(
                 _issue(
                     "valuation_price_mismatch",

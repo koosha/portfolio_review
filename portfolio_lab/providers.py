@@ -12,6 +12,7 @@ https://github.com/ranaroussi/yfinance
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import math
@@ -163,9 +164,13 @@ def _cached(
         / "cache"
         / provider
     )
+    # Sidecars are named for their key, so only one key's receipts are read: the
+    # directory grows with every security and every run, and an unfiltered scan made
+    # each lookup proportional to the whole cache.
+    safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", str(key))[:100]
     candidates = []
     if root.exists():
-        for path in root.glob("*.source.json"):
+        for path in root.glob(f"{glob.escape(safe_key)}_*.source.json"):
             if path.is_symlink():
                 continue
             try:
@@ -655,6 +660,17 @@ def _filter_frames(bundle: dict, as_of: str, require_received: bool = False) -> 
 
 
 def _enrich_yahoo(bundle: dict, config: dict, as_of: str) -> None:
+    """Fetch Yahoo market data through the configured adapter.
+
+    ``data.market_adapter`` selects the versioned research adapter, which returns
+    statements, estimates, fund disclosures and events alongside prices and writes a
+    coverage report. ``legacy`` keeps the original price-only connector.
+    """
+    if config["data"].get("market_adapter", "legacy") != "legacy":
+        from portfolio_research.enrichment import enrich_market
+
+        enrich_market(bundle, config, as_of)
+        return
     if not config["data"].get("refresh_network", False):
         for _, sec in bundle["securities"].iterrows():
             if sec.get("instrument_type") == "plan_fund":

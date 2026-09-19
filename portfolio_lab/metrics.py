@@ -732,7 +732,96 @@ def exposures(bundle: dict, config: dict) -> dict:
     )
 
 
-def _global_weights(bundle: dict, config: dict, weights=None) -> tuple[dict, list[dict]]:
+BASES = ("reconciled_nav", "covered_value")
+
+
+def _covered_weights(bundle: dict, config: dict) -> tuple[dict, list[dict], dict]:
+    """Weights against covered holdings value, without a reconciled account NAV.
+
+    A position enters the denominator only with an explicit non-negative market value
+    in the base currency; cash enters only where the account reports it. Nothing is
+    inferred from a residual, and the denominator is reported with the weights.
+    """
+    recon = reconcile(bundle, config)
+    base = config.get("mandate", {}).get("base_currency", "USD")
+    issues = list(recon["issues"])
+    accounts = {a["account_id"]: a for a in recon["summary"]["accounts"]}
+    covered: list[tuple[str, float]] = []
+    for row in recon["holdings"]:
+        value = _number(row.get("market_value"))
+        if (
+            row.get("account_id") in accounts
+            and value is not None
+            and value >= 0
+            and row.get("currency") == base
+        ):
+            covered.append((row["security_id"], value))
+    for account in accounts.values():
+        cash = _number(account.get("cash"))
+        if cash is not None and cash >= 0 and account.get("currency") == base:
+            covered.append(("CASH", cash))
+    total = sum(value for _, value in covered)
+    denominator = {"basis": "covered_value", "value": total, "currency": base}
+    if total <= 0:
+        return (
+            {},
+            issues
+            + [
+                _issue(
+                    "no_covered_value",
+                    f"No position or cash value is known in {base}; covered weights are unavailable.",
+                    "error",
+                )
+            ],
+            denominator,
+        )
+    result: dict[str, float] = {}
+    for security_id, value in covered:
+        result[security_id] = result.get(security_id, 0.0) + value / total
+    issues.append(
+        _issue(
+            "holdings_only_denominator",
+            f"Weights use covered holdings value ({total:,.2f} {base}) as the denominator; "
+            "account NAV is not reconciled.",
+            "info",
+        )
+    )
+    return result, issues, denominator
+
+
+def _weights_for_basis(
+    bundle: dict, config: dict, weights, basis: str
+) -> tuple[dict, list[dict], dict | None]:
+    """Weights on the requested denominator; the covered denominator is reported."""
+    if basis not in BASES:
+        raise ValueError(f"basis must be one of {', '.join(BASES)}")
+    if basis == "reconciled_nav":
+        computed, issues = _global_weights(bundle, config, weights)
+        return computed, issues, None
+    if weights is not None:
+        return (
+            {},
+            [
+                _issue(
+                    "unsupported_basis",
+                    "Supplied weights are validated against reconciled account NAV; "
+                    "the covered holdings basis derives its own weights.",
+                    "error",
+                )
+            ],
+            None,
+        )
+    return _covered_weights(bundle, config)
+
+
+def _global_weights(
+    bundle: dict, config: dict, weights=None, *, basis: str = "reconciled_nav"
+) -> tuple[dict, list[dict]]:
+    if basis not in BASES:
+        raise ValueError(f"basis must be one of {', '.join(BASES)}")
+    if basis == "covered_value":
+        computed, issues, _ = _weights_for_basis(bundle, config, weights, basis)
+        return computed, issues
     recon = reconcile(bundle, config)
     issues = list(recon["issues"])
     nav = recon["summary"]["total_value"]
@@ -993,8 +1082,10 @@ def stress_returns(bundle: dict, config: dict, security_ids: list[str]) -> dict:
     return result
 
 
-def risk_analysis(bundle: dict, config: dict, weights=None) -> dict:
-    global_weights, issues = _global_weights(bundle, config, weights)
+def risk_analysis(
+    bundle: dict, config: dict, weights=None, *, basis: str = "reconciled_nav"
+) -> dict:
+    global_weights, issues, denominator = _weights_for_basis(bundle, config, weights, basis)
     result = {
         "status": "incomplete",
         "issues": issues,
@@ -1008,6 +1099,9 @@ def risk_analysis(bundle: dict, config: dict, weights=None) -> dict:
         "max_drawdown": None,
         "history_label": "Hypothetical constant-weight weekly replay; not actual investor performance",
     }
+    if denominator is not None:
+        result["denominator"] = denominator
+        result["history_label"] += " · covered holdings only"
     if not global_weights:
         return result
     result["reserved_cost_weight"] = _reserved_cost_weight(bundle, config, weights)
@@ -1157,10 +1251,12 @@ def risk_analysis(bundle: dict, config: dict, weights=None) -> dict:
     return _clean(result)
 
 
-def scenario_analysis(bundle: dict, config: dict, weights=None) -> dict:
+def scenario_analysis(
+    bundle: dict, config: dict, weights=None, *, basis: str = "reconciled_nav"
+) -> dict:
     from .allocation import _forecast_panel
 
-    global_weights, issues = _global_weights(bundle, config, weights)
+    global_weights, issues, denominator = _weights_for_basis(bundle, config, weights, basis)
     horizon = int(config.get("allocation", {}).get("horizon_months", 12))
     result = {
         "status": "incomplete",
@@ -1175,6 +1271,8 @@ def scenario_analysis(bundle: dict, config: dict, weights=None) -> dict:
         "scenarios": [],
         "issues": issues,
     }
+    if denominator is not None:
+        result["denominator"] = denominator
     if not global_weights:
         return result
     cash_return = _number(config.get("allocation", {}).get("cash_return"))
@@ -1217,7 +1315,12 @@ def scenario_analysis(bundle: dict, config: dict, weights=None) -> dict:
                 )
             )
         return result
-    nav = reconcile(bundle, config)["summary"]["total_value"]
+    # Terminal values are stated on the same denominator the weights use.
+    nav = (
+        denominator["value"]
+        if denominator is not None
+        else reconcile(bundle, config)["summary"]["total_value"]
+    )
     w = np.array([global_weights.get(sid, 0.0) for sid in ids])
     reserved = _reserved_cost_weight(bundle, config, weights)
     benchmark_index = ids.index(benchmark) if benchmark in ids else None
@@ -1284,4 +1387,6 @@ def scenario_analysis(bundle: dict, config: dict, weights=None) -> dict:
         forecast_shrinkage=config.get("allocation", {}).get("forecast_shrinkage", 0.0),
         objective_label="Scenario mean shrunk toward explicit horizon priors; unshrunk outcomes retained",
     )
+    if denominator is not None:
+        result["label"] += " · covered holdings only"
     return _clean(result)
