@@ -6,6 +6,11 @@ withholding the whole comparison. Securities the owner holds, the benchmark, and
 securities named in explicit `account_permissions` keep the existing blocking
 behaviour: those are the owner's own instructions, and silence about them would hide a
 gap rather than report it.
+
+A candidate's own forecast defect — a blank probability beside stated ones, a
+probability that disagrees with the shared set, a return outside the possible range or
+one that is not finite — excludes that candidate and leaves the comparison standing.
+Admission and the proposal build between them read each security's price once.
 """
 
 import unittest
@@ -219,6 +224,166 @@ class CandidatePolicyConfigTests(unittest.TestCase):
     def test_policy_must_be_a_mapping(self):
         with self.assertRaises(ValueError):
             validate_config({"mandate": {"account_candidate_policy": ["r1"]}})
+
+
+class CandidateForecastAdmissionTests(unittest.TestCase):
+    """A screened candidate's own forecast defect excludes that candidate, not the run."""
+
+    def setUp(self):
+        import numpy as np
+
+        from tests.reference.test_allocation import fixture
+
+        self.bundle, self.config = fixture()
+        self.scores = pd.DataFrame({"security_id": ["A", "B", "C"], "composite": [0.3, 0.7, 0.95]})
+        covariance = patch(
+            "portfolio_lab.metrics.portfolio_covariance",
+            side_effect=lambda b, c, ids: {
+                "ids": ids,
+                "matrix": np.eye(len(ids)) * 0.04,
+                "complete": True,
+                "observations": 156,
+                "issues": [],
+            },
+        )
+        stress = patch(
+            "portfolio_lab.metrics.stress_returns",
+            side_effect=lambda b, c, ids: {"recession": {sid: -0.3 for sid in ids}},
+        )
+        covariance.start()
+        stress.start()
+        self.addCleanup(covariance.stop)
+        self.addCleanup(stress.stop)
+        self.config["mandate"]["account_candidate_policy"] = {"r1": "eligible_universe"}
+        self.config["mandate"]["account_permissions"] = {}
+
+    def _append(self, frame, rows):
+        self.bundle[frame] = pd.concat([self.bundle[frame], pd.DataFrame(rows)], ignore_index=True)
+
+    def add_candidate(self, sid, *, probability, return_value=0.05):
+        self._append(
+            "securities",
+            [
+                dict(
+                    security_id=sid,
+                    ticker=sid,
+                    issuer_id="issuer_" + sid,
+                    name=sid,
+                    sector="Technology",
+                    instrument_type="equity",
+                    currency="USD",
+                    eligible=True,
+                )
+            ],
+        )
+        self._append(
+            "prices",
+            [
+                dict(
+                    security_id=sid,
+                    date="2026-08-31",
+                    close=50.0,
+                    available_at="2026-08-31T20:00:00Z",
+                    received_at="2026-08-31T20:00:00Z",
+                )
+            ],
+        )
+        reference = self.bundle["forecasts"]
+        labels = reference[reference.security_id == "A"]
+        self._append(
+            "forecasts",
+            [
+                dict(
+                    security_id=sid,
+                    scenario=row.scenario,
+                    horizon_months=row.horizon_months,
+                    return_value=return_value,
+                    probability=float("nan") if probability is None else probability,
+                    basis="subjective",
+                    source="shared state",
+                    forecast_date=row.forecast_date,
+                )
+                for row in labels.itertuples()
+            ],
+        )
+
+    def run_proposals(self):
+        from portfolio_lab.allocation import build_proposals
+
+        return build_proposals(self.bundle, self.config, self.scores)
+
+    def excluded(self, result):
+        return {row["security_id"]: row["reasons"] for row in result["excluded_candidates"]}
+
+    def test_a_blank_probability_beside_stated_ones_excludes_that_candidate(self):
+        self.add_candidate("D", probability=None)
+        result = self.run_proposals()
+        self.assertNotEqual(result["status"], "blocked", result["issues"])
+        self.assertNotIn("inconsistent_joint_probability", {i["code"] for i in result["issues"]})
+        self.assertIn("missing_forecast", self.excluded(result)["D"])
+
+    def test_a_disagreeing_probability_excludes_that_candidate(self):
+        self.add_candidate("D", probability=0.9)
+        result = self.run_proposals()
+        self.assertNotEqual(result["status"], "blocked", result["issues"])
+        self.assertIn("missing_forecast", self.excluded(result)["D"])
+
+    def test_an_out_of_range_return_excludes_that_candidate(self):
+        self.add_candidate("D", probability=None, return_value=-1.5)
+        result = self.run_proposals()
+        self.assertNotEqual(result["status"], "blocked", result["issues"])
+        self.assertNotIn("invalid_forecast_return", {i["code"] for i in result["issues"]})
+        self.assertIn("missing_forecast", self.excluded(result)["D"])
+
+    def test_a_non_finite_return_excludes_that_candidate(self):
+        import numpy as np
+
+        self.add_candidate("D", probability=None, return_value=np.nan)
+        result = self.run_proposals()
+        self.assertNotEqual(result["status"], "blocked", result["issues"])
+        self.assertIn("missing_forecast", self.excluded(result)["D"])
+
+    def test_a_matching_candidate_is_still_admitted(self):
+        reference = self.bundle["forecasts"]
+        probabilities = {
+            row.scenario: row.probability
+            for row in reference[reference.security_id == "A"].itertuples()
+        }
+        self.bundle["securities"] = self.bundle["securities"]
+        self.add_candidate("D", probability=None)
+        frame = self.bundle["forecasts"]
+        mask = frame.security_id == "D"
+        frame.loc[mask, "probability"] = frame.loc[mask, "scenario"].map(probabilities)
+        result = self.run_proposals()
+        self.assertEqual(self.excluded(result), {})
+        self.assertEqual(result["solver"]["candidate_admission"]["excluded"], 0)
+
+
+class SinglePricingTests(CandidateForecastAdmissionTests):
+    """Admission and the proposal build read each security's price once between them."""
+
+    def test_no_security_is_priced_twice_in_one_run(self):
+        from portfolio_lab import allocation
+
+        self.add_candidate("D", probability=None)
+        reference = self.bundle["forecasts"]
+        mask = reference.security_id == "D"
+        stated = {
+            row.scenario: row.probability
+            for row in reference[reference.security_id == "A"].itertuples()
+        }
+        reference.loc[mask, "probability"] = reference.loc[mask, "scenario"].map(stated)
+        priced, original = [], allocation._known_price
+
+        def counting(*args, **kwargs):
+            priced.append(args[3])
+            return original(*args, **kwargs)
+
+        with patch.object(allocation, "_known_price", counting):
+            result = self.run_proposals()
+        self.assertNotEqual(result["status"], "blocked", result["issues"])
+        self.assertEqual(sorted(priced), sorted(set(priced)))
+        self.assertIn("D", priced)
 
 
 if __name__ == "__main__":

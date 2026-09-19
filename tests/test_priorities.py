@@ -4,6 +4,9 @@ The rules are deterministic and independent. Each test withholds one rule's inpu
 asserts silence, then supplies them and asserts the single reason that follows, so a
 reason can never appear from an assumption. Items are plain dicts shaped like a saved
 run result; nothing here touches providers, files or the network.
+
+A percentile reason also names the population it ranks against, so the denominator
+travels with the rank in the reason, the evidence and the stated rank basis.
 """
 
 import unittest
@@ -595,6 +598,41 @@ class EvidenceTests(unittest.TestCase):
             "holdings_to_review"
         ][0]
         self.assertEqual(item["name"], "OWN Corporation")
+
+
+class PriorityDenominatorTests(unittest.TestCase):
+    """A percentile means nothing until the population it ranks against is named."""
+
+    def report(self, extra_issuers):
+        signals = [_signal(OWNED, score=0.1), _signal("NEW", score=0.9)]
+        signals += [
+            _signal(f"X{index}", score=0.5 + index / 1000.0) for index in range(extra_issuers)
+        ]
+        return review_priorities_for(_result(signals=signals), _bundle(), _config()), OWNED
+
+    def holding(self, extra_issuers):
+        report, owned = self.report(extra_issuers)
+        return next(item for item in report["holdings_to_review"] if item["security_id"] == owned)
+
+    def test_the_reason_names_the_population_the_percentile_ranks_against(self):
+        reason = next(r for r in self.holding(18)["reasons"] if r["rule"] == "below_retention_rank")
+        self.assertIn("20 scored issuers", reason["detail"])
+
+    def test_the_evidence_carries_the_denominator(self):
+        self.assertEqual(self.holding(18)["evidence"]["scored_issuers"], 20)
+        self.assertEqual(self.holding(3)["evidence"]["scored_issuers"], 5)
+
+    def test_the_rank_basis_mentions_the_denominator(self):
+        from portfolio_research.priorities import RANK_BASIS
+
+        self.assertIn("scored", RANK_BASIS)
+        self.assertIn("percentile", RANK_BASIS)
+
+
+def review_priorities_for(result, bundle, config):
+    from portfolio_research.priorities import review_priorities
+
+    return review_priorities(result, bundle, config)
 
 
 if __name__ == "__main__":

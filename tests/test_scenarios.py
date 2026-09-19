@@ -3,8 +3,11 @@
 Every security the review needs — owned, benchmark and candidate — is priced under the
 same states, on one forecast date, with identical labels, so the allocation engine's
 joint-panel contract holds without a per-security forecast being invented anywhere.
-No network: the frame is generated from an explicit dict and the only bundle used is
-the local synthetic demo.
+A US equity state describes equities and says so about everything else, the horizon it
+is stated over is the horizon it is read at, no validated state may state a loss worse
+than the whole investment, and every generated row carries the receipt of the date it
+is stated for. No network: the frame is generated from an explicit dict and the only
+bundle used is the local synthetic demo.
 """
 
 import tempfile
@@ -21,6 +24,7 @@ from portfolio_research.scenarios import (
     DEFAULT_SHARED_STATE,
     SHARED_STATE_VERSION,
     generate_joint_forecasts,
+    validate_shared_state,
 )
 
 AS_OF = "2026-08-31"
@@ -361,6 +365,122 @@ class SharedStateConfigTests(unittest.TestCase):
         config = validate_config({})
         frame = generate(securities(security("AAA")), config["allocation"]["shared_state"])
         self.assertEqual(len(frame), 3)
+
+
+class InstrumentScopeTests(unittest.TestCase):
+    """A US equity market state describes equities, and says so about everything else."""
+
+    def test_bond_and_commodity_funds_get_no_equity_state(self):
+        frame = generate(
+            securities(
+                security("AAA"),
+                security("AGG", sector=None, instrument_type="fund", name="Core Bond ETF"),
+                security("GLD", sector=None, instrument_type="etf", name="Gold Trust"),
+            )
+        )
+        self.assertEqual(set(frame.security_id), {"AAA"})
+        refused = [i for i in frame.attrs["issues"] if i["code"] == "NO_STATE_FOR_INSTRUMENT"]
+        self.assertEqual({i["security_id"] for i in refused}, {"AGG", "GLD"})
+        self.assertNotIn("UNKNOWN_SECTOR_MULTIPLIER", codes(frame))
+
+    def test_a_named_equity_benchmark_is_still_covered(self):
+        frame = generate(
+            securities(security("AAA"), security("SIMETF", sector=None, instrument_type="etf")),
+            benchmark_ids=("SIMETF",),
+        )
+        self.assertEqual(set(frame.security_id), {"AAA", "SIMETF"})
+        self.assertNotIn("NO_STATE_FOR_INSTRUMENT", codes(frame))
+
+    def test_a_security_without_an_instrument_type_is_never_assumed_to_be_equity(self):
+        frame = generate(securities(security("AAA", instrument_type=None)))
+        self.assertTrue(frame.empty)
+        self.assertIn("NO_STATE_FOR_INSTRUMENT", codes(frame))
+
+    def test_cash_is_still_skipped_without_an_instrument_issue(self):
+        frame = generate(
+            securities(security("AAA"), security("CASH", sector=None, instrument_type="cash"))
+        )
+        self.assertEqual(set(frame.security_id), {"AAA"})
+        self.assertNotIn("NO_STATE_FOR_INSTRUMENT", codes(frame))
+
+
+class StateHorizonTests(unittest.TestCase):
+    """`horizon_months` declares what the stated market returns are returns over."""
+
+    def test_a_six_month_state_states_six_month_returns(self):
+        state = {**DEFAULT_SHARED_STATE, "horizon_months": 6, "sector_multipliers": {"Energy": 1.0}}
+        frame = generate(securities(security("AAA", sector="Energy")), state, horizon_months=6)
+        for label, market in state["market_returns"].items():
+            self.assertAlmostEqual(value(frame, "AAA", label), market, places=12)
+
+    def test_a_six_month_state_compounds_onto_a_twelve_month_horizon(self):
+        state = {**DEFAULT_SHARED_STATE, "horizon_months": 6, "sector_multipliers": {"Energy": 1.0}}
+        frame = generate(securities(security("AAA", sector="Energy")), state, horizon_months=12)
+        for label, market in state["market_returns"].items():
+            self.assertAlmostEqual(value(frame, "AAA", label), (1 + market) ** 2 - 1, places=12)
+
+    def test_a_rescaled_state_says_so(self):
+        state = {**DEFAULT_SHARED_STATE, "horizon_months": 6}
+        frame = generate(securities(security("AAA")), state, horizon_months=12)
+        self.assertIn("SHARED_STATE_HORIZON_RESCALED", codes(frame))
+
+    def test_a_state_stated_over_the_requested_horizon_is_never_rescaled(self):
+        frame = generate(securities(security("AAA")))
+        self.assertNotIn("SHARED_STATE_HORIZON_RESCALED", codes(frame))
+
+
+class EconomicFloorTests(unittest.TestCase):
+    """No validated state may state a loss worse than the whole investment."""
+
+    def test_a_multiplier_that_states_worse_than_total_loss_is_refused(self):
+        state = {
+            **DEFAULT_SHARED_STATE,
+            "sector_multipliers": {**DEFAULT_SHARED_STATE["sector_multipliers"], "Technology": 6.0},
+        }
+        with self.assertRaises(ValueError) as caught:
+            validate_shared_state(state)
+        self.assertIn("Technology", str(caught.exception))
+
+    def test_the_refusal_reaches_generation_before_any_number_is_produced(self):
+        state = {
+            **DEFAULT_SHARED_STATE,
+            "sector_multipliers": {**DEFAULT_SHARED_STATE["sector_multipliers"], "Technology": 6.0},
+        }
+        for horizon in (6, 12, 18):
+            with self.assertRaises(ValueError):
+                generate(securities(security("AAA")), state, horizon_months=horizon)
+
+    def test_no_generated_return_is_ever_complex(self):
+        state = {
+            **DEFAULT_SHARED_STATE,
+            "market_returns": {"Adverse": -1.0, "Central": 0.06, "Favorable": 0.18},
+            "sector_multipliers": {"Technology": 1.0},
+        }
+        for horizon in (6, 12, 18):
+            frame = generate(securities(security("AAA")), state, horizon_months=horizon)
+            self.assertEqual(frame.return_value.dtype.kind, "f", horizon)
+            self.assertAlmostEqual(value(frame, "AAA", "Adverse"), -1.0, places=12)
+
+
+class GeneratedReceiptTests(unittest.TestCase):
+    """A state expansion is knowable on the date it is stated for, and says when."""
+
+    def test_generated_rows_carry_a_receipt_at_the_forecast_date(self):
+        frame = generate(securities(security("AAA")))
+        self.assertIn("received_at", frame.columns)
+        self.assertIn("available_at", frame.columns)
+        self.assertEqual(set(frame.received_at), {AS_OF})
+        self.assertEqual(set(frame.available_at), {AS_OF})
+
+    def test_strict_receipt_mode_keeps_the_generated_set(self):
+        from portfolio_lab.providers import _filter_frames
+
+        bundle = {"forecasts": generate(securities(security("AAA"))), "issues": []}
+        _filter_frames(bundle, AS_OF, True)
+        self.assertEqual(len(bundle["forecasts"]), 3)
+        self.assertEqual(
+            [i for i in bundle["issues"] if i["code"] == "RECEIPT_TIMESTAMP_REQUIRED"], []
+        )
 
 
 if __name__ == "__main__":

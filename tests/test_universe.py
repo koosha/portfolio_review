@@ -1,4 +1,10 @@
-"""The dated candidate universe: acquisition paging, cache reuse and pure qualification."""
+"""The dated candidate universe: acquisition paging, cache reuse and pure qualification.
+
+Paging is bounded by the review's own arithmetic rather than by provider goodwill, so a
+screen that repeats a page, omits a total, or is cut short by a stop request or an
+expired budget ends the acquisition and says the acquisition was incomplete. A symbol
+the owner named by hand is never dropped without a word.
+"""
 
 import tempfile
 import unittest
@@ -442,6 +448,171 @@ class UniverseConfigTests(unittest.TestCase):
                 "universe_size"
             ],
             500,
+        )
+
+
+class RepeatingScreen:
+    """A degraded screen: a non-empty page, the same symbols every time, no ``total``."""
+
+    def __init__(self, count=5):
+        self.count = count
+        self.calls = 0
+
+    def __call__(self, query, offset=None, size=None, **kwargs):
+        self.calls += 1
+        return {
+            "start": 0,
+            "count": self.count,
+            "quotes": [
+                {
+                    "symbol": f"R{index:03d}",
+                    "quoteType": "EQUITY",
+                    "currency": "USD",
+                    "exchange": "NMS",
+                    "longName": f"Repeating Issuer {index}",
+                    "marketCap": 500_000_000_000 - index,
+                }
+                for index in range(self.count)
+            ],
+        }
+
+
+class UniverseCaseMixin:
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        from portfolio_lab.config import DEFAULTS
+
+        self.config = {
+            "research": {"path": str(self.root / "research.sqlite")},
+            "data": {
+                "mode": "live",
+                "provider_min_interval_seconds": 0,
+                "provider_timeout_seconds": 5,
+                "universe_acquire_size": 1500,
+                "universe_size": 1000,
+            },
+            "signals": dict(DEFAULTS["signals"]),
+        }
+
+
+class AcquisitionBoundTests(UniverseCaseMixin, unittest.TestCase):
+    """Paging is bounded by the review's own arithmetic, never by provider goodwill."""
+
+    def acquire(self, screen, **kwargs):
+        from portfolio_research.universe import acquire_universe
+
+        issues = []
+        with patch("yfinance.screen", screen):
+            result = acquire_universe(
+                self.config, as_of=AS_OF, refresh=True, issues=issues, **kwargs
+            )
+        return result, issues
+
+    def test_a_screen_repeating_one_page_without_a_total_stops(self):
+        screen = RepeatingScreen()
+        result, issues = self.acquire(screen)
+        self.assertLessEqual(screen.calls, 3)
+        self.assertEqual(len(result["rows"]), 5)
+        self.assertIn("UNIVERSE_ACQUISITION_INCOMPLETE", {i["code"] for i in issues})
+
+    def test_paging_never_exceeds_the_pages_the_requested_size_needs(self):
+        from portfolio_research.universe import PAGE_SIZE
+
+        self.config["data"]["universe_acquire_size"] = 500
+        screen = RepeatingScreen(count=PAGE_SIZE)
+
+        def growing(query, offset=None, size=None, **kwargs):
+            screen.calls += 1
+            start = screen.calls * 1000
+            return {
+                "start": 0,
+                "count": PAGE_SIZE,
+                "quotes": [
+                    {
+                        "symbol": f"G{start + index:06d}",
+                        "quoteType": "EQUITY",
+                        "currency": "USD",
+                        "exchange": "NMS",
+                        "longName": f"Growing Issuer {start + index}",
+                        "marketCap": 1_000_000_000_000 - start - index,
+                    }
+                    for index in range(PAGE_SIZE)
+                ],
+            }
+
+        result, _ = self.acquire(growing)
+        self.assertLessEqual(screen.calls, -(-500 // PAGE_SIZE) + 1)
+        self.assertEqual(len(result["rows"]), 500)
+
+    def test_a_stop_request_reaches_the_acquisition(self):
+        screen = RepeatingScreen()
+        result, issues = self.acquire(screen, should_stop=lambda: True)
+        self.assertEqual(screen.calls, 0)
+        self.assertEqual(result["rows"], [])
+        self.assertTrue(result["meta"]["stopped"])
+        self.assertIn("UNIVERSE_ACQUISITION_INCOMPLETE", {i["code"] for i in issues})
+
+    def test_an_expired_budget_reaches_the_acquisition(self):
+        screen = RepeatingScreen()
+        result, issues = self.acquire(screen, deadline=-1.0)
+        self.assertEqual(screen.calls, 0)
+        self.assertTrue(result["meta"]["time_budget_exhausted"])
+        self.assertIn("UNIVERSE_ACQUISITION_INCOMPLETE", {i["code"] for i in issues})
+
+
+class WatchlistReportingTests(UniverseCaseMixin, unittest.TestCase):
+    """A symbol the owner named by hand is never dropped without a word."""
+
+    def rows(self):
+        return [
+            {
+                "symbol": f"S{index}",
+                "name": f"Synthetic Issuer {index}",
+                "exchange": "NMS",
+                "currency": "USD",
+                "quote_type": "EQUITY",
+                "market_cap": 900_000_000_000 - index,
+                "received_at": "2026-09-18T20:00:00Z",
+                "source_id": "src",
+            }
+            for index in range(3)
+        ]
+
+    def qualify(self, *, watchlist, owned=()):
+        from portfolio_research.universe import qualify_universe
+
+        listings = {
+            f"S{index}": {"country": "United States", "sector": "Technology"} for index in range(3)
+        }
+        return qualify_universe(
+            self.rows(),
+            owned_securities=owned,
+            listings=listings,
+            issuer_lookup=None,
+            config=self.config,
+            watchlist=watchlist,
+            as_of=AS_OF,
+        )
+
+    def test_a_watchlisted_symbol_the_screen_never_returned_is_reported(self):
+        result = self.qualify(watchlist=["ZZZZ"])
+        excluded = {row["symbol"]: row["reasons"] for row in result["exclusions"]}
+        self.assertEqual(excluded.get("ZZZZ"), ["watchlist_not_acquired"])
+        self.assertEqual(result["counts"]["by_reason"]["watchlist_not_acquired"], 1)
+        self.assertEqual(result["counts"]["watchlist_not_acquired"], 1)
+
+    def test_a_watchlisted_symbol_the_screen_did_return_is_not_reported_missing(self):
+        result = self.qualify(watchlist=["S1"])
+        self.assertEqual(
+            [row for row in result["exclusions"] if "watchlist_not_acquired" in row["reasons"]], []
+        )
+
+    def test_an_owned_watchlist_symbol_is_researched_as_a_holding_not_reported_missing(self):
+        result = self.qualify(watchlist=["HELD"], owned=["HELD"])
+        self.assertEqual(
+            [row for row in result["exclusions"] if "watchlist_not_acquired" in row["reasons"]], []
         )
 
 

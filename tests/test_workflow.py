@@ -1,4 +1,9 @@
-"""One monthly operation: collect, resolve, fetch, analyze and publish exactly once."""
+"""One monthly operation: collect, resolve, fetch, analyze and publish exactly once.
+
+A cancellation once seen stays seen, so a store that cannot answer a later probe never
+resumes a fetch the owner stopped, and the prior run is read only for the one part the
+next prioritisation compares against.
+"""
 
 import tempfile
 import threading
@@ -17,6 +22,7 @@ from portfolio_research.workflow import PROSPECTIVE_STATUS
 from tests.test_batches import table
 from tests.test_current import cached_providers
 
+AS_OF = "2026-09-18"
 TERMINAL = {"complete", "failed", "cancelled"}
 STAGES = ("collecting", "resolving", "fetching", "analyzing", "publishing")
 
@@ -435,6 +441,79 @@ class WorkflowRecordTests(unittest.TestCase):
             self.repository.create_workflow("short", "current", {})
         self.repository.update_workflow(first, status="complete")
         self.assertIsNone(self.repository.active_workflow())
+
+
+class CancellationLatchTests(unittest.TestCase):
+    """A cancellation once seen stays seen; a store that cannot answer says nothing."""
+
+    def probe(self, *, answers):
+        from portfolio_research.workflow import PROBE_SECONDS, ReviewWorkflow
+
+        run = ReviewWorkflow.__new__(ReviewWorkflow)
+        run.probed = 0.0
+        run.stop_seen = False
+        run.workflow_id = "w1"
+        run._stopping = lambda: False
+        calls = iter(answers)
+
+        class Store:
+            def workflow(self, workflow_id):
+                answer = next(calls)
+                if isinstance(answer, Exception):
+                    raise answer
+                return {"cancel_requested": answer}
+
+        run.store = Store()
+        clock = iter([PROBE_SECONDS * step for step in range(1, len(answers) + 2)])
+        with patch("portfolio_research.workflow.monotonic", side_effect=lambda: next(clock)):
+            return [run._fetch_stopping() for _ in answers]
+
+    def test_a_failing_probe_after_a_cancellation_never_resumes_the_fetch(self):
+        self.assertEqual(self.probe(answers=[True, KeyError("gone")]), [True, True])
+
+    def test_a_failing_probe_before_any_cancellation_is_not_a_cancellation(self):
+        self.assertEqual(self.probe(answers=[KeyError("gone"), False]), [False, False])
+
+    def test_a_cancellation_is_still_reported_when_the_store_answers(self):
+        self.assertEqual(self.probe(answers=[False, True]), [False, True])
+
+
+class PreviousReviewExtractTests(unittest.TestCase):
+    """The prior run is read for the one part prioritisation compares against."""
+
+    def store(self, result):
+        from portfolio_research.repository import ResearchRepository
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        store = ResearchRepository(str(Path(temp.name) / "research.sqlite"))
+        store.save_run(result, {"data": {}}, {"as_of": AS_OF})
+        return store
+
+    def result(self):
+        return {
+            "as_of": AS_OF,
+            "research": {"OWN": {"brief": {"facts": []}, "proposals": None, "coverage": {}}},
+            "signals": [{"security_id": "OWN"}],
+            "holdings": [],
+        }
+
+    def test_only_the_research_the_comparison_reads_is_loaded(self):
+        from portfolio_research.workflow import _previous_review
+
+        previous = _previous_review(self.store(self.result()))
+        self.assertEqual(sorted(previous), ["research"])
+        self.assertIn("OWN", previous["research"])
+
+    def test_no_archive_is_simply_no_comparison(self):
+        from portfolio_research.repository import ResearchRepository
+        from portfolio_research.workflow import _previous_review
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        empty = ResearchRepository(str(Path(temp.name) / "research.sqlite"))
+        self.assertIsNone(_previous_review(empty))
+        self.assertIsNone(_previous_review(None))
 
 
 if __name__ == "__main__":
