@@ -7,6 +7,8 @@ Failures leave no lookup and a warning, never a guessed issuer.
 
 from __future__ import annotations
 
+from portfolio_lab.providers import ProviderShapeError
+
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_TICKERS_PROVIDER = "sec_tickers"
 SEC_TICKERS_KEY = "company_tickers"
@@ -14,8 +16,12 @@ US_EXCHANGES = frozenset({"NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS"})
 MAX_CIK = 9_999_999_999
 
 
-class TickerListUnavailable(LookupError):
-    """The SEC answer contained no usable ticker records."""
+class TickerListUnavailable(ProviderShapeError, LookupError):
+    """The SEC answer contained no usable ticker records.
+
+    A shape error as well as a lookup failure: its message names what the answer was
+    missing, so the warning a review carries says that rather than an exception class.
+    """
 
 
 def ticker_key(symbol):

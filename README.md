@@ -6,14 +6,16 @@ The application produces research records and conditional comparisons. It does n
 
 ## Start
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Chrome. From this checkout:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Chrome. From this checkout, once:
 
 ```sh
-uv sync --locked
+uv sync --locked --extra yahoo
 uv run app.py
 ```
 
-Open [Portfolio Review](http://127.0.0.1:8765). Keep the terminal running. The existing `data/` database, portfolio selections and Chrome pairing key are retained. Only one server can own a data directory, and only one can listen on a port.
+The `yahoo` extra installs the market-data adapter. Without it the review still runs, and every price, statement and estimate it could not fetch is reported as missing rather than guessed.
+
+Open [Portfolio Review](http://127.0.0.1:8765). Keep the terminal running. The existing `data/` database, portfolio selections and Chrome pairing key are retained. Only one server can own a data directory, and only one can listen on a port. The first start writes the settings it resolved to `data/research-config.json` and reads that file from then on; every recovery command below defaults to it, and editing it changes what the next review uses.
 
 For an isolated, fully populated example:
 
@@ -23,11 +25,13 @@ uv run python -m portfolio_research demo --directory data/demo --serve
 
 Open [the synthetic demo](http://127.0.0.1:8766). Use a new directory for each newly generated demo. The dataset and company assessments are explicitly synthetic.
 
+Two public sources take one optional setting each, both applied once and both kept out of exports. **Data → Provider health → SEC contact user agent**, then **Save provider settings**, stores the SEC contact string (`data.sec_user_agent`): an application name and your real contact email, which SEC requires — until it holds a real address, SEC fundamentals are skipped and the review says `SEC_CONTACT_REQUIRED` instead of fetching. FRED reads its key from the `FRED_API_KEY` environment variable (rename that variable with `data.fred_api_key_env`); export it in the shell that starts the server. Neither value is ever displayed back once saved.
+
 ## Connect Yahoo
 
-1. In `chrome://extensions`, enable Developer mode and load this checkout's `chrome-extension` folder.
-2. In the app's **Data → Connection settings**, copy the pairing key into the **Local Portfolio** extension and save it.
-3. Open Yahoo and sign in normally. Use **Find portfolios**, select portfolios with checkboxes, then **Pull latest holdings**.
+1. In `chrome://extensions`, enable Developer mode and **Load unpacked** this checkout's `chrome-extension` folder — **Local Portfolio · Yahoo connector**, version 1.2.0.
+2. In the app's **Data → Connection settings**, press **Copy key** and paste that pairing key into the extension popup, then save it there.
+3. Press **Open Yahoo** and sign in normally. Use **Find portfolios**, select portfolios with checkboxes, then **Holdings → Pull latest holdings**.
 4. Review the saved holdings and capture details. Reload the extension after extension code changes; restart the server after Python changes.
 
 Selections persist. Unchecked accounts retain history but are excluded from pulls and exports. A failed collection never publishes a new complete analytical batch. A successful pull without an independently verified row count is visibly unverified.
@@ -37,11 +41,11 @@ Selections persist. Unchecked accounts retain history but are excluded from pull
 One action runs the month. **Update & analyze** in the header collects the newest holdings through Chrome, resolves identity and currency, fetches the configured providers, analyzes and publishes one review. The stage strip under the header reports what each step did and what it could not do; **Cancel** stops the operation before it publishes. A duplicate click rejoins the operation already running, reloading the page rejoins it as well, and an operation that is cancelled or fails writes nothing — the last usable review stays exactly as it was.
 
 1. **Update & analyze** — collect, resolve, fetch, analyze and publish as one operation.
-2. **Answer the exceptions** — Overview lists only the questions the sources and provider metadata could not answer; each answer is saved as dated supplemental evidence.
-3. **Read the results** — Overview, Holdings and Research show the saved review beside the newest collection, each with its own dates.
-4. **Adjust the assumptions** — Research and Scenarios hold the company workspace and explicit assumptions; edits stay in a draft until they are calculated.
-5. **Recalculate** — **Scenarios → Recalculate** re-runs the draft against that run's frozen inputs and **Save run** archives an immutable child run.
-6. **Record the decision** — **Review** holds candidate baskets, funding, no-action rationale, run comparisons, exports and outcome evaluation.
+2. **Answer the exceptions** — the **Exceptions** panel on Overview counts what the sources and provider metadata could not answer (`N open`, otherwise `None open`); **Save** on a card records that answer as dated supplemental evidence and the count falls.
+3. **Read the results** — **What changed**, **Portfolio risks**, **Holdings to review** and **New candidates** on Overview, with Holdings and Research showing the saved review beside the newest collection, each with its own dates.
+4. **Adjust the assumptions** — **Research → Company research** (**EPS & multiple**, **DCF**, **Evidence & thesis**) and **Scenarios** hold the workspace and the explicit assumptions; edits stay in a draft until they are calculated.
+5. **Recalculate** — **Recalculate** in the shared context bar under the header re-runs the draft against that run's frozen inputs, **Save run** archives an immutable child run, and **Reset** restores the saved inputs.
+6. **Record the decision** — **Review** holds **Feasible alternatives**, funding, no-action rationale and exports; **Save monthly decision** retains the chosen one, **Compare runs** sets two saved runs side by side and **Evaluate saved forecasts** scores an earlier one.
 
 **Data → Historical month-end review (advanced)** recalculates a past month end from saved and cached inputs; it is not part of the monthly flow. **Data → Provider health** shows what each source has already answered and the next step when it cannot, without displaying any credential.
 
@@ -67,7 +71,26 @@ Candidates are identified and enriched in one bounded pass with the holdings: wa
 
 The analytical layer reads the holdings database without changing it. A separate `data/research.sqlite3` contains jobs, versioned inputs, assumptions, runs, decisions and evaluations. Read-only JSON/HTML exports exclude internal paths, source SQL and credentials; their portfolio contents are still private financial information.
 
-See [Operations](docs/OPERATIONS.md) for verified configuration, monthly commands, replay, evaluation, exports, backup/restore and migration. See the [feature map](docs/FEATURE_MAP.md), [source schema](docs/SOURCE_SCHEMA.md), [methodology register](docs/METHODOLOGY_GAPS.md) and [verification record](docs/VERIFICATION.md) for implementation scope and limitations.
+Working notes — operations, feature map, source schema, methodology register and verification record — stay in the git-ignored `docs/` directory and are not part of a checkout; the essentials are in this file. `uv run python -m portfolio_research --help` lists the operations the UI does not expose (`run`, `replay`, `evaluate`, `evaluate-ledgers`, `export`, `migrate`, `inspect`, `init`, `forecast-template`, `supplemental-template`), each with its own `--help`.
+
+## Recovery
+
+**Stop and restart.** Ctrl-C the terminal and run `uv run app.py` again; the data directory and the pairing key are retained. On start the application recovers interrupted work: an operation whose owning process is gone is marked failed with *Interrupted by application restart; start a new review*, an operation still owned by a live process is left alone, and the last published review loads unchanged either way. Reload the extension after extension code changes; restart the server after Python changes.
+
+**Cancel and retry.** **Cancel** beside **Update & analyze** stops the operation before it publishes, and nothing is written. The stage strip then names the stage that stopped and what it could not do; press **Update & analyze** again to start a fresh operation — pressing it while one is still running rejoins that one instead. A single portfolio whose last pull failed shows **Retry** in place of **Pull** on Holdings, which re-pulls that portfolio alone.
+
+**Exceptions.** The **Exceptions** panel answers one question at a time. A listing or value-currency answer is saved as dated supplemental evidence and closes immediately. A stale or missing FX observation is not answered by hand: run **Update & analyze**, or **Data → Refresh inputs & run review**, and the exception clears once a dated observation arrives. Exceptions that name supplemental inputs are answered on **Data → Supplement account facts**.
+
+**Provider cache.** Archived provider responses live beside the research database, one directory per provider — `data/cache/<provider>/` for the default `data/research.sqlite3` — each payload stored with its SHA-256 digest and a receipt sidecar. An answer younger than `data.provider_refresh_hours` (20 by default) is reused instead of re-fetched; deleting a provider's directory forces the next review to fetch it again, losing the archived receipts for it.
+
+**Backup and restore.** Both directories must be new; neither command overwrites anything.
+
+```sh
+uv run python -m portfolio_research backup --out backups/2026-09
+uv run python -m portfolio_research restore --from backups/2026-09 --into data/restored
+```
+
+A backup copies both SQLite databases through the SQLite backup API (safe on a live WAL database), the resolved configuration, the `inputs/` and `cache/` directories, the `.chrome-connector-key` pairing key, and a manifest of SHA-256 digests. Restore verifies every digest before writing anything, refuses an existing directory, and rewrites the configuration paths for the new directory — launch it with `uv run app.py --data-dir data/restored`, which picks up the restored `research-config.json`. A backup therefore holds your holdings and your pairing key: keep it under the ignored `backups/` and never publish one.
 
 ## Development
 
@@ -88,4 +111,16 @@ node --test tests/*.test.mjs
 - `static/`: one application shell and per-tab draft state.
 - `tests/`: synthetic collector, numerical, valuation, persistence and UI regressions.
 
-The app binds to loopback. Same-origin mutations require a local token; the extension has a separate revocable pairing key. This is a personal local service, not remote-production authentication. `.gitignore` excludes personal data, keys, sessions, reports, caches and environments. Never force-add ignored artifacts or publish personal exports. Use the SQLite backup command, including for a running WAL database; copying one live database file is insufficient.
+The app binds to loopback. Same-origin mutations require a local token; the extension has a separate revocable pairing key. This is a personal local service, not remote-production authentication.
+
+## Before publishing
+
+Everything this application collects is private financial information, and so is anything derived from it. Run this check before every push:
+
+1. `git status --ignored` — confirm that `data/`, `private/`, `cache/`, `reports/`, `backups/`, `exports/`, `.chrome-connector-key` and every `*.sqlite*` are listed as ignored, not as untracked candidates.
+2. `git status` — nothing personal is staged: no holdings CSV or JSON, no saved review export, no screenshot of real accounts, no local absolute path.
+3. Never force-add an ignored artifact. `git add -f` is what turns an ignored directory into published data.
+4. Fixtures and demo datasets stay synthetic. The demo command generates its own dataset; no real account, symbol list or balance belongs in `tests/` or `examples/`.
+5. Provider credentials live in the environment (`FRED_API_KEY`) or in the ignored configuration (`data.sec_user_agent`), never in tracked source, and neither is echoed back by the UI or included in an export.
+
+Exports exclude internal paths, source SQL and credentials, but their portfolio contents are still yours: treat a generated JSON or HTML report as private regardless of where it was written.

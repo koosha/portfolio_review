@@ -109,7 +109,7 @@ def _pace(config):
 
 def _live(config, provider, security, fetch, *, issues):
     """One archived-ready payload from the provider, or ``None`` with an issue recorded."""
-    from portfolio_lab.providers import _error_label
+    from portfolio_lab.providers import ProviderShapeError, _error_label
 
     sid, symbol = security_id(security), listing_symbol(security)
     try:
@@ -150,8 +150,14 @@ def _live(config, provider, security, fetch, *, issues):
             return None
         if "error" not in outcome:
             return outcome["value"]
+        error = outcome["error"]
+        if isinstance(error, ProviderShapeError):
+            # The response arrived and no longer carries what this adapter reads. Asking
+            # again cannot change that, so it is reported once, in the reader's own words.
+            _issue(issues, "PROVIDER_SHAPE_UNRECOGNIZED", sid, _error_label(error))
+            return None
         if attempt + 1 == MAX_ATTEMPTS:  # Provider objects fail lazily and in many ways.
-            _issue(issues, "PROVIDER_FETCH_FAILED", sid, _error_label(outcome["error"]))
+            _issue(issues, "PROVIDER_FETCH_FAILED", sid, _error_label(error))
     return None
 
 

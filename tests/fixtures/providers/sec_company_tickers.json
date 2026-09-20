@@ -1,0 +1,22 @@
+{
+  "0": {
+    "cik_str": 1234501,
+    "ticker": "AAPL",
+    "title": "Example Devices Inc."
+  },
+  "1": {
+    "cik_str": 1234503,
+    "ticker": "BRK-B",
+    "title": "Example Holdings Class B"
+  },
+  "2": {
+    "cik_str": 1234504,
+    "ticker": "F",
+    "title": "Example Motor Company"
+  },
+  "3": {
+    "cik_str": 1234502,
+    "ticker": "MSFT",
+    "title": "Example Software Corp."
+  }
+}

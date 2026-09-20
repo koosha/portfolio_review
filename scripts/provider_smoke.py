@@ -16,6 +16,17 @@ provider cache directory it is given.
 screen, resolves each acquired row's identity and qualifies it, then prints how many
 issuers were acquired, how many qualify and why the rest did not. It enriches nothing,
 so it says what a review's candidate coverage would be, not what one would cost.
+
+``--record`` is the other manual job this script does: it replaces the recorded provider
+responses under ``tests/fixtures/providers`` with a fresh, trimmed copy of what the live
+providers answer today, so the contract tests can be re-pinned when a provider ships a
+new shape. It writes into the repository and it makes live requests, so it is never run
+by a test or a hook — a person runs it, reads the diff and decides what the change means.
+Only public tickers, the public Valet series and the public SEC endpoints are asked for,
+so nothing private can reach a fixture; the recorded values are whatever those public
+endpoints return.
+
+    uv run python scripts/provider_smoke.py --record AAPL --fund XIC.TO --cik 320193
 """
 
 from __future__ import annotations
@@ -23,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -164,6 +176,290 @@ def summarise(bundle: dict) -> dict:
     }
 
 
+# How much of each live response a recorded fixture keeps. A fixture is read by a
+# contract test, not by a review: it needs the provider's shape, not its whole answer.
+RECORD_SESSIONS = 5
+RECORD_STORIES = 3
+RECORD_FACT_ENTRIES = 6
+RECORD_TICKERS = ("AAPL", "MSFT", "BRK-B", "F")
+RECORD_SERIES = ("FXEURCAD", "FXGBPCAD", "FXUSDCAD")
+RECORD_WINDOW_DAYS = 12
+PROFILE_INFO_KEYS = (
+    "longName",
+    "shortName",
+    "sector",
+    "industry",
+    "country",
+    "financialCurrency",
+    "currency",
+    "exchange",
+    "quoteType",
+    "marketCap",
+    "sharesOutstanding",
+)
+STORY_KEYS = (
+    "contentType",
+    "title",
+    "pubDate",
+    "displayTime",
+    "summary",
+    "provider",
+    "canonicalUrl",
+    "clickThroughUrl",
+)
+
+
+# The chart metadata keys worth recording, named explicitly. Never ``dict(metadata)``:
+# ``tradingPeriods`` is resolved lazily, so materializing the mapping costs another
+# intraday request and answers with a DataFrame that no fixture can hold.
+HISTORY_METADATA_KEYS = (
+    "currency",
+    "symbol",
+    "exchangeName",
+    "fullExchangeName",
+    "instrumentType",
+    "firstTradeDate",
+    "regularMarketTime",
+    "gmtoffset",
+    "timezone",
+    "exchangeTimezoneName",
+    "regularMarketPrice",
+    "chartPreviousClose",
+    "priceHint",
+    "dataGranularity",
+    "range",
+)
+
+
+def _record_metadata(fixtures, metadata) -> dict:
+    """The chart metadata this project reads, encoded as JSON.
+
+    yfinance parses ``firstTradeDate`` and ``regularMarketTime`` into ``pandas.Timestamp``
+    before the property returns, and hands the whole thing over as a Mapping rather than a
+    dict, so every value goes through the fixture encoder on its way to the file.
+    """
+    source = metadata if isinstance(metadata, Mapping) else {}
+    return {key: fixtures.scalar(source[key]) for key in HISTORY_METADATA_KEYS if key in source}
+
+
+def _record_filings(fixtures, filings) -> list:
+    """Filing rows as JSON: the filing date is a ``datetime.date`` the encoder converts."""
+    rows = []
+    for filing in filings or []:
+        if not isinstance(filing, Mapping):
+            continue
+        row = {}
+        for key, value in filing.items():
+            if key == "exhibits" and isinstance(value, Mapping):
+                row[key] = {str(name): fixtures.scalar(link) for name, link in value.items()}
+            elif key == "exhibits":
+                row[key] = [fixtures.scalar(item) for item in value or []]
+            else:
+                row[key] = fixtures.scalar(value)
+        rows.append(row)
+    return rows
+
+
+def _kept(mapping: dict | None, keys) -> dict:
+    """The named keys of a provider mapping, in the order this project reads them."""
+    source = mapping if isinstance(mapping, dict) else {}
+    return {key: source.get(key) for key in keys if key in source}
+
+
+def _record_calendar(fixtures, calendar, keys=None) -> dict:
+    """The provider calendar as JSON: its dates as ISO text, its lists still lists."""
+    result = {}
+    for key, value in (calendar if isinstance(calendar, dict) else {}).items():
+        if keys is not None and key not in keys:
+            continue
+        if isinstance(value, list):
+            result[key] = [fixtures.scalar(item) for item in value]
+        else:
+            result[key] = fixtures.scalar(value)
+    return result
+
+
+def _record_prices(fixtures, ticker, as_of: str) -> dict:
+    start = (pd.Timestamp(as_of) - pd.Timedelta(days=RECORD_WINDOW_DAYS)).date().isoformat()
+    end = (pd.Timestamp(as_of) + pd.Timedelta(days=1)).date().isoformat()
+    history = ticker.history(start=start, end=end, auto_adjust=False, actions=True)
+    return {
+        "symbol": ticker.ticker,
+        "history": fixtures.encode_history(history.tail(RECORD_SESSIONS)),
+        "history_metadata": _record_metadata(fixtures, ticker.history_metadata),
+    }
+
+
+def _record_statements(fixtures, ticker) -> dict:
+    payload = {
+        "symbol": ticker.ticker,
+        "info": _kept(ticker.info, ("financialCurrency",)),
+        "sec_filings": _record_filings(fixtures, ticker.sec_filings),
+    }
+    frames = {
+        "quarterly_income_stmt": ticker.quarterly_income_stmt,
+        "quarterly_balance_sheet": ticker.quarterly_balance_sheet,
+        "quarterly_cashflow": ticker.quarterly_cashflow,
+        "income_stmt": ticker.income_stmt,
+        "balance_sheet": ticker.balance_sheet,
+        "cashflow": ticker.cashflow,
+    }
+    for name, frame in frames.items():
+        payload[name] = fixtures.encode_statement(frame)
+    return payload
+
+
+def _record_estimates(fixtures, ticker) -> dict:
+    return {
+        "symbol": ticker.ticker,
+        "earnings_estimate": fixtures.encode_frame(ticker.earnings_estimate),
+        "revenue_estimate": fixtures.encode_frame(ticker.revenue_estimate),
+        "analyst_price_targets": dict(ticker.analyst_price_targets or {}),
+        "recommendations": fixtures.encode_frame(ticker.recommendations),
+        "calendar": _record_calendar(fixtures, ticker.calendar),
+    }
+
+
+def _record_funds(fixtures, ticker) -> dict:
+    funds = ticker.funds_data
+    return {
+        "symbol": ticker.ticker,
+        "funds_data": {
+            "top_holdings": fixtures.encode_frame(funds.top_holdings),
+            "sector_weightings": dict(funds.sector_weightings or {}),
+            "asset_classes": dict(funds.asset_classes or {}),
+            "fund_overview": _kept(funds.fund_overview, ("categoryName", "family", "legalType")),
+        },
+    }
+
+
+def _record_news(fixtures, ticker) -> dict:
+    stories = []
+    for item in (ticker.news or [])[:RECORD_STORIES]:
+        content = item.get("content") if isinstance(item, dict) else None
+        if isinstance(content, dict):
+            stories.append({"id": item.get("id"), "content": _kept(content, STORY_KEYS)})
+    return {
+        "symbol": ticker.ticker,
+        "news": stories,
+        "sec_filings": _record_filings(fixtures, ticker.sec_filings),
+        "calendar": _record_calendar(
+            fixtures,
+            ticker.calendar,
+            keys=("Earnings Date", "Ex-Dividend Date", "Dividend Date"),
+        ),
+    }
+
+
+def _record_profile(fixtures, ticker) -> dict:
+    return {
+        "symbol": ticker.ticker,
+        "info": _kept(ticker.info, PROFILE_INFO_KEYS),
+        "history_metadata": _record_metadata(fixtures, ticker.history_metadata),
+    }
+
+
+def _record_valet(as_of: str) -> dict:
+    from portfolio_lab import providers
+    from portfolio_research.fx_providers import USER_AGENT, _valet_url
+
+    start = (pd.Timestamp(as_of) - pd.Timedelta(days=RECORD_WINDOW_DAYS)).date().isoformat()
+    url = _valet_url(list(RECORD_SERIES), start, as_of)
+    payload, _ = providers._fetch_json(url, USER_AGENT)
+    return payload
+
+
+def _record_sec_tickers(agent: str) -> dict:
+    from portfolio_lab import providers
+    from portfolio_research.issuers import SEC_TICKERS_URL, ticker_key
+
+    arguments = (SEC_TICKERS_URL, agent) if agent.strip() else (SEC_TICKERS_URL,)
+    payload, _ = providers._fetch_json(*arguments)
+    wanted = {ticker_key(symbol) for symbol in RECORD_TICKERS}
+    kept = [
+        record
+        for record in payload.values()
+        if isinstance(record, dict) and ticker_key(record.get("ticker")) in wanted
+    ]
+    kept.sort(key=lambda record: str(record.get("ticker")))
+    return {str(index): record for index, record in enumerate(kept)}
+
+
+def _record_companyfacts(cik: str, agent: str) -> dict:
+    """The tags this project's extractor reads, with their most recent USD entries."""
+    from portfolio_lab.providers import FLOW_TAGS, STOCK_TAGS, _fetch_json
+
+    number = f"{int(str(cik).removeprefix('CIK').removeprefix('cik:')):010d}"
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{number}.json"
+    payload, _ = _fetch_json(url, agent)
+    wanted = {tag for group in (*FLOW_TAGS.values(), *STOCK_TAGS.values()) for tag in group}
+    gaap = ((payload.get("facts") or {}).get("us-gaap")) or {}
+    facts = {}
+    for tag in sorted(wanted & set(gaap)):
+        entries = ((gaap[tag].get("units") or {}).get("USD")) or []
+        entries = sorted(entries, key=lambda row: (str(row.get("end")), str(row.get("filed"))))
+        facts[tag] = {
+            "label": gaap[tag].get("label"),
+            "description": gaap[tag].get("description"),
+            "units": {"USD": entries[-RECORD_FACT_ENTRIES:]},
+        }
+    return {
+        "cik": payload.get("cik"),
+        "entityName": payload.get("entityName"),
+        "facts": {"us-gaap": facts},
+    }
+
+
+def record_run(arguments: argparse.Namespace) -> dict:
+    """Refresh every checked-in provider fixture; a failed capability names itself.
+
+    Each fixture is written on its own, so one provider that will not answer today
+    leaves the other recordings in place instead of aborting the refresh.
+    """
+    import yfinance as yf
+
+    from portfolio_lab.providers import _error_label
+    from tests.support import provider_fixtures as fixtures
+
+    as_of = arguments.as_of or datetime.now(NEW_YORK).date().isoformat()
+    written, skipped = {}, {}
+    for name, job in _record_jobs(fixtures, yf, arguments, as_of).items():
+        try:
+            payload = job()
+        except Exception as error:  # One provider's refusal is not the whole refresh.
+            # Never str(error): a yfinance HTTP failure carries the request URL, and that
+            # URL carries the minted Yahoo session crumb. The project's own label names
+            # the status or the exception class and quotes no request.
+            skipped[name] = _error_label(error)
+            continue
+        # Encoding is this recorder's own job. A payload it cannot write is a defect here,
+        # not a provider that would not answer today, and calling it "skipped" would leave
+        # the stale fixture in place while the refresh path stays quietly inoperative.
+        written_path = fixtures.write(name, payload)
+        written[name] = str(
+            written_path.relative_to(ROOT) if written_path.is_relative_to(ROOT) else written_path
+        )
+    return {"as_of": as_of, "written": written, "skipped": skipped}
+
+
+def _record_jobs(fixtures, yf, arguments: argparse.Namespace, as_of: str) -> dict:
+    """One callable per fixture, each fetching exactly what that recording needs."""
+    agent = arguments.sec_contact
+    equity = yf.Ticker(arguments.symbols[0]) if arguments.symbols else None
+    fund = yf.Ticker(arguments.fund[0]) if arguments.fund else None
+    return {
+        fixtures.PRICES: lambda: _record_prices(fixtures, equity, as_of),
+        fixtures.STATEMENTS: lambda: _record_statements(fixtures, equity),
+        fixtures.ESTIMATES: lambda: _record_estimates(fixtures, equity),
+        fixtures.FUNDS: lambda: _record_funds(fixtures, fund),
+        fixtures.NEWS: lambda: _record_news(fixtures, equity),
+        fixtures.PROFILE: lambda: _record_profile(fixtures, equity),
+        fixtures.VALET: lambda: _record_valet(as_of),
+        fixtures.SEC_TICKERS: lambda: _record_sec_tickers(agent),
+        fixtures.SEC_COMPANYFACTS: lambda: _record_companyfacts(arguments.cik, agent),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("symbols", nargs="*", help="Exact provider symbols, e.g. AAPL VOD.L")
@@ -184,11 +480,45 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Symbol to request as an ETF or mutual fund (repeatable).",
     )
+    parser.add_argument(
+        "--record",
+        action="store_true",
+        help=(
+            "Manual fixture refresh: replace the recorded provider responses under "
+            "tests/fixtures/providers with today's live answers, trimmed to the shape the "
+            "contract tests read. Makes live requests and writes into the repository, so "
+            "run it by hand and review the diff; never from a test, a hook or a review. "
+            "Asks only public endpoints, so no private data can reach a fixture. "
+            "Takes the equity symbol positionally, the fund from --fund and the SEC "
+            "issuer from --cik."
+        ),
+    )
+    parser.add_argument(
+        "--cik",
+        default="320193",
+        help="CIK whose companyfacts subset --record writes (public SEC identifier).",
+    )
+    parser.add_argument(
+        "--sec-contact",
+        default="PortfolioReview/0.2 personal-research",
+        help="User-Agent string --record sends to SEC endpoints, as SEC asks callers to.",
+    )
     parser.add_argument("--as-of", default=None, help="Observation date (YYYY-MM-DD).")
     parser.add_argument("--cache-dir", default=str(DEFAULT_CACHE))
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--interval", type=float, default=0.5)
     arguments = parser.parse_args(argv)
+    if arguments.record:
+        if not arguments.symbols or not arguments.fund:
+            parser.error("--record needs one equity symbol and one --fund symbol.")
+        report = record_run(arguments)
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        if report["skipped"]:
+            print(
+                "Fixtures left unchanged: " + ", ".join(sorted(report["skipped"])), file=sys.stderr
+            )
+            return 1
+        return 0
     if not arguments.universe and not arguments.symbols:
         parser.error("Give at least one provider symbol, or --universe.")
     try:

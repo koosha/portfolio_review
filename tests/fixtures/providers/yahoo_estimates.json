@@ -1,0 +1,174 @@
+{
+  "symbol": "AAPL",
+  "earnings_estimate": {
+    "index": [
+      "0q",
+      "+1q",
+      "0y",
+      "+1y"
+    ],
+    "columns": {
+      "numberOfAnalysts": [
+        24,
+        22,
+        30,
+        28
+      ],
+      "avg": [
+        0.58,
+        0.61,
+        2.3,
+        2.6
+      ],
+      "low": [
+        0.54,
+        0.56,
+        2.15,
+        2.35
+      ],
+      "high": [
+        0.62,
+        0.66,
+        2.45,
+        2.9
+      ],
+      "yearAgoEps": [
+        0.52,
+        0.55,
+        2.02,
+        2.3
+      ],
+      "growth": [
+        0.115,
+        0.109,
+        0.139,
+        0.13
+      ],
+      "currency": [
+        "USD",
+        "USD",
+        "USD",
+        "USD"
+      ]
+    }
+  },
+  "revenue_estimate": {
+    "index": [
+      "0q",
+      "+1q",
+      "0y",
+      "+1y"
+    ],
+    "columns": {
+      "numberOfAnalysts": [
+        20,
+        19,
+        26,
+        25
+      ],
+      "avg": [
+        270.0,
+        285.0,
+        1070.0,
+        1180.0
+      ],
+      "low": [
+        262.0,
+        275.0,
+        1040.0,
+        1130.0
+      ],
+      "high": [
+        278.0,
+        296.0,
+        1100.0,
+        1230.0
+      ],
+      "yearAgoRevenue": [
+        245.0,
+        250.0,
+        980.0,
+        1070.0
+      ],
+      "growth": [
+        0.102,
+        0.14,
+        0.092,
+        0.103
+      ],
+      "currency": [
+        "USD",
+        "USD",
+        "USD",
+        "USD"
+      ]
+    }
+  },
+  "analyst_price_targets": {
+    "current": 103.0,
+    "low": 82.0,
+    "high": 140.0,
+    "mean": 115.0,
+    "median": 112.0
+  },
+  "recommendations": {
+    "index": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "columns": {
+      "period": [
+        "0m",
+        "-1m",
+        "-2m",
+        "-3m"
+      ],
+      "strongBuy": [
+        9,
+        8,
+        8,
+        7
+      ],
+      "buy": [
+        12,
+        12,
+        11,
+        11
+      ],
+      "hold": [
+        6,
+        7,
+        7,
+        8
+      ],
+      "sell": [
+        1,
+        1,
+        2,
+        2
+      ],
+      "strongSell": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  },
+  "calendar": {
+    "Dividend Date": "2026-11-13",
+    "Ex-Dividend Date": "2026-11-06",
+    "Earnings Date": [
+      "2026-10-29",
+      "2026-11-02"
+    ],
+    "Earnings High": 0.62,
+    "Earnings Low": 0.54,
+    "Earnings Average": 0.58,
+    "Revenue High": 278000000,
+    "Revenue Low": 262000000,
+    "Revenue Average": 270000000
+  }
+}

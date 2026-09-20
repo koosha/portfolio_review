@@ -26,8 +26,8 @@ from portfolio_research.fx import FxTable
 from portfolio_research.market_data import ADAPTER_VERSION, available_at
 from portfolio_research.service import ResearchService, default_config
 from portfolio_research.workflow import ReviewWorkflow, provider_status
-from tests.test_market_data import FakeFundsData, FakeTicker, history_frame
-from tests.test_normalize import (
+from tests.support.market_data_adapter import FakeFundsData, FakeTicker, history_frame
+from tests.support.normalization import (
     SUNDAY_GENERATED,
     SUNDAY_RECEIPT,
     cad_table,
@@ -399,6 +399,38 @@ class EnrichmentGateTests(unittest.TestCase):
         self.assertTrue(len(bundle["prices"][bundle["prices"].security_id == "MSFT"]))
         self.assertIsNotNone(result["research"]["MSFT"]["proposals"]["dcf"])
 
+    def test_prices_without_a_quote_currency_are_not_reported_as_covered(self):
+        """A close with no unit states no amount, so the coverage line may not say ok.
+
+        Against the pinned yfinance the whole chart metadata arrived in a shape the reader
+        dropped, so every live close lost its currency while coverage still read ``ok``.
+        The readiness gate reads that line and nothing else, so the one surface that could
+        have stopped the review saw a fully covered price series.
+        """
+        real = market_data.price_history
+
+        def prices(config, security, **kwargs):
+            found = real(config, security, **kwargs)
+            if security.get("security_id") != "AAPL":
+                return found
+            unlabelled = dict(found, currency=None)
+            unlabelled["prices"] = [dict(row, currency=None) for row in found["prices"]]
+            return unlabelled
+
+        extra = (patch("portfolio_research.market_data.price_history", side_effect=prices),)
+        result, bundle = self.review(extra)
+        coverage = result["coverage"]
+        self.assertEqual(coverage["by_security"]["AAPL"]["prices"], "missing")
+        self.assertEqual(coverage["by_security"]["MSFT"]["prices"], "ok")
+        self.assertEqual(coverage["capabilities"]["prices"]["missing"], ["AAPL"])
+        unlabelled = [
+            issue
+            for issue in bundle["issues"]
+            if issue.get("code") == "MISSING_QUOTE_CURRENCY" and issue.get("security_id") == "AAPL"
+        ]
+        self.assertTrue(unlabelled)
+        self.assertIn("quote currency", unlabelled[0]["detail"])
+
     def test_a_raising_brief_is_confined_to_its_security(self):
         real = market_data.security_profile
 
@@ -487,6 +519,35 @@ class EnrichmentGateTests(unittest.TestCase):
         self.assertIsNone(fund["proposals"]["eps"])
         self.assertIsNone(fund["proposals"]["dcf"])
         self.assertTrue(fund["proposals"]["reasons"])
+
+    def test_a_fund_is_never_asked_for_an_income_statement(self):
+        """A fund has no income statement by construction, exactly as it has no estimates.
+
+        Asking anyway spends a provider round trip per ETF per review and lands a
+        permanent ``missing`` plus an unresolvable warning in the exceptions surface,
+        because the provider answers "no fundamentals data found for symbol".
+        """
+        asked = []
+        real = market_data.statements
+
+        def statements(config, security, **kwargs):
+            asked.append(security.get("security_id"))
+            return real(config, security, **kwargs)
+
+        extra = (patch("portfolio_research.market_data.statements", side_effect=statements),)
+        result, bundle = self.review(extra)
+        coverage = result["coverage"]
+        self.assertEqual(coverage["by_security"]["XIC.TO"]["statements"], "not_applicable")
+        self.assertNotIn("XIC.TO", asked)
+        self.assertNotIn("XIC.TO", coverage["capabilities"]["statements"]["missing"])
+        self.assertFalse(
+            [
+                issue
+                for issue in bundle["issues"]
+                if issue.get("security_id") == "XIC.TO"
+                and issue.get("code") == "PROVIDER_SHAPE_UNRECOGNIZED"
+            ]
+        )
 
     def test_missing_statements_block_only_that_security(self):
         real = market_data.statements

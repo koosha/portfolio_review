@@ -1,0 +1,75 @@
+{
+  "symbol": "AAPL",
+  "news": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "content": {
+        "contentType": "STORY",
+        "title": "Example Devices reports second-quarter results",
+        "pubDate": "2026-09-09T13:30:00Z",
+        "displayTime": "2026-09-09T13:30:00Z",
+        "summary": "A synthetic newswire item used to pin the adapter's news shape.",
+        "provider": {
+          "displayName": "Example Newswire",
+          "url": "https://news.example.com"
+        },
+        "canonicalUrl": {
+          "url": "https://news.example.com/example-devices-q2",
+          "region": "US",
+          "lang": "en-US"
+        },
+        "clickThroughUrl": {
+          "url": "https://news.example.com/example-devices-q2"
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "content": {
+        "contentType": "STORY",
+        "title": "Analyst raises Example Devices target",
+        "pubDate": "2026-09-10T11:00:00Z",
+        "displayTime": "2026-09-10T11:00:00Z",
+        "summary": "A synthetic opinion piece; the adapter classifies news as third-party opinion.",
+        "provider": {
+          "displayName": "Example Wire",
+          "url": "https://wire.example.com"
+        },
+        "canonicalUrl": {
+          "url": "https://wire.example.com/example-devices-target",
+          "region": "US",
+          "lang": "en-US"
+        },
+        "clickThroughUrl": {
+          "url": "https://wire.example.com/example-devices-target"
+        }
+      }
+    }
+  ],
+  "sec_filings": [
+    {
+      "date": "2026-08-03",
+      "epochDate": 1785715200,
+      "type": "10-Q",
+      "title": "Quarterly report",
+      "edgarUrl": "https://www.sec.gov/Archives/edgar/data/1234501/q2.htm",
+      "exhibits": []
+    },
+    {
+      "date": "2026-02-10",
+      "epochDate": 1770681600,
+      "type": "10-K",
+      "title": "Annual report",
+      "edgarUrl": "https://www.sec.gov/Archives/edgar/data/1234501/k.htm",
+      "exhibits": []
+    }
+  ],
+  "calendar": {
+    "Dividend Date": "2026-11-13",
+    "Ex-Dividend Date": "2026-11-06",
+    "Earnings Date": [
+      "2026-10-29",
+      "2026-11-02"
+    ]
+  }
+}

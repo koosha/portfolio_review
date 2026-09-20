@@ -205,6 +205,7 @@ def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, ev
     reporting a gap the review never looked for.
     """
     from . import market_data
+    from .market_values import _issue
 
     fund, sec_covered = _is_fund(security), _sec_covered(security, config)
     sid = security.get("security_id")
@@ -214,7 +215,22 @@ def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, ev
         return _attempt(name, sid, issues, call, config, security, **ask, **extra)
 
     prices = run("prices", market_data.price_history)
-    statements = None if sec_covered else run("statements", market_data.statements)
+    # A close with no quote currency is a number with no unit: it converts to no
+    # presentation currency and states no per-share proposal. The readiness gate reads the
+    # coverage line and nothing else, so an unlabelled series reported as ``ok`` is a gap
+    # nothing downstream can raise — it is named here, and it is not counted as covered.
+    quoted = bool((prices or {}).get("currency"))
+    if prices and not quoted:
+        _issue(
+            issues,
+            "MISSING_QUOTE_CURRENCY",
+            sid,
+            "The price history carries no quote currency, so its closes state no unit.",
+        )
+    # A fund has no income statement to read, exactly as it has no per-share estimates:
+    # asking spends a round trip and earns a gap the owner can never close.
+    no_statements = fund or sec_covered
+    statements = None if no_statements else run("statements", market_data.statements)
     _attempt("statements", sid, issues, _complete_trailing, statements)
     estimates = None if fund else run("estimates", market_data.estimates)
     disclosure = (
@@ -258,9 +274,9 @@ def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, ev
         ],
     }
     record["coverage"] = {
-        "prices": _status(prices, config, present=bool((prices or {}).get("prices"))),
+        "prices": _status(prices, config, present=bool((prices or {}).get("prices")) and quoted),
         "statements": "not_applicable"
-        if sec_covered
+        if no_statements
         else _status(statements, config, present=bool((statements or {}).get("rows"))),
         "estimates": "not_applicable"
         if fund

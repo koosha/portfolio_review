@@ -7,6 +7,10 @@ const labels = ['adverse', 'central', 'favorable'];
 const pages = ['overview','holdings','research','scenarios','review','data','settings'];
 const gate = new RequestGate();
 let service = {}, result = null, saved = null, draft = newDraft(null), token = '', busy = false;
+// 'loading' until the first load settles, then 'ready' or 'failed'. A failed load never
+// assigns a token, so every control it gates stays disabled for the life of the page;
+// the owner is owed the reason rather than a tooltip that says it is still loading.
+let bootstrap = 'loading';
 let page = 'overview', securityId = '', detailId = '', selectedCandidate = '', account = '';
 let view = CURRENT_VIEW, previousRun = null;
 let supplemental = null, supplementalSupported = false, decisionRecords = [], latestEvaluation = null;
@@ -238,10 +242,18 @@ function jsonEditor(id,label,value,onApply,key=id) {
 }
 function navigate(next) {
   if(!pages.includes(next)) return;
+  const moved=page!==next;
   page=next;
   for(const name of pages) $(`page-${name}`).hidden=name!==next;
   document.querySelectorAll('[data-page]').forEach(node=>{if(node.dataset.page===next)node.setAttribute('aria-current','page');else node.removeAttribute('aria-current');});
   $('page-title').textContent=friendly(next);history.replaceState(null,'',`#${next}`);
+  // A view swapped in under a kept scroll offset opens mid-page — on the long views that
+  // is past the heading and the controls entirely. Moving focus to the workspace both
+  // puts the new view at its top and announces the change to a screen reader; main
+  // already carries tabindex="-1" for the skip link, so no markup is added for it.
+  if(!moved) return;
+  window.scrollTo({top:0});
+  $('workspace-main').focus({preventScroll:true});
 }
 function renderState(writeStatus=false) {
   const unapplied=Object.keys(draft.rawEditors || {}).length;
@@ -251,12 +263,33 @@ function renderState(writeStatus=false) {
   $('recalculate').title=!draft.baseRunId?'Run Update & analyze to retain base inputs.':unapplied?'Apply or discard advanced JSON edits first.':'';
   $('save-run').disabled=busy || !previewReady(draft) || !!unapplied;
   $('save-run').title=previewReady(draft)?'Save this calculation as an immutable child run.':'Recalculate the current draft before saving.';
-  $('update-analyze').disabled=busy || workflowBusy || !!unapplied;
-  $('update-analyze').title=unapplied?'Apply or discard advanced JSON edits first.':workflowBusy?'This operation is already running.':'Collect the newest holdings, fetch provider data and save one review.';
+  // An operation is authorized with the local token, so nothing that starts one may be
+  // offered before the page holds it: a click made first is refused by the service, not
+  // queued, and the owner is told to reload a page that was merely still loading.
+  // A load that never finished and a load that failed are different states: the first
+  // ends on its own, the second never will, so the tooltip may not claim a load is in
+  // progress under a control that will stay dead until the page is reloaded.
+  const waiting=!token?(bootstrap==='failed'?'The local research service did not load. Reload this page to try again.':'Loading the local research service…'):'';
+  $('update-analyze').disabled=!token || busy || workflowBusy || !!unapplied;
+  $('update-analyze').title=waiting || (unapplied?'Apply or discard advanced JSON edits first.':workflowBusy?'This operation is already running.':'Collect the newest holdings, fetch provider data and save one review.');
   $('cancel-workflow').disabled=!workflowRecord || !liveWorkflow(workflowRecord.status) || !!workflowRecord.cancel_requested;
-  $('monthly-review').disabled=busy || workflowBusy || !!unapplied;
-  $('refresh-research').disabled=busy || workflowBusy || !!unapplied;
+  $('monthly-review').disabled=!token || busy || workflowBusy || !!unapplied;
+  $('refresh-research').disabled=!token || busy || workflowBusy || !!unapplied;
+  $('monthly-review').title=waiting;$('refresh-research').title=waiting;
+  // Every remaining control that writes through the local token is settled here too. The
+  // service refuses a token-less write with "Reload the local app before making changes."
+  // rather than queueing it, so offering the click at all only produces that refusal.
+  for(const id of ['save-settings','save-supplemental','import-csv','evaluate-run']) {
+    $(id).disabled=!token || busy;
+    $(id).title=waiting;
+  }
+  // Saving settings writes the resolved draft, so an unapplied JSON edit blocks it the
+  // way it blocks a calculation: what would be written is not what the page is showing.
+  $('save-settings').disabled=!token || busy || !!unapplied;
   $('reset-draft').disabled=busy || !draft.dirty;
+  // Recording a decision needs a loaded run and a finished calculation, so it is settled
+  // here with the other controls: a run loaded while busy re-enables it when busy clears.
+  $('save-decision').disabled=busy || !draft.baseRunId;
   if(!busy && writeStatus) announce(unapplied?'Advanced JSON has unapplied edits. Apply or discard them before calculating.':draft.dirty && !previewReady(draft)?'Draft changed · displayed results are out of date until recalculated.':previewReady(draft)?'Preview calculated · save a new run to retain this result.':draft.baseRunId?'Saved inputs · display filters leave the analytical scope unchanged.':'Run Update & analyze to create the first retained input set.');
 }
 function renderDiff() {
@@ -1129,7 +1162,6 @@ function renderReview() {
     disclosure('Trading-cost sensitivities',autoTable(candidate.cost_sensitivities || [])),
     disclosure('Substitution-hurdle sensitivities',autoTable(candidate.hurdle_sensitivities || [])),
     disclosure('Candidate method and solver diagnostics',kv(allocation.solver || {})));
-  $('save-decision').disabled=!draft.baseRunId || busy;
   renderDecisionHistory();
   const runs=service.runs || [];
   replace('run-history',table(runs,[{key:'run_id',label:'Saved run',render:id=>button(String(id).slice(0,16),()=>loadRun(id),'text-button')},{key:'as_of',label:'Decision date'},{key:'created_at'},{key:'parent_run_id'}]));
@@ -1740,11 +1772,11 @@ window.addEventListener('beforeunload',event=>{if(draft.dirty){persist();event.p
 async function initialize() {
   navigate(pages.includes(location.hash.slice(1))?location.hash.slice(1):'overview');
   try {
-    const [local,status]=await Promise.all([api('/api/state'),api('/api/research'),loadCurrent().then(loadExceptions)]);token=local.token;service=status;
+    const [local,status]=await Promise.all([api('/api/state'),api('/api/research'),loadCurrent().then(loadExceptions)]);token=local.token;service=status;bootstrap='ready';
     try{const response=await api('/api/research/supplemental');supplementalSupported=response.supported;supplemental=clone(response.saved || response.template || null);}catch(failure){error(`Supplemental input is unavailable: ${failure.message}`);}
     resumeWorkflow();loadProviderHealth();
     if(service.latest_run_id)await loadRun(service.latest_run_id,false);
     else{draft=restoreDraft(sessionStorage,null,service.config,{});renderAll();}
-  } catch(failure){error(`Research could not load: ${failure.message} Yahoo collection remains available in Data and Holdings.`);renderAll();}
+  } catch(failure){bootstrap='failed';error(`Research could not load: ${failure.message} Reload this page to try again. Yahoo collection remains available in Data and Holdings.`);renderAll();}
 }
 initialize();

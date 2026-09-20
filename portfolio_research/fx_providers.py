@@ -15,6 +15,8 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal, localcontext
 from zoneinfo import ZoneInfo
 
+from portfolio_lab.providers import ProviderShapeError
+
 from .fx import PRECISION, FxTable, _iso_date, _major, _unit, validate_observation
 
 _DATE_KEY = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -80,11 +82,15 @@ def _valet_records(
     payload, series: list[str], source_id: str, received_at: str, window=None
 ) -> list[dict]:
     if not isinstance(payload, dict) or not isinstance(payload.get("observations"), list):
-        raise ValueError("Unexpected Valet observations payload")
+        raise ProviderShapeError(
+            "The Valet answer carries no observations list; its shape is unrecognized."
+        )
     records = []
     for row in payload["observations"]:
         if not isinstance(row, dict):
-            raise ValueError("Unexpected Valet observation")
+            raise ProviderShapeError(
+                "A Valet observation is not an object; its shape is unrecognized."
+            )
         day = _iso_date(row.get("d"), "Valet observation date").isoformat()
         if window and not window[0] <= day <= window[1]:
             continue  # A reused archive may cover more days than this window asked for.
@@ -387,11 +393,15 @@ def _yahoo_records(
     payload, base: str, quote: str, source_id: str, received_at: str, window=None
 ) -> list:
     if not isinstance(payload, list):
-        raise ValueError("Unexpected Yahoo FX payload")
+        raise ProviderShapeError(
+            "The Yahoo FX answer carries no observation list; its shape is unrecognized."
+        )
     records = []
     for row in payload:
         if not isinstance(row, dict):
-            raise ValueError("Unexpected Yahoo FX row")
+            raise ProviderShapeError(
+                "A Yahoo FX observation is not an object; its shape is unrecognized."
+            )
         if window and not window[0] <= str(row.get("Date")) <= window[1]:
             continue  # A reused archive may cover more days than this window asked for.
         records.append(

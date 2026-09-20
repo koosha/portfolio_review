@@ -29,7 +29,7 @@ from portfolio_research.enrichment import acquire_candidates, enrich_market
 from portfolio_research.fx import FxTable
 from portfolio_research.scenarios import DEFAULT_SHARED_STATE
 from portfolio_research.service import ResearchService, default_config
-from tests.test_market_data import (
+from tests.support.market_data_adapter import (
     AAPL_ANNUAL_CASHFLOW,
     AAPL_ANNUAL_INCOME,
     AAPL_QUARTERLY_BALANCE,
@@ -41,7 +41,7 @@ from tests.test_market_data import (
     history_frame,
     statement_frame,
 )
-from tests.test_normalize import SUNDAY_GENERATED, SUNDAY_RECEIPT, listing, observation
+from tests.support.normalization import SUNDAY_GENERATED, SUNDAY_RECEIPT, listing, observation
 
 AS_OF = "2026-09-11"
 SESSIONS = trailing_sessions(AS_OF, 760)

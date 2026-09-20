@@ -13,8 +13,8 @@ from portfolio.storage import Store
 from portfolio_lab.config import dashboard_patch, load_config
 from portfolio_lab.demo import create_demo
 from portfolio_research.service import ResearchService, default_config
+from tests.support.normalization import A_ROWS, B_ROWS, LISTINGS, cad_table, listing, usd_table
 from tests.test_current import cached_providers
-from tests.test_normalize import A_ROWS, B_ROWS, LISTINGS, cad_table, listing, usd_table
 
 SUNDAY_RECEIPT = "2026-09-13T20:00:00+00:00"
 FRIDAY = "2026-09-11"

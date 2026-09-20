@@ -1,0 +1,54 @@
+{
+  "symbol": "XIC.TO",
+  "funds_data": {
+    "top_holdings": {
+      "index_name": "Symbol",
+      "index": [
+        "RY.TO",
+        "SHOP.TO",
+        "ENB.TO",
+        "CNR.TO"
+      ],
+      "columns": {
+        "Name": [
+          "Example Bank of Canada",
+          "Example Commerce Corp",
+          "Example Pipelines Ltd",
+          "Example Rail Co"
+        ],
+        "Holding Percent": [
+          0.062,
+          0.041,
+          0.033,
+          0.028
+        ]
+      }
+    },
+    "sector_weightings": {
+      "realestate": 0.024,
+      "consumer_cyclical": 0.038,
+      "basic_materials": 0.112,
+      "consumer_defensive": 0.041,
+      "technology": 0.101,
+      "communication_services": 0.029,
+      "financial_services": 0.353,
+      "utilities": 0.04,
+      "industrials": 0.128,
+      "energy": 0.117,
+      "healthcare": 0.017
+    },
+    "asset_classes": {
+      "cashPosition": 0.019,
+      "stockPosition": 0.981,
+      "bondPosition": 0.0,
+      "preferredPosition": 0.0,
+      "convertiblePosition": 0.0,
+      "otherPosition": 0.0
+    },
+    "fund_overview": {
+      "categoryName": "Canadian Equity",
+      "family": "Example Asset Management",
+      "legalType": "Exchange Traded Fund"
+    }
+  }
+}

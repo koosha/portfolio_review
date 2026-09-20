@@ -3,12 +3,17 @@
 Every function here takes a ``yfinance.Ticker``-shaped object and returns plain JSON
 values: numbers, bounded text and ISO dates. Provider objects fetch lazily and fail in
 many ways, so optional parts are read one at a time and an absent part stays absent;
-a response with nothing usable raises so the caller records one issue for the security.
+a response with nothing usable raises ``ProviderShapeError`` so the caller records one
+issue for the security, in words that name what the response no longer carries.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 import pandas as pd
+
+from portfolio_lab.providers import ProviderShapeError, ProviderUnavailableError
 
 from .market_values import (
     ESTIMATE_PERIODS,
@@ -23,8 +28,11 @@ from .market_values import (
 def _attribute(ticker, name):
     try:
         return getattr(ticker, name)
-    except Exception:  # One absent statement must not lose the others.
+    except AttributeError:  # One withdrawn property must not lose the others.
         return None
+    # Anything else — a reset connection, a refused request, a provider outage — is
+    # transient. Flattening it to None would make it indistinguishable from a property
+    # the release withdrew, so it is raised and the caller's bounded retry sees it.
 
 
 def _metadata(ticker):
@@ -32,7 +40,10 @@ def _metadata(ticker):
         data = ticker.history_metadata
     except Exception:  # Metadata is optional; prices remain usable without it.
         return {}
-    if not isinstance(data, dict):
+    # A Mapping, not a dict: yfinance returns ``HistoryMetadata``, which subclasses
+    # ``collections.abc.Mapping`` alone, so a ``dict`` gate drops the currency, exchange,
+    # instrument type and timezone of every live security while leaving prices readable.
+    if not isinstance(data, Mapping):
         return {}
     return {
         "currency": _text(data.get("currency"), 8),
@@ -45,9 +56,12 @@ def _metadata(ticker):
 def _price_payload(ticker, start, end):
     frame = ticker.history(start=start, end=end, auto_adjust=False, actions=True)
     if frame is None or getattr(frame, "empty", True):
-        raise ValueError("No price history")
+        raise ProviderUnavailableError("The provider returned no price history for this listing.")
     if not {"Close", "Adj Close"}.issubset(frame.columns):
-        raise ValueError("No raw and adjusted closes")
+        raise ProviderShapeError(
+            "The price history carries no Close and Adj Close columns; raw and adjusted "
+            "closes are unreadable."
+        )
     rows = []
     for stamp, row in frame.iterrows():
         moment = pd.Timestamp(stamp)
@@ -115,7 +129,7 @@ def _statement_payload(ticker):
     info = _attribute(ticker, "info")
     payload["currency"] = _text((info or {}).get("financialCurrency"), 8)
     if not payload["annual"]["income"] and not payload["quarterly"]["income"]:
-        raise ValueError("No income statement")
+        raise ProviderShapeError("The provider returned no annual or quarterly income statement.")
     return payload
 
 
@@ -187,7 +201,9 @@ def _estimates_payload(ticker):
         **_calendar_payload(ticker),
     }
     if not eps and not revenue and not any(payload["price_targets"].values()):
-        raise ValueError("No consensus estimates")
+        raise ProviderShapeError(
+            "The provider returned no consensus estimates, price targets or recommendation counts."
+        )
     return payload
 
 
@@ -234,7 +250,10 @@ def _funds_payload(ticker):
         },
     }
     if not payload["top_holdings"] and not payload["sector_weightings"]:
-        raise ValueError("No fund disclosure")
+        raise ProviderShapeError(
+            "The provider returned no fund disclosure: neither top holdings nor sector "
+            "weights are readable."
+        )
     return payload
 
 
@@ -258,7 +277,9 @@ def _news_payload(ticker):
         )
     payload = {"news": rows, "filings": _filings_payload(ticker), **_calendar_payload(ticker)}
     if not rows and not payload["filings"] and not payload.get("earnings_dates"):
-        raise ValueError("No news, filings or scheduled dates")
+        raise ProviderShapeError(
+            "The provider returned no news, filings or scheduled dates for this listing."
+        )
     return payload
 
 
@@ -276,5 +297,5 @@ def _profile_payload(ticker):
         "metadata": _metadata(ticker),
     }
     if not any(value for key, value in payload.items() if key != "metadata"):
-        raise ValueError("No company profile")
+        raise ProviderShapeError("The provider returned no company profile fields.")
     return payload

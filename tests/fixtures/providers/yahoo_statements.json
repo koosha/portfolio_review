@@ -1,0 +1,301 @@
+{
+  "symbol": "AAPL",
+  "info": {
+    "financialCurrency": "USD"
+  },
+  "sec_filings": [
+    {
+      "date": "2026-08-03",
+      "epochDate": 1785715200,
+      "type": "10-Q",
+      "title": "Quarterly report",
+      "edgarUrl": "https://www.sec.gov/Archives/edgar/data/1234501/q2.htm",
+      "exhibits": []
+    },
+    {
+      "date": "2026-02-10",
+      "epochDate": 1770681600,
+      "type": "10-K",
+      "title": "Annual report",
+      "edgarUrl": "https://www.sec.gov/Archives/edgar/data/1234501/k.htm",
+      "exhibits": []
+    }
+  ],
+  "quarterly_income_stmt": {
+    "periods": [
+      "2026-06-30",
+      "2026-03-31",
+      "2025-12-31",
+      "2025-09-30",
+      "2025-06-30"
+    ],
+    "rows": {
+      "Total Revenue": [
+        260.0,
+        255.0,
+        250.0,
+        245.0,
+        240.0
+      ],
+      "Gross Profit": [
+        104.0,
+        102.0,
+        100.0,
+        98.0,
+        96.0
+      ],
+      "Operating Income": [
+        78.0,
+        76.5,
+        75.0,
+        73.5,
+        72.0
+      ],
+      "Pretax Income": [
+        70.0,
+        68.0,
+        66.0,
+        64.0,
+        62.0
+      ],
+      "Tax Provision": [
+        14.0,
+        13.6,
+        13.2,
+        12.8,
+        12.4
+      ],
+      "Net Income": [
+        56.0,
+        54.4,
+        52.8,
+        51.2,
+        49.6
+      ],
+      "Net Income Common Stockholders": [
+        55.0,
+        53.4,
+        51.8,
+        50.2,
+        48.6
+      ],
+      "Diluted EPS": [
+        0.55,
+        0.53,
+        0.52,
+        0.5,
+        0.49
+      ],
+      "Basic Average Shares": [
+        100000.0,
+        100000.0,
+        100000.0,
+        100000.0,
+        100000.0
+      ],
+      "Diluted Average Shares": [
+        101000.0,
+        101000.0,
+        101000.0,
+        101000.0,
+        101000.0
+      ]
+    }
+  },
+  "quarterly_balance_sheet": {
+    "periods": [
+      "2026-06-30",
+      "2026-03-31",
+      "2025-12-31",
+      "2025-09-30",
+      "2025-06-30"
+    ],
+    "rows": {
+      "Total Assets": [
+        960.0,
+        940.0,
+        920.0,
+        900.0,
+        880.0
+      ],
+      "Total Debt": [
+        300.0,
+        300.0,
+        300.0,
+        290.0,
+        290.0
+      ],
+      "Cash And Cash Equivalents": [
+        120.0,
+        115.0,
+        110.0,
+        105.0,
+        100.0
+      ],
+      "Minority Interest": [
+        5.0,
+        5.0,
+        5.0,
+        5.0,
+        5.0
+      ],
+      "Preferred Stock Equity": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "quarterly_cashflow": {
+    "periods": [
+      "2026-06-30",
+      "2026-03-31",
+      "2025-12-31",
+      "2025-09-30",
+      "2025-06-30"
+    ],
+    "rows": {
+      "Operating Cash Flow": [
+        70.0,
+        68.0,
+        66.0,
+        64.0,
+        62.0
+      ],
+      "Capital Expenditure": [
+        -20.0,
+        -19.0,
+        -18.0,
+        -17.0,
+        -16.0
+      ],
+      "Reconciled Depreciation": [
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+        10.0
+      ],
+      "Change In Working Capital": [
+        -4.0,
+        -4.0,
+        -4.0,
+        -4.0,
+        -4.0
+      ],
+      "Stock Based Compensation": [
+        6.0,
+        6.0,
+        6.0,
+        6.0,
+        6.0
+      ]
+    }
+  },
+  "income_stmt": {
+    "periods": [
+      "2025-12-31",
+      "2024-12-31"
+    ],
+    "rows": {
+      "Total Revenue": [
+        980.0,
+        900.0
+      ],
+      "Gross Profit": [
+        392.0,
+        360.0
+      ],
+      "Operating Income": [
+        294.0,
+        270.0
+      ],
+      "Pretax Income": [
+        260.0,
+        240.0
+      ],
+      "Tax Provision": [
+        52.0,
+        48.0
+      ],
+      "Net Income": [
+        208.0,
+        192.0
+      ],
+      "Net Income Common Stockholders": [
+        204.0,
+        188.0
+      ],
+      "Diluted EPS": [
+        2.02,
+        1.86
+      ],
+      "Basic Average Shares": [
+        100000.0,
+        100000.0
+      ],
+      "Diluted Average Shares": [
+        101000.0,
+        101000.0
+      ]
+    }
+  },
+  "balance_sheet": {
+    "periods": [
+      "2025-12-31",
+      "2024-12-31"
+    ],
+    "rows": {
+      "Total Assets": [
+        920.0,
+        860.0
+      ],
+      "Total Debt": [
+        300.0,
+        280.0
+      ],
+      "Cash And Cash Equivalents": [
+        110.0,
+        95.0
+      ],
+      "Minority Interest": [
+        5.0,
+        5.0
+      ],
+      "Preferred Stock Equity": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "cashflow": {
+    "periods": [
+      "2025-12-31",
+      "2024-12-31"
+    ],
+    "rows": {
+      "Operating Cash Flow": [
+        258.0,
+        236.0
+      ],
+      "Capital Expenditure": [
+        -70.0,
+        -64.0
+      ],
+      "Reconciled Depreciation": [
+        40.0,
+        38.0
+      ],
+      "Change In Working Capital": [
+        -16.0,
+        -14.0
+      ],
+      "Stock Based Compensation": [
+        24.0,
+        22.0
+      ]
+    }
+  }
+}

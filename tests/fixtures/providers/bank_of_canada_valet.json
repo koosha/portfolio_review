@@ -1,0 +1,105 @@
+{
+  "terms": {
+    "url": "https://www.bankofcanada.ca/terms/"
+  },
+  "seriesDetail": {
+    "FXEURCAD": {
+      "label": "EUR/CAD",
+      "description": "Daily average exchange rate: daily value of the euro expressed in Canadian dollars, for 1 unit of euro",
+      "dimension": {
+        "key": "d",
+        "name": "Date"
+      }
+    },
+    "FXGBPCAD": {
+      "label": "GBP/CAD",
+      "description": "Daily average exchange rate: daily value of the UK pound sterling expressed in Canadian dollars, for 1 unit of pound sterling",
+      "dimension": {
+        "key": "d",
+        "name": "Date"
+      }
+    },
+    "FXUSDCAD": {
+      "label": "USD/CAD",
+      "description": "Daily average exchange rate: daily value of the US dollar expressed in Canadian dollars, for 1 unit of dollar",
+      "dimension": {
+        "key": "d",
+        "name": "Date"
+      }
+    }
+  },
+  "observations": [
+    {
+      "d": "2026-09-03",
+      "FXEURCAD": {
+        "v": "1.6120"
+      },
+      "FXGBPCAD": {
+        "v": "1.8900"
+      },
+      "FXUSDCAD": {
+        "v": "1.4000"
+      }
+    },
+    {
+      "d": "2026-09-04",
+      "FXEURCAD": {
+        "v": "1.6135"
+      },
+      "FXGBPCAD": {
+        "v": "1.8926"
+      },
+      "FXUSDCAD": {
+        "v": "1.4012"
+      }
+    },
+    {
+      "d": "2026-09-08",
+      "FXEURCAD": {
+        "v": ""
+      },
+      "FXGBPCAD": {
+        "v": "1.8890"
+      },
+      "FXUSDCAD": {
+        "v": "1.3985"
+      }
+    },
+    {
+      "d": "2026-09-09",
+      "FXEURCAD": {
+        "v": "1.6108"
+      },
+      "FXGBPCAD": {
+        "v": "1.8904"
+      },
+      "FXUSDCAD": {
+        "v": "1.3999"
+      }
+    },
+    {
+      "d": "2026-09-10",
+      "FXEURCAD": {
+        "v": "1.6142"
+      },
+      "FXGBPCAD": {
+        "v": "1.8951"
+      },
+      "FXUSDCAD": {
+        "v": "1.4020"
+      }
+    },
+    {
+      "d": "2026-09-11",
+      "FXEURCAD": {
+        "v": "1.6127"
+      },
+      "FXGBPCAD": {
+        "v": "1.8933"
+      },
+      "FXUSDCAD": {
+        "v": "1.4008"
+      }
+    }
+  ]
+}

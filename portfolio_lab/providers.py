@@ -221,8 +221,38 @@ def _fetch_json(
     raise RuntimeError("Unreachable provider retry state")
 
 
+class ProviderMessage(ValueError):
+    """A provider failure this project's own readers describe, so the text is safe to show.
+
+    The message names what the response lacked and quotes no request, which is what makes
+    it reportable where a provider's own exception text — which may carry a URL and a
+    session token — is not.
+    """
+
+
+class ProviderShapeError(ProviderMessage):
+    """A provider response that no longer carries the fields an adapter reads.
+
+    Reserved for a response that arrived and proved to be shaped differently: a renamed
+    column, a withdrawn property, a key that is no longer there. Asking again cannot
+    change that answer, so the caller records one issue and stops.
+    """
+
+
+class ProviderUnavailableError(ProviderMessage):
+    """A provider that answered with nothing at all — an outage, not a release change.
+
+    yfinance hides its own exceptions by default and returns an empty frame for a failed
+    timezone fetch, a missing-prices error and a Yahoo outage alike, so "nothing came
+    back" has to stay retryable or a five-minute hiccup reads as a permanent drift.
+    """
+
+
 def _error_label(exc: Exception) -> str:
-    # Exception bodies and URLs may contain API keys. Never log str(exc).
+    # Exception bodies and URLs may contain API keys. Never log str(exc) — except for a
+    # message this project wrote itself, which names no request.
+    if isinstance(exc, ProviderMessage):
+        return str(exc)
     return f"HTTP {exc.code}" if isinstance(exc, HTTPError) else type(exc).__name__
 
 

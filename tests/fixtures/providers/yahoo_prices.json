@@ -1,0 +1,88 @@
+{
+  "symbol": "AAPL",
+  "history": {
+    "timezone": "America/New_York",
+    "index": [
+      "2026-09-04",
+      "2026-09-08",
+      "2026-09-09",
+      "2026-09-10",
+      "2026-09-11"
+    ],
+    "columns": {
+      "Open": [
+        99.0,
+        100.5,
+        101.0,
+        98.5,
+        101.5
+      ],
+      "High": [
+        101.0,
+        102.5,
+        102.0,
+        100.5,
+        103.5
+      ],
+      "Low": [
+        98.0,
+        99.5,
+        98.0,
+        97.5,
+        100.5
+      ],
+      "Close": [
+        100.0,
+        101.5,
+        99.75,
+        100.25,
+        103.0
+      ],
+      "Adj Close": [
+        99.0,
+        100.485,
+        98.7525,
+        99.2475,
+        103.0
+      ],
+      "Volume": [
+        1100000,
+        1200000,
+        1300000,
+        1400000,
+        1500000
+      ],
+      "Dividends": [
+        0.0,
+        0.0,
+        0.3,
+        0.0,
+        0.0
+      ],
+      "Stock Splits": [
+        0.0,
+        0.0,
+        0.0,
+        2.0,
+        0.0
+      ]
+    }
+  },
+  "history_metadata": {
+    "currency": "USD",
+    "symbol": "AAPL",
+    "exchangeName": "NMS",
+    "fullExchangeName": "NasdaqGS",
+    "instrumentType": "EQUITY",
+    "firstTradeDate": 345479400,
+    "regularMarketTime": 1789156800,
+    "gmtoffset": -14400,
+    "timezone": "EDT",
+    "exchangeTimezoneName": "America/New_York",
+    "regularMarketPrice": 103.0,
+    "chartPreviousClose": 100.25,
+    "priceHint": 2,
+    "dataGranularity": "1d",
+    "range": ""
+  }
+}

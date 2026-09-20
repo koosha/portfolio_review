@@ -315,12 +315,18 @@ def main(argv=None):
         parser.error("Another app is already using this data directory.")
     store = Store(directory)
     browser = ChromeCompanion(store)
-    from portfolio_lab.config import load_config
+    from portfolio_lab.config import load_config, write_config
     from portfolio_research.service import ResearchService, default_config
 
     default_path = directory / "research-config.json"
     config_path = args.research_config or (str(default_path) if default_path.is_file() else None)
     config = load_config(config_path) if config_path else default_config(directory)
+    if config_path is None:
+        # The settings a first run resolved are written down where every documented
+        # recovery command looks for them. Backup, restore, export and migrate all default
+        # --config to this file, so a data directory the app made and never wrote to could
+        # not be backed up at all — discovered only at the moment a backup was needed.
+        write_config(default_path, config)
     research = ResearchService(config, companion=browser, recover=True)
     server = ThreadingHTTPServer(
         ("127.0.0.1", args.port), make_handler(store, browser, args.port, research)

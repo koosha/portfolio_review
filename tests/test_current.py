@@ -12,7 +12,7 @@ from portfolio.storage import Store
 from portfolio_research.adapter import _receipt_before, account_id, load_collector
 from portfolio_research.current import current_snapshot
 from portfolio_research.service import default_config
-from tests.test_normalize import (
+from tests.support.normalization import (
     A_ROWS,
     B_ROWS,
     CADUSD,

@@ -19,6 +19,8 @@ from portfolio_lab.pipeline import load_inputs, replay_analysis, save_analysis
 from portfolio_research.application import analyze_review
 from portfolio_research.fx import FxTable
 from portfolio_research.service import default_config
+from tests.support.market_data_adapter import FakeTicker
+from tests.support.normalization import SUNDAY_GENERATED, SUNDAY_RECEIPT, cad_table, usd_table
 from tests.test_enrichment import (
     A_ROWS,
     B_ROWS,
@@ -27,8 +29,6 @@ from tests.test_enrichment import (
     issuer_lookup,
     listing_metadata,
 )
-from tests.test_market_data import FakeTicker
-from tests.test_normalize import SUNDAY_GENERATED, SUNDAY_RECEIPT, cad_table, usd_table
 
 # What a preview needs from the archive to answer without reaching a provider.
 FROZEN_RESEARCH = ("research_inputs", "coverage", "research", "universe")

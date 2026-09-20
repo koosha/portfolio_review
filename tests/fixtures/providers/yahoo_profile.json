@@ -1,0 +1,33 @@
+{
+  "symbol": "AAPL",
+  "info": {
+    "longName": "Example Devices Inc.",
+    "shortName": "Example Devices",
+    "sector": "Technology",
+    "industry": "Consumer Electronics",
+    "country": "United States",
+    "financialCurrency": "USD",
+    "currency": "USD",
+    "exchange": "NMS",
+    "quoteType": "EQUITY",
+    "marketCap": 10300000000,
+    "sharesOutstanding": 100000000
+  },
+  "history_metadata": {
+    "currency": "USD",
+    "symbol": "AAPL",
+    "exchangeName": "NMS",
+    "fullExchangeName": "NasdaqGS",
+    "instrumentType": "EQUITY",
+    "firstTradeDate": 345479400,
+    "regularMarketTime": 1789156800,
+    "gmtoffset": -14400,
+    "timezone": "EDT",
+    "exchangeTimezoneName": "America/New_York",
+    "regularMarketPrice": 103.0,
+    "chartPreviousClose": 100.25,
+    "priceHint": 2,
+    "dataGranularity": "1d",
+    "range": ""
+  }
+}

@@ -24,12 +24,13 @@ export async function until(predicate, description, timeout = 30000) {
 
 const savedRunRendered = $ => $('draft-state').textContent === 'Saved';
 
-// Starts `serverScript` (Python source receiving a fresh temporary directory as argv[1]),
-// reads the first JSON line it prints (which must include `port`), loads the served page
-// into JSDOM with the same shims as the browser-free integration tests, evaluates
-// research.js and app.js, then waits for `ready($, window)` before returning.
-export async function launch(t, serverScript, {ready = savedRunRendered} = {}) {
-  const directory = await mkdtemp(join(tmpdir(), 'portfolio-review-dom-http-'));
+// Starts `serverScript` (Python source receiving a data directory as argv[1]) and reads
+// the first JSON line it prints, which must include `port`. Pass `directory` to serve an
+// existing data directory — a restarted application rather than a fresh one — in which
+// case the caller owns that directory and this never removes it. `stop()` ends the
+// process without waiting for the test to finish, which is how a restart is staged.
+export async function boot(t, serverScript, {directory: given = null} = {}) {
+  const directory = given || (await mkdtemp(join(tmpdir(), 'portfolio-review-dom-http-')));
   const child = spawn(python, ['-u', '-c', serverScript, directory], {
     cwd: project, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -37,15 +38,15 @@ export async function launch(t, serverScript, {ready = savedRunRendered} = {}) {
   child.stdout.on('data', chunk => { output += chunk; });
   child.stderr.on('data', chunk => { errors = (errors + chunk).slice(-8000); });
   child.on('error', error => { spawnError = error; });
-  let dom;
+  const stop = async (signal = 'SIGTERM') => {
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    child.kill(signal);
+    await exited;
+  };
   t.after(async () => {
-    dom?.window.close();
-    if (child.pid && child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise(resolve => child.once('exit', resolve));
-      child.kill('SIGTERM');
-      await exited;
-    }
-    await rm(directory, {recursive: true, force: true});
+    await stop();
+    if (!given) await rm(directory, {recursive: true, force: true});
   });
   await until(() => {
     if (spawnError) throw new Error(`Python test server could not start: ${spawnError.message}`);
@@ -53,7 +54,24 @@ export async function launch(t, serverScript, {ready = savedRunRendered} = {}) {
     return output.includes('\n');
   }, 'synthetic server initialization', 60000);
   const info = JSON.parse(output.split('\n')[0]);
-  const origin = `http://127.0.0.1:${info.port}`;
+  return {child, directory, info, origin: `http://127.0.0.1:${info.port}`, stop,
+    stderr: () => errors};
+}
+
+// Loads the page served at `origin` into JSDOM with the same shims as the browser-free
+// integration tests, evaluates research.js and app.js, then waits for `ready($, window)`.
+// Called twice against one origin, it models two tabs open on the same application.
+//
+// `intercept(path, options)` sees every request the page makes before it is sent: return
+// a Response to answer it without reaching the service, or nothing to let it through.
+// That is how a case models a service that fails a request the page depends on, which no
+// amount of driving a healthy page can reach. `expectError` accepts the error banner such
+// a case is checking for; every other caller still asserts the banner stays hidden.
+export async function open(t, origin, {
+  ready = savedRunRendered, intercept = null, expectError = false,
+} = {}) {
+  let dom;
+  t.after(() => dom?.window.close());
   const response = await fetch(origin);
   assert.equal(response.status, 200);
   const runtimeErrors = [];
@@ -69,10 +87,19 @@ export async function launch(t, serverScript, {ready = savedRunRendered} = {}) {
   window.HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
   window.HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
   window.HTMLElement.prototype.scrollIntoView = function () {};
-  window.fetch = (path, options = {}) => fetch(new URL(path, origin), {
-    ...options,
-    headers: {...options.headers, Origin: origin},
-  });
+  // jsdom performs no layout, so scrolling is modelled as the offset the page last asked
+  // for. That is enough to assert a view change returns to the top; it says nothing about
+  // whether anything would actually move, or about smooth-scroll behavior.
+  Object.defineProperty(window, 'scrollY', {value: 0, writable: true, configurable: true});
+  window.scrollTo = (...args) => {
+    const top = typeof args[0] === 'object' && args[0] !== null ? args[0].top : args[1];
+    window.scrollY = Number(top) || 0;
+  };
+  window.fetch = async (path, options = {}) => {
+    const answer = intercept ? await intercept(String(path), options) : undefined;
+    if (answer !== undefined && answer !== null) return answer;
+    return fetch(new URL(path, origin), {...options, headers: {...options.headers, Origin: origin}});
+  };
   window.__stateFunctions = stateFunctions;
   const researchPath = window.document.querySelector('script[src$="research.js"]').src;
   const scriptResponse = await fetch(researchPath);
@@ -86,9 +113,34 @@ export async function launch(t, serverScript, {ready = savedRunRendered} = {}) {
   assert.equal(collectorResponse.status, 200);
   window.eval(`(() => {\n${await collectorResponse.text()}\n})();`);
   const $ = id => window.document.getElementById(id);
+  // Every status line the page announces, not just the one a poll happened to sample.
+  // announce() writes one line over the last, so a message can be replaced between two
+  // 25 ms ticks of `until` and a case waiting for it would wait forever. Recording each
+  // mutation makes "the page said this" a fact about the run rather than about timing.
+  const announcements = [];
+  window.__announcements = announcements;
+  const status = $('research-status');
+  if (status) {
+    const observer = new window.MutationObserver(records => {
+      for (const record of records) {
+        const added = [...record.addedNodes].map(node => node.textContent).join('');
+        const text = record.type === 'characterData' ? record.target.textContent : added;
+        if (text) announcements.push(text);
+      }
+    });
+    observer.observe(status, {childList: true, characterData: true, subtree: true});
+    t.after(() => observer.disconnect());
+  }
   await until(() => ready($, window), 'initial page render');
-  assert.equal($('research-error').hidden, true, $('research-error').textContent);
-  return {window, $, origin, runtimeErrors, info};
+  if (!expectError) assert.equal($('research-error').hidden, true, $('research-error').textContent);
+  return {window, $, origin, runtimeErrors, announcements};
+}
+
+// One disposable application with one page open on it: the shape every existing caller
+// uses. `options` are shared by both halves, so `directory` and `ready` both apply.
+export async function launch(t, serverScript, options = {}) {
+  const server = await boot(t, serverScript, options);
+  return {...server, ...(await open(t, server.origin, options))};
 }
 
 export function namedInput(window, labelText) {

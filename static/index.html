@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Portfolio Review</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/style.css">
 <script src="/app.js" defer>
 </script>
@@ -49,7 +50,7 @@
 </div>
 <div class="header-actions">
 <span id="research-mode" class="badge">Loading source…</span>
-<button id="update-analyze">Update &amp; analyze</button>
+<button id="update-analyze" disabled>Update &amp; analyze</button>
 <button id="cancel-workflow" class="quiet" hidden>Cancel</button>
 </div>
 </header>
@@ -73,7 +74,7 @@
 <div class="draft-actions">
 <p id="research-status" role="status" aria-live="polite">Loading research workspace…</p>
 <div>
-<button id="recalculate" class="secondary">Recalculate</button>
+<button id="recalculate" class="secondary" disabled>Recalculate</button>
 <button id="save-run" class="secondary" disabled>Save run</button>
 <button id="reset-draft" class="quiet">Reset</button>
 </div>
@@ -489,7 +490,7 @@
 <label>Observed prices CSV<input id="evaluation-file" type="file" accept=".csv,text/csv">
 </label>
 </div>
-<button id="evaluate-run" class="secondary">Evaluate saved forecasts</button>
+<button id="evaluate-run" class="secondary" disabled>Evaluate saved forecasts</button>
 <div id="evaluation-results">
 </div>
 </section>
@@ -550,8 +551,8 @@
 </label>
 </div>
 <div class="actions">
-<button id="monthly-review" class="secondary">Run month-end review</button>
-<button id="refresh-research" class="secondary">Refresh inputs &amp; run review</button>
+<button id="monthly-review" class="secondary" disabled>Run month-end review</button>
+<button id="refresh-research" class="secondary" disabled>Refresh inputs &amp; run review</button>
 </div>
 </section>
 <section class="panel">
@@ -564,7 +565,7 @@
 <div id="supplemental-json">
 </div>
 </details>
-<button id="save-supplemental" class="secondary">Save supplemental facts</button>
+<button id="save-supplemental" class="secondary" disabled>Save supplemental facts</button>
 </section>
 <section class="panel">
 <h2>Import research evidence</h2>
@@ -580,7 +581,7 @@
 </label>
 <label>CSV file<input id="import-file" type="file" accept=".csv,text/csv">
 </label>
-<button id="import-csv" class="secondary">Validate &amp; import</button>
+<button id="import-csv" class="secondary" disabled>Validate &amp; import</button>
 </div>
 <p class="muted">Inputs are validated before a new review uses them. Company evidence can also be entered in Research.</p>
 </section>
@@ -638,7 +639,7 @@
 <div id="resolved-diff">
 </div>
 <div class="actions">
-<button id="save-settings">Save settings for future reviews</button>
+<button id="save-settings" disabled>Save settings for future reviews</button>
 <span class="muted">Recalculate previews changes on the current frozen run.</span>
 </div>
 </section>

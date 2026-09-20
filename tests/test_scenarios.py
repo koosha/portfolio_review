@@ -169,6 +169,22 @@ class JointSetTests(unittest.TestCase):
         missing = [i for i in frame.attrs["issues"] if i["code"] == "MISSING_FX_STATE"]
         self.assertEqual([i["security_id"] for i in missing], ["JPA"])
 
+    def test_a_listing_with_no_quote_currency_is_named_rather_than_quietly_dropped(self):
+        """A price frame can arrive complete and still carry no currency.
+
+        Nothing upstream refuses that: the price capability reports ``ok`` because the
+        rows are there, and the rows are genuinely usable in whatever the listing quotes.
+        What cannot be done is restating them in the presentation currency, so the
+        security is excluded here — and an exclusion the owner is not told about is the
+        failure mode worth pinning. A provider that renames its metadata currency key
+        must cost a named security, never a silently shorter portfolio.
+        """
+        frame = generate(securities(security("AAA"), security("UNQ", currency=None)))
+        self.assertEqual(set(frame.security_id), {"AAA"})
+        unpriced = [i for i in frame.attrs["issues"] if i["code"] == "MISSING_QUOTE_CURRENCY"]
+        self.assertEqual([i["security_id"] for i in unpriced], ["UNQ"])
+        self.assertIn("presentation-currency", unpriced[0]["message"])
+
     def test_cash_is_excluded_because_its_return_stays_an_explicit_setting(self):
         frame = generate(
             securities(

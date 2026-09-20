@@ -1,0 +1,449 @@
+{
+  "cik": 1234501,
+  "entityName": "Example Devices Inc.",
+  "facts": {
+    "us-gaap": {
+      "Assets": {
+        "label": "Assets",
+        "description": "Total assets.",
+        "units": {
+          "USD": [
+            {
+              "end": "2024-12-31",
+              "val": 860000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "end": "2024-12-31",
+              "val": 860000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "end": "2025-12-31",
+              "val": 920000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "CashAndCashEquivalentsAtCarryingValue": {
+        "label": "Cash and Cash Equivalents, at Carrying Value",
+        "description": "Cash and cash equivalents.",
+        "units": {
+          "USD": [
+            {
+              "end": "2024-12-31",
+              "val": 150000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "end": "2024-12-31",
+              "val": 150000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "end": "2025-12-31",
+              "val": 180000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "GrossProfit": {
+        "label": "Gross Profit",
+        "description": "Revenue less cost of goods sold.",
+        "units": {
+          "USD": [
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 395000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 395000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "start": "2025-01-01",
+              "end": "2025-12-31",
+              "val": 430000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "Liabilities": {
+        "label": "Liabilities",
+        "description": "Total liabilities.",
+        "units": {
+          "USD": [
+            {
+              "end": "2024-12-31",
+              "val": 470000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "end": "2024-12-31",
+              "val": 470000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "end": "2025-12-31",
+              "val": 500000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "LongTermDebtAndFinanceLeaseObligationsIncludingCurrentMaturities": {
+        "label": "Long-Term Debt and Finance Lease Obligations, Including Current Maturities",
+        "description": "Total debt including current maturities.",
+        "units": {
+          "USD": [
+            {
+              "end": "2024-12-31",
+              "val": 250000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "end": "2024-12-31",
+              "val": 250000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "end": "2025-12-31",
+              "val": 240000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "NetCashProvidedByUsedInOperatingActivities": {
+        "label": "Net Cash Provided by (Used in) Operating Activities",
+        "description": "Cash generated by operating activities.",
+        "units": {
+          "USD": [
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 231000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 231000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "start": "2025-01-01",
+              "end": "2025-12-31",
+              "val": 258000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "NetIncomeLoss": {
+        "label": "Net Income (Loss)",
+        "description": "Consolidated net income.",
+        "units": {
+          "USD": [
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 141000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 141000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "start": "2025-01-01",
+              "end": "2025-12-31",
+              "val": 160000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "NetIncomeLossAvailableToCommonStockholdersBasic": {
+        "label": "Net Income (Loss) Available to Common Stockholders, Basic",
+        "description": "Net income attributable to common shareholders.",
+        "units": {
+          "USD": [
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 135000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 135000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "start": "2025-01-01",
+              "end": "2025-12-31",
+              "val": 154000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "OperatingIncomeLoss": {
+        "label": "Operating Income (Loss)",
+        "description": "Operating income.",
+        "units": {
+          "USD": [
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 188000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 188000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "start": "2025-01-01",
+              "end": "2025-12-31",
+              "val": 210000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "PaymentsToAcquirePropertyPlantAndEquipment": {
+        "label": "Payments to Acquire Property, Plant, and Equipment",
+        "description": "Gross capital expenditure.",
+        "units": {
+          "USD": [
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 64000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 64000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "start": "2025-01-01",
+              "end": "2025-12-31",
+              "val": 70000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "Revenues": {
+        "label": "Revenues",
+        "description": "Total revenues.",
+        "units": {
+          "USD": [
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 902000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "start": "2024-01-01",
+              "end": "2024-12-31",
+              "val": 902000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "start": "2025-01-01",
+              "end": "2025-12-31",
+              "val": 980000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      },
+      "StockholdersEquity": {
+        "label": "Stockholders' Equity Attributable to Parent",
+        "description": "Total shareholders' equity.",
+        "units": {
+          "USD": [
+            {
+              "end": "2024-12-31",
+              "val": 390000000,
+              "accn": "0001234501-25-000003",
+              "fy": 2024,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2025-02-12"
+            },
+            {
+              "end": "2024-12-31",
+              "val": 390000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            },
+            {
+              "end": "2025-12-31",
+              "val": 420000000,
+              "accn": "0001234501-26-000004",
+              "fy": 2025,
+              "fp": "FY",
+              "form": "10-K",
+              "filed": "2026-02-10"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
