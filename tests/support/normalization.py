@@ -1,8 +1,16 @@
 """Synthetic captures, listings and FX observations shared by the normalization modules.
 
-One USD-quoted Yahoo capture (version 1, no currency column) and one CAD-quoted capture
-(version 2, with quote symbols), plus the listing metadata and dated rates the gate needs
-to decide what currency a captured value is in and what it is worth in the base currency.
+Two accounts, shaped like the two statements a review actually meets. ``usd_table`` is a
+version-1 capture that labels nothing, so the currency it reports values in is the
+review's own base currency -- and it holds a Toronto listing quoted in CAD whose value
+the source has already converted to USD, which is the shape the owner's real captures
+have. ``cad_table`` is a version-2 capture carrying quote symbols and a currency column
+that states CAD, so its values are converted once at a dated rate; it holds a London
+listing quoted in pence.
+
+Between them they cover every currency question the normalization answers: a USD
+listing, a Toronto listing, a pence listing, a source that converted for us and one that
+did not, and a rollup of both into USD.
 """
 
 from decimal import Decimal
@@ -83,12 +91,25 @@ def usd_table(rows):
     }
 
 
-def cad_table(rows):
-    """Yahoo CAD portfolio capture with quote symbols, version 2."""
-    rows = [[*row, row[0]] for row in rows] + [["Total Cash", "", "50", "", ""]]
+def cad_table(rows, cash_currency="CAD"):
+    """Yahoo CAD portfolio capture with quote symbols and a stated currency, version 2.
+
+    ``cash_currency=""`` leaves the cash row unlabelled, so cash has to follow the
+    currency its account's holdings were established in.
+    """
+    rows = [[*row, "CAD", row[0]] for row in rows] + [
+        ["Total Cash", "", "50", "", cash_currency, ""]
+    ]
     return {
         "method": "yahoo-holdings-table-v1",
-        "headers": ["Symbol", "Shares", "Last Price", "Market Value", "Yahoo quote symbol"],
+        "headers": [
+            "Symbol",
+            "Shares",
+            "Last Price",
+            "Market Value",
+            "Currency",
+            "Yahoo quote symbol",
+        ],
         "rows": rows,
         "page_count": 1,
         "expected_count": len(rows),
@@ -97,6 +118,10 @@ def cad_table(rows):
     }
 
 
+# A reports in USD: AAPL is quoted and valued in USD, and RY.TO is quoted in CAD but
+# valued in USD already -- 10 x 285.20 CAD x 0.7211 = 2056.30. B reports in CAD: RY.TO is
+# quoted and valued in CAD, and VOD.L is quoted in pence (100 x 128.75p = 128.75 GBP) and
+# valued in CAD at 1.8250.
 A_ROWS = [["RY.TO", "10", "285.20", "2056.30"], ["AAPL", "2", "300", "600"]]
 B_ROWS = [["RY.TO", "5", "285.20", "1426.00"], ["VOD.L", "100", "128.75", "235.00"]]
 

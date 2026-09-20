@@ -11,9 +11,8 @@ import pandas as pd
 from portfolio.storage import Store
 from portfolio_lab import metrics
 from portfolio_lab.pipeline import load_inputs
-from portfolio_research.adapter import account_id, load_collector
+from portfolio_research.adapter import load_collector
 from portfolio_research.fx import FxTable
-from portfolio_research.identity import exception_key
 from portfolio_research.normalize import normalize_bundle
 from portfolio_research.service import default_config
 from tests.support.normalization import (
@@ -32,6 +31,8 @@ from tests.support.normalization import (
     issuer_lookup,
     usd_table,
 )
+
+MISMATCH = "VALUE_ARITHMETIC_MISMATCH"
 
 
 class NormalizeGateTests(unittest.TestCase):
@@ -152,22 +153,28 @@ class NormalizeGateTests(unittest.TestCase):
         a_ry, a_aapl = held[(self.a, "RY.TO")], held[(self.a, "AAPL")]
         b_ry, b_vod = held[(self.b, "RY.TO")], held[(self.b, "VOD.L")]
 
+        # A states no currency, so it reports in the base currency. RY.TO is quoted in
+        # CAD there and already valued in USD, so no rate is applied to its value and the
+        # price that reconciles is the one the value implies.
         self.assertEqual(a_ry["reported_currency"], "USD")
-        self.assertEqual(a_ry["value_currency_basis"], "arithmetic_fx")
+        self.assertEqual(a_ry["value_currency_basis"], "presentation")
         self.assertEqual(a_ry["quote_currency"], "CAD")
         self.assertEqual(a_ry["quote_unit_factor"], 1)
         self.assertEqual(a_ry["market_value_usd"], "2056.30")
+        self.assertEqual(a_ry["price_usd"], "205.63")
         for field in ("fx_rate", "fx_pair", "fx_observation_date", "fx_source_id"):
             self.assertIsNone(a_ry[field], field)
 
         self.assertEqual(a_aapl["reported_currency"], "USD")
-        self.assertEqual(a_aapl["value_currency_basis"], "arithmetic_quote")
+        self.assertEqual(a_aapl["value_currency_basis"], "presentation")
+        self.assertEqual(a_aapl["quote_currency"], "USD")
         self.assertEqual(a_aapl["market_value_usd"], "600")
         self.assertEqual(a_aapl["price_usd"], "300")
         self.assertIsNone(a_aapl["fx_rate"])
 
+        # B labels its values CAD, so each one is converted exactly once at the dated rate.
         self.assertEqual(b_ry["reported_currency"], "CAD")
-        self.assertEqual(b_ry["value_currency_basis"], "arithmetic_quote")
+        self.assertEqual(b_ry["value_currency_basis"], "row")
         self.assertEqual(Decimal(b_ry["market_value_usd"]), Decimal("1426.00") * CADUSD)
         self.assertEqual(b_ry["market_value_usd"], "1028.288600")
         self.assertEqual(b_ry["fx_rate"], "0.7211")
@@ -179,9 +186,13 @@ class NormalizeGateTests(unittest.TestCase):
         self.assertEqual(b_vod["quote_unit_factor"], 100)
         self.assertEqual(b_vod["price_major"], "1.2875")
         self.assertEqual(b_vod["reported_currency"], "CAD")
-        self.assertEqual(b_vod["value_currency_basis"], "arithmetic_fx")
+        self.assertEqual(b_vod["value_currency_basis"], "row")
         self.assertEqual(b_vod["market_value_usd"], format(Decimal("235.00") * CADUSD, "f"))
         self.assertEqual(b_vod["fx_pair"], "CADUSD")
+
+        # Nothing in either account is a currency question, so nothing is asked.
+        self.assertEqual(bundle["exceptions"], [])
+        self.assertEqual([i for i in bundle["issues"] if i["code"] == MISMATCH], [])
 
         for row in held.values():
             self.assertEqual(row["presentation_currency"], "USD")
@@ -214,7 +225,7 @@ class NormalizeGateTests(unittest.TestCase):
         self.assertEqual(a["currency_basis"], "inferred_from_positions")
         self.assertEqual(a["cash"], "100")
         self.assertEqual(b["reported_currency"], "CAD")
-        self.assertEqual(b["currency_basis"], "inferred_from_positions")
+        self.assertEqual(b["currency_basis"], "captured_cash")
         self.assertEqual(b["reported_cash"], "50")
         self.assertEqual(b["cash"], format(Decimal("50") * CADUSD, "f"))
         self.assertEqual(b["fx_pair"], "CADUSD")
@@ -245,8 +256,10 @@ class NormalizeGateTests(unittest.TestCase):
         self.assertEqual(normalization["method_version"], "usd-presentation-1")
         self.assertEqual(normalization["unconverted_positions"], 0)
         self.assertEqual(normalization["unconverted_accounts"], 0)
+        # Only CADUSD converts anything now: VOD.L's value is stated in CAD, so the
+        # GBP leg is never a conversion and never enters the evidence trail.
         used = {(row["pair"], row["date"]) for row in bundle["fx_observations"]}
-        self.assertEqual(used, {("CADUSD", FX_DAY), ("GBPCAD", FX_DAY)})
+        self.assertEqual(used, {("CADUSD", FX_DAY)})
 
         reconciliation = metrics.reconcile(bundle, self.config)
         codes = self.codes(reconciliation["issues"])
@@ -258,19 +271,21 @@ class NormalizeGateTests(unittest.TestCase):
     def test_stale_fx_leaves_foreign_values_unconverted_with_one_exception_per_pair(self):
         bundle = self.load(fx=fx_table(STALE_DAY))
         stale = [row for row in bundle["exceptions"] if row["code"] == "STALE_FX"]
-        # One per pair and date: B/RY.TO and A/RY.TO share CADUSD; VOD.L needs GBPCAD.
-        self.assertEqual(sorted(row["pair"] for row in stale), ["CADUSD", "GBPCAD"])
+        # One per pair and date. Only B needs a rate at all: it labels its values CAD,
+        # and both of its holdings share CADUSD. A reports in the base currency already.
+        self.assertEqual(sorted(row["pair"] for row in stale), ["CADUSD"])
         for record in stale:
             self.assertEqual(record["scope"], "fx")
             self.assertEqual(record["requested_date"], RECEIPT_DAY)
             self.assertEqual(record["observation_date"], STALE_DAY)
             self.assertEqual(record["resolution"]["kind"], "fx_manual")
             self.assertIsNone(record["source_id"])
-        # A stale rate never establishes a value currency, and nothing asks for attestation.
-        self.assertNotIn("UNKNOWN_VALUE_CURRENCY", self.codes(bundle["exceptions"]))
-        self.assertIsNone(self.positions(bundle)[(self.a, "RY.TO")]["reported_currency"])
-        self.assertEqual(bundle["normalization"]["unconverted_positions"], 3)
+        # A stale rate is a rate to refresh, never a question about a currency.
+        self.assertEqual(self.codes(bundle["exceptions"]), ["STALE_FX"])
         held = self.positions(bundle)
+        self.assertEqual(held[(self.a, "RY.TO")]["reported_currency"], "USD")
+        self.assertEqual(held[(self.a, "RY.TO")]["market_value_usd"], "2056.30")
+        self.assertEqual(bundle["normalization"]["unconverted_positions"], 2)
         self.assertEqual(held[(self.a, "AAPL")]["market_value_usd"], "600")
         self.assertIsNone(held[(self.b, "RY.TO")]["market_value_usd"])
         self.assertIsNone(held[(self.b, "RY.TO")]["market_value"])
@@ -285,16 +300,17 @@ class NormalizeGateTests(unittest.TestCase):
     def test_missing_fx_yields_missing_fx_exception(self):
         bundle = self.load(fx=FxTable())
         missing = [row for row in bundle["exceptions"] if row["code"] == "MISSING_FX"]
-        # CADUSD for the CAD-valued holdings; GBPUSD for VOD.L, whose value currency no
-        # observation could establish. Neither asks the owner to attest a currency.
-        self.assertEqual([row["pair"] for row in missing], ["CADUSD", "GBPUSD"])
-        self.assertNotIn("UNKNOWN_VALUE_CURRENCY", self.codes(bundle["exceptions"]))
+        # CADUSD for B's CAD-labelled values. It asks for a rate, never for an attestation.
+        self.assertEqual([row["pair"] for row in missing], ["CADUSD"])
+        self.assertEqual(self.codes(bundle["exceptions"]), ["MISSING_FX"])
         self.assertEqual(missing[0]["key"], missing[0]["key"].lower())
         self.assertEqual(len(missing[0]["key"]), 40)
+        # B's two CAD-reported rows, and A's RY.TO: quoted in CAD and taken as USD, with
+        # no rate to check that against, so it is withheld instead of counted at 1:1.
         self.assertEqual(bundle["normalization"]["unconverted_positions"], 3)
         self.assertEqual(self.positions(bundle)[(self.a, "AAPL")]["market_value_usd"], "600")
 
-    def test_attested_position_currency_overrides_arithmetic(self):
+    def test_an_attested_position_currency_overrides_the_base_currency(self):
         supplemental = {
             "version": 1,
             "accounts": [
@@ -315,42 +331,51 @@ class NormalizeGateTests(unittest.TestCase):
         self.assertEqual(a_ry["fx_pair"], "CADUSD")
         a_aapl = self.positions(bundle)[(self.a, "AAPL")]
         self.assertEqual(a_aapl["value_currency_basis"], "attested")
-        self.assertEqual(a_aapl["price_usd"], "300")
-        codes = self.codes(metrics.reconcile(bundle, self.config)["issues"])
-        self.assertIn("position_arithmetic", codes)
+        # AAPL is quoted in USD and now attested as valued in CAD, so the source is taken
+        # to have converted and the price follows the value it reported.
+        self.assertEqual(a_aapl["price_usd"], "216.3300")
+        # This attestation contradicts what A actually captured, and saying so is the
+        # whole job of the arithmetic now: a warning about the rows, not a question.
+        mismatched = [i for i in bundle["issues"] if i["code"] == MISMATCH]
+        self.assertEqual(len(mismatched), 2)
+        self.assertTrue(all(issue["severity"] == "warning" for issue in mismatched))
+        self.assertNotIn("UNKNOWN_VALUE_CURRENCY", self.codes(bundle["exceptions"]))
 
-    def test_ratio_matching_nothing_is_an_unknown_value_currency_exception(self):
-        snapshots = self.publish(
-            A_ROWS,
-            [B_ROWS[0], ["VOD.L", "100", "128.75", "500.00"]],
-            timestamp=LATER_RECEIPT,
-        )
-        bundle = self.load()
-        unknown = [row for row in bundle["exceptions"] if row["code"] == "UNKNOWN_VALUE_CURRENCY"]
-        self.assertEqual(len(unknown), 1)
-        record = unknown[0]
-        self.assertEqual(record["scope"], "position")
-        self.assertEqual(record["severity"], "error")
-        self.assertEqual(record["source_id"], self.b)
-        self.assertEqual(record["snapshot_id"], snapshots[self.b])
-        self.assertEqual(record["account_id"], account_id(self.b))
-        self.assertEqual(record["raw_symbol"], "VOD.L")
-        self.assertEqual(record["quote_currency"], "GBp")
-        self.assertEqual(Decimal(record["ratio"]).quantize(Decimal("0.0001")), Decimal("3.8835"))
-        self.assertEqual(record["resolution"]["kind"], "account_currency")
-        self.assertIn("position_currency", record["resolution"]["fields"])
-        self.assertEqual(record["proposed"]["source_id"], self.b)
-        self.assertEqual(record["proposed"]["snapshot_id"], snapshots[self.b])
-        self.assertIn("position_currency", record["proposed"])
-        self.assertEqual(
-            record["key"],
-            exception_key("UNKNOWN_VALUE_CURRENCY", self.b, snapshots[self.b], "VOD.L"),
-        )
-        vod = self.positions(bundle)[(self.b, "VOD.L")]
-        self.assertIsNone(vod["reported_currency"])
-        self.assertIsNone(vod["market_value_usd"])
-        self.assertEqual(bundle["normalization"]["unconverted_positions"], 1)
-        self.assertEqual(bundle["normalization"]["unconverted_accounts"], 1)
+    def test_a_symbol_whose_venue_is_unknown_asks_about_the_listing_only(self):
+        """Neither a listing nor a venue we know: the listing is open, the value is not.
+
+        This is the one place the old ratio matching used to raise a currency question.
+        There is nothing to ask about now -- the account already states what it reports
+        its values in, so the only thing still unknown is which listing this is.
+        """
+        self.publish([*A_ROWS, ["ABC.DE", "4", "25", "100"]], B_ROWS, timestamp=LATER_RECEIPT)
+        with patch("portfolio_research.market_listings.search_listings", return_value=[]):
+            bundle = self.load()
+        row = self.positions(bundle)[(self.a, "ABC.DE")]
+        self.assertIsNone(row["quote_currency"])
+        self.assertIsNone(row["quote_unit_factor"])
+        self.assertEqual(row["reported_currency"], "USD")
+        self.assertEqual(row["value_currency_basis"], "presentation")
+        self.assertEqual(row["market_value_usd"], "100")
+        open_codes = self.codes(bundle["exceptions"])
+        self.assertEqual(open_codes, ["UNRESOLVED_LISTING"])
+        self.assertEqual(bundle["exceptions"][0]["raw_symbol"], "ABC.DE")
+        self.assertEqual(bundle["exceptions"][0]["resolution"]["kind"], "security_listing")
+        self.assertNotIn("UNKNOWN_VALUE_CURRENCY", open_codes)
+
+    def test_a_venue_suffix_never_decides_what_a_value_is_reported_in(self):
+        """The ticker answers the quote currency; the account answers the value's.
+
+        Conflating the two is what would silently halve the owner's Toronto holdings:
+        they are quoted in CAD and reported in USD on the same statement.
+        """
+        a_ry = self.positions(self.load())[(self.a, "RY.TO")]
+        self.assertEqual(a_ry["quote_currency"], "CAD")
+        self.assertEqual(a_ry["reported_currency"], "USD")
+        self.assertEqual(a_ry["reported_market_value"], "2056.30")
+        self.assertEqual(a_ry["market_value_usd"], "2056.30")
+        # Converting a second time would land here instead.
+        self.assertNotEqual(a_ry["market_value_usd"], format(Decimal("2056.30") * CADUSD, "f"))
 
     def test_supplemental_security_mapping_stays_authoritative(self):
         supplemental = {
@@ -374,7 +399,8 @@ class NormalizeGateTests(unittest.TestCase):
         held = self.positions(bundle)
         self.assertEqual(held[(self.a, "RY.TO")]["security_id"], "security-ry")
         self.assertEqual(held[(self.b, "RY.TO")]["security_id"], "RY.TO")
-        self.assertEqual(held[(self.a, "RY.TO")]["value_currency_basis"], "arithmetic_fx")
+        self.assertEqual(held[(self.a, "RY.TO")]["value_currency_basis"], "presentation")
+        self.assertEqual(held[(self.a, "RY.TO")]["market_value_usd"], "2056.30")
         self.assertEqual(bundle["identity"]["mapped"], 1)
 
     def test_display_symbol_with_several_listings_is_an_ambiguous_exception(self):
@@ -409,19 +435,42 @@ class NormalizeGateTests(unittest.TestCase):
         self.assertEqual(bundle["identity"]["ambiguous"], 1)
         shop = self.positions(bundle)[(self.a, "SHOP")]
         self.assertTrue(shop["security_id"].startswith("unresolved_"))
-        self.assertIsNone(shop["market_value_usd"])
+        # Several venues match SHOP, so its own symbol names none of them and it gets no
+        # quote currency. Its account still says what it reports values in, so the value
+        # is presented and the one open question stays the listing itself.
+        self.assertIsNone(shop["quote_currency"])
+        self.assertIsNone(shop["price_major"])
+        self.assertEqual(shop["price_usd"], "100")
+        self.assertEqual(shop["reported_currency"], "USD")
+        self.assertEqual(shop["market_value_usd"], "100")
+        self.assertEqual(self.codes(bundle["exceptions"]), ["AMBIGUOUS_LISTING"])
 
-    def test_listing_provider_none_leaves_every_listing_unresolved(self):
+    def test_without_any_listing_every_ticker_still_states_its_own_currency(self):
+        """No listing provider at all: the venue suffix carries the whole portfolio.
+
+        Every listing stays an open exception, because identity is a separate question
+        the owner still has to answer. The currencies are not open: a bare symbol is a US
+        listing, ``.TO`` is Toronto and ``.L`` is London pence, so the same USD total
+        comes out as when every listing resolved.
+        """
         self.config["data"]["listing_provider"] = "none"
         with patch("portfolio_research.market_listings.search_listings") as searched:
             bundle = self.load()
         searched.assert_not_called()
-        self.loader.assert_not_called()
+        # The rates the tickers imply are requested before normalization runs, or an
+        # offline Toronto holding would reach a CAD price with no CAD observation.
+        self.assertEqual(sorted(self.loader.call_args.args[1]), ["CAD", "GBP"])
         self.assertEqual(bundle["identity"]["unresolved"], 4)
-        codes = self.codes(bundle["exceptions"])
-        self.assertEqual(codes.count("UNRESOLVED_LISTING"), 4)
-        self.assertEqual(bundle["normalization"]["unconverted_positions"], 4)
-        self.assertEqual(bundle["normalization"]["covered_value_usd"], "0")
+        self.assertEqual(self.codes(bundle["exceptions"]), ["UNRESOLVED_LISTING"] * 4)
+
+        held = self.positions(bundle)
+        self.assertEqual(held[(self.a, "AAPL")]["quote_currency"], "USD")
+        self.assertEqual(held[(self.a, "RY.TO")]["quote_currency"], "CAD")
+        self.assertEqual(held[(self.b, "VOD.L")]["quote_currency"], "GBp")
+        self.assertEqual(held[(self.b, "VOD.L")]["quote_unit_factor"], 100)
+        self.assertEqual(held[(self.b, "VOD.L")]["price_major"], "1.2875")
+        self.assertEqual(bundle["normalization"]["unconverted_positions"], 0)
+        self.assertEqual(bundle["normalization"]["covered_value_usd"], "3990.102100")
 
     def test_historical_normalization_keeps_valuation_unknown_and_input_unchanged(self):
         original = load_collector(self.store.path, "2026-09-14")

@@ -3,6 +3,7 @@ import tempfile
 import threading
 import unittest
 from datetime import UTC, datetime
+from decimal import Decimal
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -305,7 +306,12 @@ EXCEPTION_LISTINGS = {**LISTINGS, "SHOP.TO": listing("SHOP.TO", "CAD", "TOR")}
 
 @patch("portfolio_research.calendar.datetime", SundayClock)
 class CurrentExceptionServiceTests(unittest.TestCase):
-    """Open exceptions from the USD gate fixture with one ambiguous and one unknown value."""
+    """Open exceptions from the USD gate fixture: one ambiguous listing, and no more.
+
+    Two of these holdings are quoted outside the United States and one account labels no
+    currency at all; none of that is a question, because a listing's exchange states the
+    currency it is quoted in.
+    """
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -335,22 +341,28 @@ class CurrentExceptionServiceTests(unittest.TestCase):
         self.providers.__enter__()
         self.addCleanup(self.providers.__exit__, None, None, None)
 
+    def held(self):
+        return {
+            (row["source_id"], row["symbol"]): row
+            for row in self.service.current()["current"]["positions"]
+        }
+
     def open_exception(self, code, raw_symbol):
         records = self.service.exceptions()["exceptions"]
         return next(r for r in records if r["code"] == code and r["raw_symbol"] == raw_symbol)
 
     def test_exceptions_list_exactly_the_constructed_ambiguities(self):
         response = self.service.exceptions()
-        pairs = sorted((row["code"], row["raw_symbol"]) for row in response["exceptions"])
-        self.assertEqual(
-            pairs,
-            [
-                ("AMBIGUOUS_LISTING", "SHOP"),
-                ("UNKNOWN_VALUE_CURRENCY", "SHOP"),
-                ("UNKNOWN_VALUE_CURRENCY", "VOD.L"),
-            ],
+        pairs = sorted(
+            (row["code"], row["raw_symbol"])
+            for row in response["exceptions"]
+            if row["scope"] == "listing"
         )
-        self.assertEqual(response["count"], 3)
+        # SHOP matches two listings and nothing says which; that is the only question the
+        # sources and provider metadata could not answer between them.
+        self.assertEqual(pairs, [("AMBIGUOUS_LISTING", "SHOP")])
+        self.assertNotIn("UNKNOWN_VALUE_CURRENCY", {row["code"] for row in response["exceptions"]})
+        self.assertEqual(response["count"], len(response["exceptions"]))
         self.assertEqual(response["generated_at"], SUNDAY_GENERATED.isoformat())
         for record in response["exceptions"]:
             self.assertRegex(record["key"], r"^[0-9a-f]{40}$")
@@ -363,14 +375,35 @@ class CurrentExceptionServiceTests(unittest.TestCase):
     def test_current_exposes_covered_usd_totals(self):
         current = self.service.current()["current"]
         usd = current["totals"]["usd"]
-        # A/RY.TO and A/AAPL in USD plus B/RY.TO converted once; SHOP and VOD.L stay open.
-        self.assertEqual(usd["covered_total"], "3684.588600")
-        self.assertEqual(usd["covered_position_count"], 3)
-        self.assertEqual(usd["unconverted_position_count"], 2)
-        self.assertEqual(len(current["open_exceptions"]), 3)
+        held = {(row["source_id"], row["symbol"]): row for row in current["positions"]}
+        self.assertEqual(len(held), 5)
+        # Every captured position is either presented in USD or counted as unconverted,
+        # and the covered total is exactly the amounts that were converted, counted once.
+        self.assertEqual(usd["covered_position_count"] + usd["unconverted_position_count"], 5)
+        self.assertEqual(
+            Decimal(usd["covered_total"]),
+            sum(
+                Decimal(row["market_value_usd"])
+                for row in held.values()
+                if row["market_value_usd"] is not None
+            )
+            + sum(
+                Decimal(row["usd"]["cash"])
+                for row in current["accounts"]
+                if row["usd"]["cash"] is not None
+            ),
+        )
+        # A listing nothing can choose between is still a question. The currency of a bare
+        # US ticker is not one, even while its listing stays ambiguous.
         self.assertEqual(current["identity"]["ambiguous"], 1)
+        self.assertEqual(held[(self.a, "SHOP")]["value_currency"], "USD")
+        self.assertEqual(held[(self.a, "SHOP")]["market_value_usd"], "100")
+        self.assertEqual(held[(self.b, "RY.TO")]["value_currency"], "CAD")
+        self.assertNotIn(
+            "UNKNOWN_VALUE_CURRENCY", {row["code"] for row in current["open_exceptions"]}
+        )
 
-    def test_account_currency_resolution_appends_supplemental_and_closes_the_exception(self):
+    def attest_position_currency(self, source_id, currency):
         self.service.import_input(
             {
                 "kind": "supplemental",
@@ -378,9 +411,9 @@ class CurrentExceptionServiceTests(unittest.TestCase):
                     "version": 1,
                     "accounts": [
                         {
-                            "source_id": self.a,
-                            "snapshot_id": self.snapshots[self.a],
-                            "tax_rate": "0.25",
+                            "source_id": source_id,
+                            "snapshot_id": self.snapshots[source_id],
+                            "position_currency": currency,
                         }
                     ],
                     "securities": [],
@@ -388,61 +421,44 @@ class CurrentExceptionServiceTests(unittest.TestCase):
                 },
             }
         )
-        vod = self.open_exception("UNKNOWN_VALUE_CURRENCY", "VOD.L")
-        self.assertEqual(vod["resolution"]["kind"], "account_currency")
-        saved = self.service.save_resolution(
-            {
-                "key": vod["key"],
-                "kind": "account_currency",
-                "source_id": self.b,
-                "snapshot_id": self.snapshots[self.b],
-                "values": {"position_currency": "CAD"},
-            }
+
+    def test_an_attested_position_currency_overrides_what_is_assumed(self):
+        """Nothing asks the owner for a currency, but an explicit answer still wins.
+
+        A page that labels its values is believed, and a page that labels nothing is read
+        in the review's own base currency. An owner who knows a source reports in another
+        currency can still say so as dated account evidence, and that outranks both.
+        """
+        before = self.held()
+        # The USD account labels nothing, so its values are read as USD; its Toronto
+        # holding is still quoted in CAD, which is a fact about the listing, not the page.
+        self.assertEqual(before[(self.a, "RY.TO")]["value_currency"], "USD")
+        self.assertEqual(before[(self.a, "RY.TO")]["quote_currency"], "CAD")
+        self.assertIsNone(before[(self.a, "RY.TO")]["fx_pair"])
+
+        self.attest_position_currency(self.a, "CAD")
+        held = self.held()
+        for symbol in ("RY.TO", "AAPL"):
+            row = held[(self.a, symbol)]
+            self.assertEqual(row["value_currency"], "CAD", symbol)
+            self.assertEqual(row["value_currency_basis"], "attested", symbol)
+            self.assertEqual(row["fx_pair"], "CADUSD", symbol)
+        # The attestation says what the account reports, not where a security trades:
+        # every listing keeps its own quote currency and its own subunit.
+        self.assertEqual(held[(self.a, "RY.TO")]["quote_currency"], "CAD")
+        self.assertEqual(held[(self.a, "AAPL")]["quote_currency"], "USD")
+        self.assertEqual(held[(self.b, "VOD.L")]["quote_currency"], "GBp")
+        self.assertEqual(held[(self.b, "VOD.L")]["quote_unit_factor"], 100)
+        self.assertEqual(held[(self.b, "VOD.L")]["price_major"], "1.2875")
+        # The account that labels its own rows is unaffected: the row label still wins.
+        self.assertEqual(held[(self.b, "RY.TO")]["value_currency"], "CAD")
+        self.assertEqual(held[(self.b, "RY.TO")]["value_currency_basis"], "row")
+        self.assertNotIn(
+            "UNKNOWN_VALUE_CURRENCY",
+            {row["code"] for row in self.service.exceptions()["exceptions"]},
         )
-        self.assertEqual(saved["remaining"], 2)
-        remaining = self.service.exceptions()
-        self.assertEqual(remaining["count"], 2)
-        self.assertNotIn(vod["key"], {row["key"] for row in remaining["exceptions"]})
-        self.assertEqual(len(self.service.store.records("supplemental")), 2)
-        supplemental = self.service.store.latest("supplemental")
-        self.assertEqual(
-            supplemental["accounts"],
-            [
-                {"source_id": self.a, "snapshot_id": self.snapshots[self.a], "tax_rate": "0.25"},
-                {
-                    "source_id": self.b,
-                    "snapshot_id": self.snapshots[self.b],
-                    "position_currency": "CAD",
-                },
-            ],
-        )
-        [resolution] = self.service.store.records("resolution")
-        self.assertEqual(resolution["record_id"], saved["record_id"])
-        self.assertEqual(
-            resolution["payload"],
-            {
-                "key": vod["key"],
-                "kind": "account_currency",
-                "values": {"position_currency": "CAD"},
-                "snapshot_id": self.snapshots[self.b],
-                "source_id": self.b,
-            },
-        )
-        held = {
-            (row["source_id"], row["symbol"]): row
-            for row in self.service.current()["current"]["positions"]
-        }
-        self.assertEqual(held[(self.b, "VOD.L")]["value_currency_basis"], "attested")
-        with self.assertRaisesRegex(ValueError, "no longer open"):
-            self.service.save_resolution(
-                {
-                    "key": vod["key"],
-                    "kind": "account_currency",
-                    "source_id": self.b,
-                    "snapshot_id": self.snapshots[self.b],
-                    "values": {"position_currency": "CAD"},
-                }
-            )
+        # The owner's evidence is stored as its own version; nothing was edited in place.
+        self.assertEqual(len(self.service.store.records("supplemental")), 1)
 
     def test_security_listing_resolution_maps_the_chosen_listing_from_today(self):
         shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
@@ -624,7 +640,7 @@ class CurrentExceptionServiceTests(unittest.TestCase):
     def test_saving_a_resolution_presents_the_collection_at_most_twice(self):
         from portfolio_research import current as current_module
 
-        vod = self.open_exception("UNKNOWN_VALUE_CURRENCY", "VOD.L")
+        shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
         calls = []
         original = current_module.current_snapshot
 
@@ -635,30 +651,30 @@ class CurrentExceptionServiceTests(unittest.TestCase):
         with patch("portfolio_research.current.current_snapshot", side_effect=counted):
             self.service.save_resolution(
                 {
-                    "key": vod["key"],
-                    "kind": "account_currency",
-                    "source_id": self.b,
-                    "snapshot_id": self.snapshots[self.b],
-                    "values": {"position_currency": "CAD"},
+                    "key": shop["key"],
+                    "kind": "security_listing",
+                    "source_id": self.a,
+                    "snapshot_id": self.snapshots[self.a],
+                    "values": {"security_id": "SHOP.TO"},
                 }
             )
         self.assertEqual(len(calls), 2, calls)
 
     def test_invalid_resolutions_are_rejected_without_writing_records(self):
-        vod = self.open_exception("UNKNOWN_VALUE_CURRENCY", "VOD.L")
+        shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
         valid = {
-            "key": vod["key"],
-            "kind": "account_currency",
-            "source_id": self.b,
-            "snapshot_id": self.snapshots[self.b],
-            "values": {"position_currency": "CAD"},
+            "key": shop["key"],
+            "kind": "security_listing",
+            "source_id": self.a,
+            "snapshot_id": self.snapshots[self.a],
+            "values": {"security_id": "SHOP.TO"},
         }
         cases = {
             "unknown key": ({**valid, "key": "0" * 40}, "no longer open"),
-            "wrong kind": ({**valid, "kind": "security_listing"}, "kind"),
-            "other account": ({**valid, "source_id": self.a}, "account"),
-            "bad currency": ({**valid, "values": {"position_currency": "cad"}}, "currency"),
-            "no values": ({**valid, "values": {}}, "position_currency"),
+            "wrong kind": ({**valid, "kind": "account_facts"}, "kind"),
+            "other account": ({**valid, "source_id": self.b}, "account"),
+            "bad symbol": ({**valid, "values": {"security_id": "not a symbol"}}, "exact listing"),
+            "no values": ({**valid, "values": {}}, "security_id"),
             "extra field": ({**valid, "note": "x"}, "fields"),
             "unsupported value": ({**valid, "values": {"cash": "5"}}, "fields"),
             "not an object": ([], "object"),
@@ -705,7 +721,7 @@ class ResolutionRouteTests(unittest.TestCase):
         self.assertEqual(payload, {"exceptions": [], "count": 0, "generated_at": None})
 
     def test_resolution_route_is_token_gated_and_reports_invalid_input(self):
-        body = json.dumps({"key": "k", "kind": "account_currency", "values": {}})
+        body = json.dumps({"key": "k", "kind": "security_listing", "values": {}})
         status, _ = self.request(
             "POST", "/api/research/resolutions", body, {"Content-Type": "application/json"}
         )

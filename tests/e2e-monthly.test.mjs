@@ -181,21 +181,22 @@ test('the owner completes the six monthly steps with no developer intervention',
     assert.deepEqual(runtimeErrors, []);
   });
 
-  // 3. The one question the collection could not answer itself, answered once.
-  await t.test('step 3 · the open account-currency exception is resolved to none', async () => {
-    await until(() => exceptionForms($).length === 1, 'exactly one open exception form');
-    const form = exceptionForms($)[0];
-    assert.equal(form.dataset.kind, 'account_currency');
-    assert.match(form.textContent, /SIM03/);
-    assert.match($('exception-count').textContent, /1/);
-    setInput(window, namedInput(window, 'Currency of reported values'), 'USD');
-    const save = [...form.querySelectorAll('button')].find(node => node.textContent === 'Save');
-    assert.ok(save, 'the exception form has a Save button');
-    save.click();
+  // 3. What the collection could not answer itself. One account's page carries no
+  // currency column at all, and it still raises no question: a holding's currency is
+  // stated by the exchange its listing trades on, so the owner is never asked for one.
+  await t.test('step 3 · the exceptions panel has nothing to answer', async () => {
     await until(() => $('current-exception-forms').textContent.includes('No open exceptions'),
-      'the resolved exception to disappear');
+      'the exceptions panel to settle');
     assert.equal(exceptionForms($).length, 0);
+    assert.equal($('exception-count').textContent, 'None open');
+    assert.doesNotMatch($('exception-panel').textContent, /Currency of reported values|currency unknown/);
     assert.equal((await read(origin, '/api/research/exceptions')).count, 0);
+    const current = await read(origin, '/api/research/current');
+    const unlabelled = current.current.positions.find(row => row.symbol === 'SIM03');
+    assert.ok(unlabelled, 'the unlabelled account holds SIM03');
+    // Its source page carries no currency column and nothing asked the owner for one.
+    assert.equal(unlabelled.value_currency, 'USD');
+    assert.ok(unlabelled.market_value_usd, 'so it is rolled up into the USD total');
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
     assert.deepEqual(runtimeErrors, []);
   });
@@ -270,9 +271,9 @@ test('the owner completes the six monthly steps with no developer intervention',
     assert.deepEqual(runtimeErrors, []);
   });
 
-  // 6. The decision is the point of the month. A review analysed while the currency
-  // question was still open produces no feasible alternative and says so; the review run
-  // after the answer offers the alternatives the choice is weighed against.
+  // 6. The decision is the point of the month. Nothing has to be answered before a
+  // review can certify a basket now, so both dialogs name the alternatives the choice is
+  // weighed against, and the decision recorded against one of them survives the next run.
   await t.test('step 6 · the recorded decision survives into the next review', async () => {
     window.document.querySelector('[data-page="review"]').click();
     assert.equal($('save-decision').disabled, false, 'a saved run can record a decision');
@@ -280,8 +281,8 @@ test('the owner completes the six monthly steps with no developer intervention',
     await new Promise(resolve => setTimeout(resolve, 250));
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
     await until(() => $('decision-dialog').hasAttribute('open'), 'the decision dialog');
-    assert.match($('decision-compared').textContent, /no feasible alternative/i,
-      'a review that could not certify a basket says so instead of offering one');
+    assert.match($('decision-compared').textContent, /Compared against .+ · run /,
+      'the dialog names the alternatives this run certified and the run they came from');
     $('close-decision-dialog').click();
     assert.equal($('decision-dialog').hasAttribute('open'), false);
 

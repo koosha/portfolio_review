@@ -14,6 +14,8 @@ import copy
 import hashlib
 import json
 
+from .venues import venue_currency
+
 STATUS_RANK = {"mapped": 0, "resolved": 1, "resolved_by_search": 2, "resolved_from_display": 3}
 COUNT_KEYS = (
     "mapped",
@@ -194,6 +196,12 @@ def _resolved(position, found, status, basis, context):
 
     key, meta = found
     quote_currency, major_currency, factor = _listing_currency(meta, key)
+    if quote_currency is None:
+        # The listing resolved but states no currency of its own, so its ticker does --
+        # the same venue table an unresolved symbol falls back to, consulted here as well
+        # so both paths give one answer. Without this a Toronto listing whose payload
+        # carried only an exchange would present its CAD price as a USD price.
+        quote_currency, major_currency, factor = venue_currency(key)
     issuer_ids = context["issuer_ids"]
     if key not in issuer_ids:
         issuer_ids[key] = _issuer_id(context["issuer_lookup"], meta, key)
@@ -251,19 +259,39 @@ def _open(position, candidates, context):
         if captured is not None
         else _base_row(context["columns"], position["security_id"], raw_symbol)
     )
-    security = _with_listing_fields(
-        row, eligible=False, resolution_status=status, resolution_basis=None
+    # No listing states this symbol's currency, so its ticker does: the venue suffix is
+    # the owner's stated rule and answers while this exception stays open. An ambiguous
+    # symbol is the exception -- several venues match it, so its own suffix names none.
+    quote_currency, major_currency, factor = (
+        (None, None, None) if ambiguous else venue_currency(quote_symbol or raw_symbol)
     )
-    if ambiguous:
-        message = f"{raw_symbol} matches {len(candidates)} listings; choose the exact listing."
-    elif quote_symbol:
-        message = (
+    security = _with_listing_fields(
+        row,
+        quote_currency,
+        factor,
+        currency=row.get("currency") or major_currency,
+        eligible=False,
+        resolution_status=status,
+        resolution_basis=None,
+    )
+    exception = _open_exception(position, candidates, code)
+    return security, _alias(position, position["security_id"], status, None), exception
+
+
+def _open_message(raw_symbol, quote_symbol, candidates):
+    if len(candidates) > 1:
+        return f"{raw_symbol} matches {len(candidates)} listings; choose the exact listing."
+    if quote_symbol:
+        return (
             f"No listing metadata is available for quote symbol {quote_symbol}; refresh "
             "market data or enter the exact listing."
         )
-    else:
-        message = f"No listing was found for {raw_symbol}; enter the exact quote symbol."
-    exception = {
+    return f"No listing was found for {raw_symbol}; enter the exact quote symbol."
+
+
+def _open_exception(position, candidates, code):
+    raw_symbol = position["raw_symbol"]
+    return {
         "key": exception_key(code, position["source_id"], position.get("snapshot_id"), raw_symbol),
         "code": code,
         "severity": "error",
@@ -272,12 +300,11 @@ def _open(position, candidates, context):
         "snapshot_id": position.get("snapshot_id"),
         "account_id": position.get("account_id"),
         "raw_symbol": raw_symbol,
-        "message": message,
+        "message": _open_message(raw_symbol, position.get("quote_symbol"), candidates),
         "proposed": None,
         "candidates": candidates,
         "resolution": {"kind": "security_listing", "fields": list(LISTING_RESOLUTION_FIELDS)},
     }
-    return security, _alias(position, position["security_id"], status, None), exception
 
 
 def _resolve_position(position, context):

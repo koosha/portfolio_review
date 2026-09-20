@@ -1,35 +1,52 @@
 """USD presentation of collector holdings from listing identity and dated FX observations.
 
 The ledger stays exact: every converted amount is a Decimal string beside the reported
-amount and currency it came from. A value currency is taken from the source row, an
-owner's attestation, or quantity x price arithmetic against the listing's quote
-currency (directly, or through one fresh dated FX observation). Nothing is converted
-twice: an amount already reported in the presentation currency is used as reported.
-What cannot be established stays unconverted and becomes an explicit exception.
+amount and currency it came from. Two currencies are kept apart because a statement
+keeps them apart. A holding's *quote* currency is the currency of the exchange its
+ticker names -- the resolved listing states it, and :mod:`portfolio_research.venues`
+answers from the ticker's venue suffix when no listing could be resolved. A holding's
+*value* currency is the one currency its account reports every market value in, which
+is why the owner's Toronto-quoted names arrive priced in CAD and reported in USD by the
+same source. Neither is ever inferred by comparing quantity x price against the
+reported value; that arithmetic is only ever a check, and a mismatch is a data-quality
+warning, never a question about the currency.
+
+This module assembles the review: it gathers listings and rates, applies identity, walks
+the ledger and totals what was covered. One row at a time -- which currency its value is
+in, what its dated rate is and what price is presented -- is
+:mod:`portfolio_research.presentation`.
+
+Nothing is converted twice: an amount already reported in the presentation currency is
+used as reported. What cannot be established stays unconverted and becomes an explicit
+exception, and a currency that cannot be checked is withheld rather than assumed.
 """
 
 from __future__ import annotations
 
 import copy
-import re
 from datetime import date, datetime, timedelta
-from decimal import Decimal, InvalidOperation, localcontext
+from decimal import Decimal, localcontext
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from .presentation import (
+    AMOUNT_STATUSES,
+    _convert,
+    _major,
+    _on_date,
+    _price_major,
+    _price_usd,
+    _reconciled,
+    _text,
+    _valuation,
+    _value_currency,
+)
+
 METHOD_VERSION = "usd-presentation-1"
-PRECISION = 34
-QUOTE_TOLERANCE = Decimal("0.005")
-FX_TOLERANCE = Decimal("0.01")
 NEW_YORK = ZoneInfo("America/New_York")
-AMOUNT_STATUSES = frozenset({"converted", "identity", "unit_normalized"})
 LISTED_STATUSES = frozenset({"resolved", "resolved_from_display", "resolved_by_search"})
-FALLBACK_CANDIDATE = "CAD"
-# A pair no provider published is crossed through one of these, both legs dated.
-CROSS_CURRENCIES = ("USD", "CAD")
 FX_HISTORY_PADDING_DAYS = 10
-_CURRENCY = re.compile(r"[A-Za-z]{3}")
 FX_FIELDS = ("fx_rate", "fx_pair", "fx_observation_date", "fx_source_id")
 # Cash can be denominated apart from its account, so its conversion is evidenced apart too.
 CASH_FX_FIELDS = (
@@ -38,14 +55,6 @@ CASH_FX_FIELDS = (
     "cash_fx_observation_date",
     "cash_fx_source_id",
     "cash_fx_inverted",
-)
-EVIDENCE_FIELDS = (
-    "value_currency_ratio",
-    "value_currency_implied_rate",
-    "value_currency_fx_pair",
-    "value_currency_fx_rate",
-    "value_currency_fx_date",
-    "value_currency_fx_source_id",
 )
 COVERED_PRECISION = 512
 
@@ -58,36 +67,6 @@ def _live(config) -> bool:
 def _presentation(config) -> str | None:
     """The configured base currency; ``None`` means amounts stay as they were captured."""
     return config.get("mandate", {}).get("base_currency", "USD")
-
-
-def _text(number: Decimal) -> str:
-    return format(number, "f")
-
-
-def _number(value) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        number = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return number if number.is_finite() else None
-
-
-def _major(code) -> str | None:
-    """Major currency of a valid code (``GBp`` -> ``GBP``); ``None`` when unusable."""
-    from .market_listings import listing_currency
-
-    if not isinstance(code, str) or not _CURRENCY.fullmatch(code):
-        return None
-    return listing_currency(code)[1]
-
-
-def _convertible(code) -> bool:
-    """A code the FX table accepts: an uppercase major currency or a known subunit."""
-    from .fx import MINOR_UNITS
-
-    return isinstance(code, str) and (code in MINOR_UNITS or re.fullmatch(r"[A-Z]{3}", code))
 
 
 def _listing_key(position) -> str | None:
@@ -154,23 +133,27 @@ def _find_listing(listings, key):
 
 
 def fx_currencies(bundle, config, listings) -> list[str]:
-    """Distinct major currencies the normalization may need, minus the presentation one."""
+    """Distinct major currencies the normalization may need, minus the presentation one.
+
+    A holding whose listing has not been resolved still states its currency through its
+    ticker's venue, and its rate has to be loaded here, before normalization runs, or the
+    ordinary Toronto holding the venue table exists to serve would reach a CAD price with
+    no CAD observation behind it.
+    """
+    from .venues import venue_currency
+
     ledger = bundle.get("ledger") or {}
-    positions = ledger.get("positions") or []
-    codes, arithmetic = set(), False
-    for position in positions:
+    codes = set()
+    for position in ledger.get("positions") or []:
         codes.add(_major(position.get("currency")))
-        meta = _find_listing(listings, _listing_key(position))
+        key = _listing_key(position)
+        meta = _find_listing(listings, key)
         quote = _major(meta.get("quote_currency")) if meta else None
-        codes.add(quote)
-        arithmetic = arithmetic or (quote is not None and not position.get("currency"))
+        codes.add(quote if quote is not None else venue_currency(key)[1])
     for account in ledger.get("accounts") or []:
         for field in ("currency", "position_currency", "captured_cash_currency"):
             codes.add(_major(account.get(field)))
     codes.discard(None)
-    if arithmetic:
-        # CAD is always a value-currency candidate for quantity x price arithmetic.
-        codes.add(FALLBACK_CANDIDATE)
     codes.discard(_presentation(config))
     return sorted(codes)
 
@@ -238,86 +221,6 @@ def _apply_identity(ledger, identity):
     }
 
 
-def _exception(
-    code, message, scope, resolution, *, position=None, key_pair=None, proposed=None, **fields
-):
-    """An owner-facing exception record; ``key_pair`` scopes FX keys to a pair and date."""
-    from .identity import exception_key
-
-    position = position or {}
-    source_id, snapshot_id = position.get("source_id"), position.get("snapshot_id")
-    raw_symbol = position.get("raw_symbol")
-    return {
-        "key": exception_key(code, source_id, snapshot_id, raw_symbol, key_pair),
-        "code": code,
-        "severity": "error",
-        "scope": scope,
-        "source_id": source_id,
-        "snapshot_id": snapshot_id,
-        "account_id": position.get("account_id"),
-        "raw_symbol": raw_symbol,
-        "message": message,
-        "proposed": proposed,
-        "candidates": None,
-        "resolution": resolution,
-        **fields,
-    }
-
-
-def _fx_exception(result, context):
-    code = "STALE_FX" if result["status"] == "stale" else "MISSING_FX"
-    pair, day = result["pair"], result["requested_date"]
-    if (code, pair, day) in context["fx_exceptions"]:
-        return
-    issue = result["issues"][0] if result["issues"] else {}
-    message = issue.get("message") or f"{pair}: no usable dated observation on {day}."
-    context["fx_exceptions"][(code, pair, day)] = _exception(
-        code,
-        message + " Refresh market data to load a dated FX observation.",
-        "fx",
-        {"kind": "fx_manual", "fields": ["rate", "observation_date"]},
-        key_pair=f"{pair}:{day}",
-        pair=pair,
-        requested_date=day,
-        observation_date=result.get("observation_date"),
-        age_days=result.get("age_days"),
-    )
-
-
-def _use_observation(context, observed_pair, observation_date):
-    if observed_pair and observation_date:
-        context["used"].add((observed_pair, observation_date))
-
-
-def _convert(amount, currency, on_date, context, *, report=True):
-    """Presentation amount of an exact amount: ``(amount | None, fx fields, status)``."""
-    presentation = context["presentation"]
-    if amount is None:
-        return None, {}, "no_amount"
-    if presentation is None or not _convertible(currency):
-        # An unlabelled amount is never "already in the presentation currency", and
-        # without a presentation currency nothing is presented at all.
-        return None, {}, "unknown_currency"
-    if currency == presentation:
-        return amount, {}, "reported"
-    result = context["fx"].convert(amount, currency, presentation, on_date)
-    if result["status"] in AMOUNT_STATUSES and result["amount"] is not None:
-        if result["status"] != "converted":
-            return result["amount"], {}, result["status"]
-        _use_observation(context, result["observed_pair"], result["observation_date"])
-        fields = {
-            "fx_rate": result["rate"],
-            "fx_pair": result["pair"],
-            "fx_observation_date": result["observation_date"],
-            "fx_source_id": result["source_id"],
-            "fx_inverted": result["inverted"],
-        }
-        return result["amount"], fields, "converted"
-    if report:
-        _fx_exception(result, context)
-    return None, {}, result["status"]
-
-
 def _receipt_day(bundle) -> str | None:
     received = (bundle.get("collector") or {}).get("collection_received_at")
     if not isinstance(received, str):
@@ -331,333 +234,27 @@ def _receipt_day(bundle) -> str | None:
     return moment.astimezone(NEW_YORK).date().isoformat()
 
 
-def _on_date(account, context) -> str:
-    """Attested valuation date, else a current review's receipt day, else ``as_of``."""
-    if account.get("valuation_date"):
-        return account["valuation_date"]
-    return context["receipt_day"] or context["as_of"]
-
-
-def _fresh(observation, on_date, fx) -> bool:
-    age = (date.fromisoformat(on_date) - date.fromisoformat(observation["date"])).days
-    return 0 <= age <= fx.max_age_days
-
-
-def _candidates(quote_major, account, context):
-    wanted = [
-        context["presentation"],
-        account.get("currency"),
-        account.get("captured_cash_currency"),
-        FALLBACK_CANDIDATE,
-    ]
-    unique = []
-    for code in wanted:
-        if code is None or code == quote_major or code in unique or _major(code) != code:
-            continue
-        unique.append(code)
-    return unique
-
-
-def _attested(account):
-    """The currency an owner or the capture itself already stated for this account."""
-    for code in (account.get("currency"), account.get("captured_cash_currency")):
-        if _major(code) == code and code is not None:
-            return code
-    return None
-
-
-def _cross(fx, base, quote, on_date):
-    """A rate for a pair no provider published, through one intermediate currency."""
-    for middle in CROSS_CURRENCIES:
-        if middle in (base, quote):
-            continue
-        first, second = fx.latest(base, middle, on_date), fx.latest(middle, quote, on_date)
-        if first is None or second is None:
-            continue
-        with localcontext() as decimal_context:
-            decimal_context.prec = PRECISION
-            rate = _text(Decimal(first["rate"]) * Decimal(second["rate"]))
-        return {
-            "pair": base + quote,
-            "base": base,
-            "quote": quote,
-            "rate": rate,
-            "date": min(first["date"], second["date"]),
-            "source_id": f"{first['source_id']}+{second['source_id']}",
-            "provider": first["provider"],
-            "observed_pair": None,
-            "derived_via": middle,
-            "legs": [
-                (first["observed_pair"], first["date"]),
-                (second["observed_pair"], second["date"]),
-            ],
-        }
-    return None
-
-
-def _candidate_rate(fx, base, quote, on_date):
-    """``(observation | None, "fresh" | "stale")`` for a candidate value currency."""
-    found = fx.latest(base, quote, on_date) or _cross(fx, base, quote, on_date)
-    if found is None:
-        return None, "missing"
-    return found, "fresh" if _fresh(found, on_date, fx) else "stale"
-
-
-def _undecided(ratio=None, **fields):
-    return {
-        "currency": None,
-        "basis": None,
-        "ratio": ratio,
-        "observation": None,
-        "unavailable_pair": None,
-        "candidates": None,
-        **fields,
-    }
-
-
-def _ambiguous(ratio, quote_major, matches):
-    """Two currencies explain the same value; record both and decide nothing."""
-    candidates = [{"currency": quote_major, "basis": "arithmetic_quote"}]
-    candidates += [
-        {
-            "currency": currency,
-            "basis": "arithmetic_fx",
-            "pair": found["pair"],
-            "rate": found["rate"],
-            "observation_date": found["date"],
-        }
-        for currency, found in matches
-    ]
-    return _undecided(ratio, candidates=candidates)
-
-
-def _explained(ratio, quote_major, account, on_date, context):
-    """Candidate value currencies whose dated rate explains ``ratio``, and what was missing."""
-    fx, matches, stale_pair, unusable = context["fx"], [], None, None
-    for candidate in _candidates(quote_major, account, context):
-        found, freshness = _candidate_rate(fx, quote_major, candidate, on_date)
-        pair = (quote_major, candidate)
-        if found is None:
-            unusable = unusable or pair
-            continue
-        rate = Decimal(found["rate"])
-        close = abs(ratio - rate) / rate <= FX_TOLERANCE
-        if freshness == "stale":
-            unusable = unusable or pair
-            stale_pair = stale_pair or (pair if close else None)
-            continue
-        if close:
-            matches.append((candidate, found))
-    return matches, stale_pair or unusable
-
-
-def _arithmetic(quantity, price_major, value, quote_major, account, on_date, context):
-    """Decide the value currency from quantity x price, or say what stopped the decision.
-
-    A value matching the quote currency needs no FX, unless a dated rate explains it just
-    as well (currencies near parity): then nothing is assumed. Otherwise the first
-    candidate currency whose fresh observation explains the ratio within 1% is the value
-    currency. A missing or stale rate leaves the pair to report, so the exception asks for
-    a market-data refresh instead of an attestation.
-    """
-    if None in (quantity, price_major, value, quote_major):
-        return _undecided()
-    with localcontext() as decimal_context:
-        decimal_context.prec = PRECISION
-        product = quantity * price_major
-        if product <= 0:
-            return _undecided()
-        ratio = value / product
-        matches, unavailable = _explained(ratio, quote_major, account, on_date, context)
-        if abs(ratio - 1) <= QUOTE_TOLERANCE:
-            return _quote_decision(ratio, quote_major, account, matches)
-        if matches:
-            currency, found = matches[0]
-            return _undecided(ratio, currency=currency, basis="arithmetic_fx", observation=found)
-        if unavailable is not None:
-            return _undecided(ratio, unavailable_pair=unavailable)
-        return _undecided(ratio)
-
-
-def _quote_decision(ratio, quote_major, account, matches):
-    """A near-parity ratio: the quote currency, unless a dated rate explains it too."""
-    if not matches:
-        return _undecided(ratio, currency=quote_major, basis="arithmetic_quote")
-    attested = _attested(account)
-    if attested == quote_major:
-        return _undecided(ratio, currency=quote_major, basis="arithmetic_quote")
-    for currency, found in matches:
-        if currency == attested:
-            return _undecided(ratio, currency=currency, basis="arithmetic_fx", observation=found)
-    return _ambiguous(ratio, quote_major, matches)
-
-
-def _price_major(position, security):
-    price, factor = _number(position.get("price")), security.get("quote_unit_factor")
-    if price is None or not security.get("quote_currency") or type(factor) is not int:
-        return None
-    with localcontext() as decimal_context:
-        decimal_context.prec = PRECISION
-        return price / factor
-
-
-def _price_usd(position, decision, price_major, quote_major, on_date, context):
-    """Presentation price consistent with how the value itself was established.
-
-    An arithmetic basis accepted the source's own conversion, so the price it implies is
-    the value divided by the quantity: ``quantity x price_usd`` then equals the presented
-    value exactly, whatever small gap there was between the source's rate and the dated
-    observation. A row or attested currency converts the quoted price on its own and lets
-    reconcile's arithmetic check speak.
-    """
-    presentation, currency, basis = context["presentation"], decision["currency"], decision["basis"]
-    if price_major is None:
-        # Without listing metadata an unlabeled price is only ever taken in the value's
-        # own unit, exactly as before normalization; reconcile's arithmetic check tests it.
-        if quote_major is None and currency == presentation and currency is not None:
-            return position.get("price")
-        return None
-    if basis in ("arithmetic_quote", "arithmetic_fx"):
-        in_value = _implied_price(position)
-        if in_value is None:
-            return None
-    elif quote_major == presentation:
-        return _text(price_major)
-    else:
-        amount, _, _ = _convert(_text(price_major), quote_major, on_date, context, report=False)
-        return amount
-    if currency == presentation:
-        return _text(in_value)
-    amount, _, _ = _convert(_text(in_value), currency, on_date, context, report=False)
-    return amount
-
-
-def _implied_price(position):
-    """The per-unit price the captured value itself implies, in the value's currency."""
-    quantity = _number(position.get("quantity"))
-    value = _number(position.get("market_value"))
-    if quantity is None or value is None or quantity == 0:
-        return None
-    with localcontext() as decimal_context:
-        decimal_context.prec = PRECISION
-        return value / quantity
-
-
-def _unknown_value_currency(position, decision, quote_currency):
-    ratio = decision["ratio"]
-    shown = "unknown" if ratio is None else _text(ratio)
-    candidates = decision["candidates"]
-    if candidates:
-        listed = " or ".join(row["currency"] for row in candidates)
-        detail = (
-            f"could be {listed}: the captured value is explained by the quote currency and by a "
-            f"dated rate alike (value/(quantity x price) ratio {shown})"
-        )
-    else:
-        detail = (
-            f"could not be established (quote currency {quote_currency or 'unknown'}, "
-            f"value/(quantity x price) ratio {shown})"
-        )
-    message = (
-        f"{position['raw_symbol']}: the currency of the captured value {detail}. "
-        "Attest the currency this account's values are reported in."
-    )
-    return _exception(
-        "UNKNOWN_VALUE_CURRENCY",
-        message,
-        "position",
-        {"kind": "account_currency", "fields": ["position_currency"]},
-        position=position,
-        proposed={
-            "source_id": position.get("source_id"),
-            "snapshot_id": position.get("snapshot_id"),
-            "position_currency": None,
-        },
-        ratio=None if ratio is None else _text(ratio),
-        quote_currency=quote_currency,
-        candidates=candidates,
-    )
-
-
-def _value_currency(position, account, price_major, quote_major, on_date, context):
-    """Decision dict for the value currency: row, attestation, then arithmetic."""
-    currency = position.get("currency")
-    if currency:
-        basis = position.get("currency_basis")
-        if basis not in ("row", "attested"):
-            basis = "attested" if currency == account.get("position_currency") else "row"
-        return _undecided(currency=currency, basis=basis)
-    quantity, value = _number(position.get("quantity")), _number(position.get("market_value"))
-    return _arithmetic(quantity, price_major, value, quote_major, account, on_date, context)
-
-
-def _valuation(position, account, context):
-    if account.get("valuation_date"):
-        return account["valuation_date"], "attested"
-    if context["current"] and context["receipt_day"]:
-        return context["receipt_day"], "collection_receipt"
-    return position.get("valuation_date"), None
-
-
-def _evidence(decision, context):
-    """Ledger fields naming the dated observation and the rate the source itself implied."""
-    observation, ratio = decision["observation"], decision["ratio"]
-    fields = {
-        "value_currency_ratio": None if ratio is None else _text(ratio),
-        "value_currency_implied_rate": None,
-        "value_currency_fx_pair": None,
-        "value_currency_fx_rate": None,
-        "value_currency_fx_date": None,
-        "value_currency_fx_source_id": None,
-    }
-    if decision["basis"] == "arithmetic_fx" and ratio is not None:
-        fields["value_currency_implied_rate"] = _text(ratio)
-    if observation is None:
-        return fields
-    _use_evidence(context, observation)
-    return {
-        **fields,
-        "value_currency_fx_pair": observation["pair"],
-        "value_currency_fx_rate": observation["rate"],
-        "value_currency_fx_date": observation["date"],
-        "value_currency_fx_source_id": observation["source_id"],
-    }
-
-
-def _use_evidence(context, observation):
-    for pair, day in observation.get("legs") or [
-        (observation.get("observed_pair"), observation["date"])
-    ]:
-        _use_observation(context, pair, day)
-
-
 def _normalize_position(position, account, security, context):
     presentation, on_date = context["presentation"], _on_date(account, context)
     quote_currency = security.get("quote_currency")
     quote_major = _major(quote_currency)
     price_major = _price_major(position, security)
-    decision = _value_currency(position, account, price_major, quote_major, on_date, context)
-    currency = decision["currency"]
-    evidence = _evidence(decision, context)
+    currency, basis = _value_currency(position, account, context)
     reported = position.get("market_value")
-    usd, fx_fields, status = _convert(reported, currency, on_date, context)
-    if reported is not None and status == "unknown_currency":
-        pair = decision["unavailable_pair"]
-        if pair is not None:
-            _fx_exception(context["fx"].convert("1", *pair, on_date), context)
-        else:
-            context["exceptions"].append(
-                _unknown_value_currency(position, decision, quote_currency)
-            )
-    price_usd = _price_usd(position, decision, price_major, quote_major, on_date, context)
+    usd, fx_fields, _status = _convert(reported, currency, on_date, context)
+    unchecked = _reconciled(position, currency, price_major, quote_major, on_date, context)
+    price_usd = _price_usd(position, currency, price_major, quote_major, on_date, context)
+    if unchecked:
+        # The value currency could not be checked against the listing's, so nothing
+        # derived from it is presented and the holding stays out of the covered total.
+        usd, fx_fields, price_usd = None, {}, None
     valuation_date, valuation_basis = _valuation(position, account, context)
     return {
         **position,
         "reported_market_value": reported,
         "reported_price": position.get("price"),
         "reported_currency": currency,
-        "value_currency_basis": decision["basis"],
-        **evidence,
+        "value_currency_basis": basis,
         "quote_currency": quote_currency,
         "quote_unit_factor": security.get("quote_unit_factor"),
         "price_major": None if price_major is None else _text(price_major),
@@ -936,7 +533,6 @@ def _unpresented_position(position, account, security, context):
         "reported_price": position.get("price"),
         "reported_currency": currency,
         "value_currency_basis": "row" if currency else None,
-        **dict.fromkeys(EVIDENCE_FIELDS),
         "quote_currency": security.get("quote_currency"),
         "quote_unit_factor": security.get("quote_unit_factor"),
         "price_major": None,

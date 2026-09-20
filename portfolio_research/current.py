@@ -2,13 +2,15 @@
 
 Captured amounts stay exact Decimal strings and are shown as observed. The collection
 receipt time is a server receipt time, never a quote time; the source valuation time is
-unknown unless supplemental evidence attests it. Subtotals are grouped by explicit value
-currency without FX conversion and are never labeled reconciled NAV.
+unknown unless supplemental evidence attests it. Subtotals are grouped by the currency the
+source itself labelled, without FX conversion, and are never labeled reconciled NAV.
 
 Beside the captured amounts, listing identity and a USD presentation are derived from
 cached provider metadata and dated FX observations only (this view never refreshes a
-provider). Amounts that cannot be presented stay unconverted and become open exceptions
-an owner can resolve.
+provider). What a holding is quoted in comes from the exchange its listing trades on and
+what an account reports its values in is a fact about that account, so neither is guessed
+from the amounts and neither is ever asked about; amounts that cannot be presented stay
+unconverted and become open exceptions an owner can resolve.
 """
 
 from decimal import Decimal, localcontext
@@ -29,10 +31,6 @@ PRESENTED_POSITION_FIELDS = (
     "price_usd",
     "market_value_usd",
     "value_currency_basis",
-    "value_currency_ratio",
-    "value_currency_fx_pair",
-    "value_currency_fx_rate",
-    "value_currency_fx_date",
     "fx_rate",
     "fx_pair",
     "fx_observation_date",
@@ -56,7 +54,7 @@ DATE_LABELS = {
     "information_cutoff": "Information available through generation time.",
     "review_month": "New York calendar month of generation.",
 }
-TOTALS_LABEL = "Captured subtotals grouped by explicit value currency; unlabeled amounts are listed separately and no FX conversion was applied."
+TOTALS_LABEL = "Captured subtotals grouped by the currency the source labelled; unlabeled amounts are listed separately and no FX conversion was applied."
 
 
 def _decimal_text(value):

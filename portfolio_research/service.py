@@ -260,7 +260,11 @@ class ResearchService:
         )
 
     def exceptions(self):
-        """Open identity and currency exceptions of the newest collection."""
+        """Open listing and FX exceptions of the newest collection.
+
+        A holding's currency is not among them: it is stated by the exchange the listing
+        trades on, so the owner is never asked to attest one.
+        """
         if not self.collector:
             return {
                 "supported": False,

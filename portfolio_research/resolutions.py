@@ -1,4 +1,4 @@
-"""Owner resolutions of open identity and currency exceptions as supplemental evidence.
+"""Owner resolutions of open identity and account exceptions as supplemental evidence.
 
 A resolution never edits a stored record: it builds the next supplemental version from
 the latest one. Account facts bind the exception's exact collector snapshot. A listing
@@ -18,9 +18,11 @@ STILL_OPEN = (
     "Check the account and date it applies to."
 )
 PAYLOAD_FIELDS = frozenset({"key", "kind", "source_id", "snapshot_id", "values"})
-ACCOUNT_KINDS = frozenset({"account_currency", "account_facts"})
+ACCOUNT_KINDS = frozenset({"account_facts"})
 VALUE_FIELDS = {
-    "account_currency": frozenset({"position_currency", "currency"}),
+    # A holding's currency is stated by the exchange it is listed on, so it is never asked
+    # for. ``position_currency`` stays an optional account fact: an owner who knows the
+    # source reports values in another currency can still say so, unprompted.
     "account_facts": frozenset(
         {"valuation_date", "cash", "total_value", "currency", "position_currency", "complete"}
     ),
@@ -38,11 +40,9 @@ VALUE_FIELDS = {
     ),
 }
 REQUIRED_VALUES = {
-    "account_currency": ("position_currency",),
     "security_listing": ("security_id", "symbol"),
 }
 MISSING_VALUES = {
-    "account_currency": "Choose the position_currency this account's values are reported in.",
     "account_facts": "Enter at least one account fact: valuation date, cash, NAV, currency or completeness.",
     "security_listing": "Choose a listing: a security_id or exact quote symbol is required.",
 }

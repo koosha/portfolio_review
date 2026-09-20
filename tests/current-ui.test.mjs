@@ -59,18 +59,23 @@ const pullingScript = script(`
 `);
 
 // Supplemental dated mappings identify both held symbols, so no listing question remains.
-// Account A labels its values in USD; account B carries no currency column and no listing
-// metadata or FX observation explains its values, so exactly one account_currency
-// exception stays open until the owner attests the currency.
-const exceptionScript = script(`
+// Account A labels its values in USD and account B carries no currency column at all, but
+// both hold a bare ticker, which is a US listing quoted in USD: the exchange answers the
+// currency question, so nothing is left for the owner to attest.
+const mapped = `
     from portfolio_research.adapter import validate_supplemental
     def mapping(source, symbol):
         return {'source_id': source, 'raw_symbol': symbol, 'security_id': 'SIM-' + symbol,
             'issuer_id': 'issuer:' + symbol, 'ticker': symbol, 'instrument_type': 'equity',
             'eligible': False, 'valid_from': '2026-01-01'}
+    securities = [mapping(a, 'SIMA')%s]
     server.research.store.append_record('supplemental', validate_supplemental({'version': 1,
-        'accounts': [], 'securities': [mapping(a, 'SIMA'), mapping(b, 'SIMB')], 'tax_lots': []}))
-`);
+        'accounts': [], 'securities': securities, 'tax_lots': []}))
+`;
+const mappedScript = script(mapped.replace('%s', ", mapping(b, 'SIMB')"));
+// Only account A's holding is identified, so account B's listing stays the one question
+// the owner still answers by hand. Its currency is not in question either way.
+const listingScript = script(mapped.replace('%s', ''));
 
 const pages = ['holdings', 'research', 'scenarios', 'review', 'data', 'settings', 'overview'];
 const accountCards = $ => $('current-accounts').querySelectorAll('.account-card').length;
@@ -128,48 +133,67 @@ const coveredMetric = $ => [...$('current-totals').querySelectorAll('.metric')]
   .find(node => node.querySelector('.metric-label')?.textContent === 'Covered value (USD)');
 const unlabeledCard = $ => [...$('current-accounts').querySelectorAll('.account-card')]
   .find(node => node.textContent.includes('Synthetic unlabeled account'));
+// One captured position's cell, read by its column heading.
+function positionCell($, symbol, column) {
+  const headings = [...$('current-positions').querySelectorAll('th')].map(th => th.textContent);
+  const row = [...$('current-positions').querySelectorAll('tbody tr')]
+    .find(node => node.children[0]?.textContent === symbol);
+  assert.ok(row, `Missing captured position ${symbol}`);
+  const index = headings.indexOf(column);
+  assert.ok(index >= 0, `Missing positions column ${column}: ${headings.join(', ')}`);
+  return row.children[index]?.textContent;
+}
+// Answer the open listing exception with an exact quote symbol.
+function answerListing(window, $, symbol) {
+  const form = $('current-exception-forms').querySelector('form.exception-form');
+  assert.ok(form, 'An open exception form to answer');
+  setInput(window, namedInput(window, 'Exact quote symbol'), symbol);
+  const save = [...form.querySelectorAll('button')].find(node => node.textContent === 'Save');
+  assert.ok(save, 'The exception form has a Save button');
+  save.click();
+}
 
-test('an open account currency exception is resolved from Overview', {timeout: 120000}, async t => {
-  const {window, $, runtimeErrors} = await launch(t, exceptionScript, {
+test('a holding on a known exchange raises no currency question', {timeout: 120000}, async t => {
+  const {$, runtimeErrors} = await launch(t, mappedScript, {
     ready: $ => $('current-collection-state')?.textContent === 'Published',
   });
 
-  await until(() => exceptionForms($).length === 1, 'one open exception form');
-  // Nothing in the unlabeled account is converted yet, so no USD subtotal is claimed.
-  assert.doesNotMatch(unlabeledCard($).textContent, /USD 0/);
-  const form = exceptionForms($)[0];
-  assert.match(form.textContent, /SIMB/);
-  assert.equal(form.dataset.kind, 'account_currency');
+  await until(() => $('current-exception-forms').textContent.includes('No open exceptions'),
+    'no question left once every listing is identified');
+  assert.equal(exceptionForms($).length, 0);
+  // The owner is never asked to attest a currency the exchange already states.
+  assert.doesNotMatch($('exception-panel').textContent, /Currency of reported values|currency unknown/);
+  assert.equal($('exception-count').textContent, 'None open');
+
   const headers = [...$('current-positions').querySelectorAll('th')].map(th => th.textContent);
   for (const column of ['Quote currency', 'Value currency', 'USD value', 'FX (pair · date)']) {
     assert.ok(headers.includes(column), `Missing positions column ${column}: ${headers.join(', ')}`);
   }
-
-  setInput(window, namedInput(window, 'Currency of reported values'), 'USD');
-  const save = [...form.querySelectorAll('button')].find(node => node.textContent === 'Save');
-  assert.ok(save, 'The exception form has a Save button');
-  save.click();
-
-  await until(() => $('current-exception-forms').textContent.includes('No open exceptions'),
-    'the resolved exception to disappear');
-  assert.equal(exceptionForms($).length, 0);
+  // Account B's page carried no currency column, but SIMB is a bare ticker: a US listing
+  // quoted in USD. Its captured subtotal stays unlabeled; its value is still rolled up.
+  assert.equal(positionCell($, 'SIMB', 'Value currency'), 'USD');
+  assert.equal(positionCell($, 'SIMB', 'USD value'), '21');
   await until(() => coveredMetric($)?.querySelector('.metric-value')?.textContent === '48.5',
-    'covered USD value including the attested account');
+    'both accounts rolled up to USD without an attestation');
   assert.match(unlabeledCard($).textContent, /USD 24.25/);
   assert.match(coveredMetric($).querySelector('.metric-note').textContent, /not reconciled NAV/);
   assert.equal($('research-error').hidden, true, $('research-error').textContent);
   assert.deepEqual(runtimeErrors, []);
 });
 
-// The forms are keyed to the snapshot behind them, so the panel has to be reloaded
-// whenever that snapshot can have moved on: after a review or a new pull, and after the
-// service refuses an answer because the exception it named is already closed.
-test('open exceptions reload after a refused answer and after a sources change',
+// The listing is the question that remains. The forms are keyed to the snapshot behind
+// them, so the panel is reloaded whenever that snapshot can have moved on: after a review
+// or a new pull, and after the service refuses an answer because the exception it named is
+// already closed.
+test('the open listing exception is answered from Overview and survives a refusal',
   {timeout: 120000}, async t => {
-  const {window, $, runtimeErrors} = await launch(t, exceptionScript, {
+  const {window, $, runtimeErrors} = await launch(t, listingScript, {
     ready: $ => $('current-collection-state')?.textContent === 'Published',
   });
+
   await until(() => exceptionForms($).length === 1, 'one open exception form');
+  assert.match(exceptionForms($)[0].textContent, /SIMB/);
+  assert.equal(exceptionForms($)[0].dataset.kind, 'security_listing');
 
   const requested = [];
   const live = window.fetch;
@@ -182,10 +206,7 @@ test('open exceptions reload after a refused answer and after a sources change',
     return live(path, options);
   };
 
-  setInput(window, namedInput(window, 'Currency of reported values'), 'USD');
-  const save = [...exceptionForms($)[0].querySelectorAll('button')]
-    .find(node => node.textContent === 'Save');
-  save.click();
+  answerListing(window, $, 'SIMB');
   await until(() => requested.some(path => path.includes('/api/research/exceptions')),
     'the exceptions panel to reload after the service refused the answer');
   await until(() => /no longer open/.test($('research-error').textContent),
@@ -198,6 +219,14 @@ test('open exceptions reload after a refused answer and after a sources change',
   await until(() => requested.some(path => path.includes('/api/research/exceptions')),
     'the exceptions panel to reload when the holdings behind it change');
   assert.equal(exceptionForms($).length, 1);
+
+  answerListing(window, $, 'SIMB');
+  await until(() => $('current-exception-forms').textContent.includes('No open exceptions'),
+    'the answered listing exception to disappear');
+  assert.equal(exceptionForms($).length, 0);
+  await until(() => coveredMetric($)?.querySelector('.metric-value')?.textContent === '48.5',
+    'both accounts rolled up to USD once the listing is identified');
+  assert.match(unlabeledCard($).textContent, /USD 24.25/);
   assert.deepEqual(runtimeErrors, []);
 });
 

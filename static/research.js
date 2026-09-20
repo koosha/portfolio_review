@@ -297,8 +297,10 @@ function renderDiff() {
   replace('resolved-diff',changes.length?table(changes,[{key:'field'},{key:'before',wrap:true},{key:'after',wrap:true}]):el('p','No configuration changes in this draft.','muted'));
 }
 // Current holdings: the newest collection, dated by server receipt time. This view never
-// depends on a saved review or reconciles NAV; USD amounts appear only where the server
-// established the value currency and a dated FX observation, beside the captured amounts.
+// depends on a saved review or reconciles NAV; a holding is quoted in the currency its
+// listed exchange states, its own account says what its values are reported in, and USD
+// amounts appear only where that and a dated FX observation are both known, beside the
+// captured amounts.
 const collectionLabels={published:'Published',legacy_partial:'Legacy partial',none:'None'};
 const collectionClasses={published:'complete',legacy_partial:'warning',none:''};
 const completenessLabels={'count-verified':['Count verified','complete'],'end-observed':['End observed',''],unverified:['Unverified','warning']};
@@ -319,7 +321,11 @@ function subtotalLine(line) {
   const missing=numeric(line?.missing_value_count) || 0;
   const parts=[`Holdings ${num(line?.holdings)}`,`Cash ${num(line?.cash)}`,line?.currency || 'unlabeled'];
   if(missing)parts.push(`${missing} without a value`);
-  return el('div',parts.join(' · '));
+  const node=el('div',parts.join(' · '));
+  // 'unlabeled' means the source page carried no currency column, not that the currency is
+  // unknown: each holding is still valued in the currency its listed exchange quotes.
+  node.title='Captured exactly as collected, grouped by the currency the source labelled; no FX conversion.';
+  return node;
 }
 // A covered subtotal is only shown when something was actually converted: an account
 // whose holdings all stayed unconverted is not worth "USD 0".
@@ -414,12 +420,12 @@ async function loadCurrent() {
   try { renderCurrent(); }
   catch(failure){ current={supported:false,reason:`Current holdings could not be displayed: ${failure?.message || failure}`}; try { renderCurrent(); } catch { /* the panel keeps its last state */ } }
 }
-// Exceptions: only the questions identity and currency normalization could not answer.
+// Exceptions: only the questions listing identity and FX normalization could not answer.
+// A holding's currency is never one of them: the exchange its listing trades on states it.
 // Each saved answer becomes dated supplemental evidence; holdings and the open list then
 // reload from the server, which alone decides whether the exception is closed.
-const currencyChoices=[['','Choose a currency'],['USD','USD'],['CAD','CAD'],['GBP','GBP'],['EUR','EUR'],['other','Other…']];
-const exceptionLabels={UNKNOWN_VALUE_CURRENCY:'Value currency unknown',AMBIGUOUS_LISTING:'Ambiguous listing',UNRESOLVED_LISTING:'Listing not found',STALE_FX:'Stale FX observation',MISSING_FX:'Missing FX observation'};
-const noOpenExceptions='No open exceptions. Identity and currencies were established from the source and provider metadata.';
+const exceptionLabels={AMBIGUOUS_LISTING:'Ambiguous listing',UNRESOLVED_LISTING:'Listing not found',STALE_FX:'Stale FX observation',MISSING_FX:'Missing FX observation'};
+const noOpenExceptions='No open exceptions. Listing identity and currencies were established from the source, its exchange and provider metadata.';
 function exactAmount(value,label) {
   const trimmed=String(value ?? '').trim().replaceAll(',','');
   if(!trimmed)return null;
@@ -435,19 +441,6 @@ function exceptionTitle(record) {
   const accounts=objectRows(current?.current?.accounts), account=accounts.find(row=>belongsTo(record,row));
   const label=exceptionLabels[record?.code] || friendly(String(record?.code || 'exception').toLowerCase());
   return [label,record?.raw_symbol || record?.pair,account?.name].filter(Boolean).join(' · ');
-}
-function currencyControls(record) {
-  const name=resolutionFields(record).find(key=>key==='position_currency' || key==='currency') || 'position_currency';
-  const proposed=typeof record?.proposed?.[name]==='string'?record.proposed[name].toUpperCase():'';
-  let choice=currencyChoices.some(([code])=>code && code===proposed)?proposed:proposed?'other':'', other=choice==='other'?proposed:'';
-  const otherField=field('Other currency code',other,value=>{other=value;},{help:'Three letters, for example CHF.'});
-  otherField.hidden=choice!=='other';
-  const select=field('Currency of reported values',choice,value=>{choice=value;otherField.hidden=value!=='other';},{options:currencyChoices,help:'The currency this account reports market values in on the source page.'});
-  return {controls:[select,otherField],collect:()=>{
-    const code=String(choice==='other'?other:choice).trim().toUpperCase();
-    if(!/^[A-Z]{3}$/.test(code))throw new Error('Choose the three-letter currency this account reports its values in.');
-    return {[name]:code};
-  }};
 }
 function candidateLabel(candidate) { return [candidate.symbol,candidate.name,candidate.exchange].filter(Boolean).join(' · '); }
 function listingControls(record) {
@@ -491,7 +484,7 @@ function factsControls(record) {
     return {valuation_date:date || null,cash:exactAmount(facts.cash,'Cash'),total_value:exactAmount(facts.total_value,'Account NAV'),complete:facts.complete===true};
   }};
 }
-const exceptionControls={account_currency:currencyControls,security_listing:listingControls,account_facts:factsControls};
+const exceptionControls={security_listing:listingControls,account_facts:factsControls};
 async function saveResolution(record,values) {
   let response;
   try {

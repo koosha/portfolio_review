@@ -3,7 +3,8 @@
 A collector holding two Yahoo-shaped accounts, a fake paired Chrome that answers the
 collection, and a provider patch that injects dated synthetic research into the bundle
 the review freezes. Account A labels its values in USD; account B carries no currency
-column, so exactly one account-currency exception stays open until the owner attests it.
+column at all, and still raises no question: both hold a bare ticker, which is a US
+listing quoted in USD, so the exchange states the currency the source page left out.
 
 Every number here is simulated. This is not market data, and nothing in this module
 reaches a provider: creating ``providers-offline`` in the data directory makes the same
@@ -482,12 +483,15 @@ def supplemental(source_ids, navs):
     than letting a fresh pull silently inherit the previous one's evidence. An identical
     recapture reuses its snapshot, so the owner's own answers survive a later collection.
 
-    The unlabelled account states the currency it is *denominated* in without attesting
-    the currency its captured values are *reported* in, which is the one question the
-    open account-currency exception asks.
+    Both accounts state the currency they report values in, which is the owner's own
+    account fact on the Data page and not a question anything asks: the unlabelled
+    account's page carries no currency column, and nothing prompts for one, because a
+    holding's quote currency is settled by the exchange it is listed on. The analytical
+    layer still requires each account to say what its reported values are denominated in
+    before it will certify a basket, so the fixture states it the way the owner does.
     """
     securities, accounts = [], []
-    for source_id, (_, _, symbol, currency) in zip(source_ids, ACCOUNTS, strict=True):
+    for source_id, (_, _, symbol, _currency) in zip(source_ids, ACCOUNTS, strict=True):
         securities.append(
             {
                 "source_id": source_id,
@@ -512,7 +516,7 @@ def supplemental(source_ids, navs):
                 "total_value": f"{navs[source_id]:.2f}",
                 "complete": True,
                 "valuation_date": VALUATION_DATE,
-                **({"position_currency": currency} if currency else {}),
+                "position_currency": "USD",
             }
             for snapshot_id in range(1, ATTESTED_SNAPSHOTS + 1)
         )
