@@ -1,5 +1,6 @@
 import {clone, merge, numberOrNull, newDraft, editDraft, changeHorizon, previewReady,
-  acceptPreview, draftKey, restoreDraft, RequestGate, differences, validateConfigurationPatch, validateCompanyInputs, reviseAssessmentInputs} from './research-state.js';
+  acceptPreview, draftKey, restoreDraft, RequestGate, differences, validateConfigurationPatch, validateCompanyInputs, reviseAssessmentInputs,
+  applyProposal, keepValuationEdit, adoptOrphanDraft, decisionRecord, selectRun, CURRENT_VIEW} from './research-state.js';
 
 const $ = id => document.getElementById(id);
 const labels = ['adverse', 'central', 'favorable'];
@@ -7,6 +8,7 @@ const pages = ['overview','holdings','research','scenarios','review','data','set
 const gate = new RequestGate();
 let service = {}, result = null, saved = null, draft = newDraft(null), token = '', busy = false;
 let page = 'overview', securityId = '', detailId = '', selectedCandidate = '', account = '';
+let view = CURRENT_VIEW, previousRun = null;
 let supplemental = null, supplementalSupported = false, decisionRecords = [], latestEvaluation = null;
 let fieldCounter = 0;
 let current = null, currentRequest = 0;
@@ -76,6 +78,59 @@ function disclosure(title,...content) {
 }
 function metric(label,value,note='') {
   const node=el('div',null,'metric'); node.append(el('div',label,'metric-label'),el('div',value,'metric-value'),el('div',note,'metric-note')); return node;
+}
+// Every chart states what it measures, as of when, over which scope and how much of that
+// scope this run actually covered. A chart missing those four is a picture rather than a
+// measurement, so the caption is assembled from the run instead of typed per chart.
+function captionText({units,date,scope,coverage}) {
+  return [units || 'Units unstated',date || 'Date unavailable',scope || 'Scope unstated',coverage || 'coverage unstated'].join(' · ');
+}
+function chartCaption(parts) { return el('p',captionText(parts),'chart-note chart-caption'); }
+const observationDate = () => result?.metadata?.market_observation_date || result?.metadata?.as_of || null;
+// What the named capabilities answered this run, read from the coverage report the fetch
+// wrote; a run without one says so rather than implying complete coverage.
+function coverageSummary(...names) {
+  const capabilities=result?.coverage?.capabilities;
+  if(!capabilities)return 'coverage unstated';
+  const stated=names.map(name=>{
+    const row=capabilities[name];
+    return row?`${friendly(name).toLowerCase()} ${numeric(row.available) ?? 0}/${numeric(row.requested) ?? 0}`:null;
+  }).filter(Boolean);
+  return stated.length?`coverage ${stated.join(', ')}`:'coverage unstated';
+}
+// What one published output of this run has and what it still needs.
+function readinessNote(output) {
+  const row=(result?.readiness || []).find(item=>item.output===output);
+  if(!row)return 'coverage unstated';
+  return `coverage ${row.status}${row.missing?.length?` · missing ${row.missing.join(', ')}`:''}`;
+}
+function insight({metric,comparison,source_run,rationale}) {
+  const node=el('div',null,'insight');
+  node.append(el('strong',text(metric),'insight-metric'),el('span',text(comparison),'insight-comparison'),
+    el('small',[source_run,rationale].filter(Boolean).join(' · '),'insight-source'));
+  return node;
+}
+// Current holdings and a saved analysis are dated separately and are never read as one
+// view: the analysed sections withdraw rather than sit unexplained beside a newer
+// collection, and the caption says which of the two is on screen.
+function applyView() {
+  const analysed=view==='saved' && !!result;
+  for(const node of document.querySelectorAll('[data-analysis]'))node.hidden=!analysed;
+  const caption=analysed
+    ?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}${analysisOperationNote()}`
+    :result?'No completed analysis shown · current holdings above are the newest collection. Choose a saved run to see its analysis.'
+    :'No completed analysis yet · Current holdings above are shown from the newest collection.';
+  $('analysis-caption').textContent=caption;
+  // Every analysed page repeats the same statement, so no page can display a month-old
+  // run while the one selector above them says no analysis is shown.
+  for(const node of document.querySelectorAll('[data-analysis-note]'))node.textContent=caption;
+}
+// The selector, the view and the sections on screen are one statement. A load that did
+// not happen restores all three together rather than leaving them disagreeing.
+function restoreRunSelection() {
+  view=draft.baseRunId?'saved':CURRENT_VIEW;
+  $('research-run').value=draft.baseRunId || CURRENT_VIEW;
+  applyView();
 }
 function field(label,value,onChange,{type='text',options=null,percent=false,help='',wide=false}={}) {
   const wrapper=el('label',null,`field${wide?' wide':''}${type==='checkbox'?' check-field':''}`);
@@ -151,7 +206,8 @@ function barChart(rows,key,labelKey,caption) {
     const label=el('span',text(row[labelKey]),'bar-label'); label.title=text(row[labelKey]);
     item.append(label,track,el('span',pct(row[key]),'bar-value'));node.append(item);
   }
-  node.append(el('p',caption,'chart-note'));return node;
+  if(caption)node.append(caption instanceof Node?caption:el('p',caption,'chart-note'));
+  return node;
 }
 function lineChart(points,caption) {
   const valid=(points || []).filter(point=>numeric(point.value)!==null);
@@ -463,27 +519,233 @@ function renderOverview() {
     metric('Coverage',pct(summary.coverage),summary.complete?'Accounts reconciled':'Unresolved amounts remain visible'),
     metric('Unclassified',money(summary.unclassified_value,currency),'Not assumed to be cash'));
   $('overview-caption').textContent=result?`${text(result.metadata?.valuation_date)} · ${summary.position_count ?? '—'} positions · ${friendly(result.metadata?.scope)}`:'Run a review to reconcile completed holdings and available research inputs.';
-  $('analysis-caption').textContent=result?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}${analysisOperationNote()}`:'No completed analysis yet · Current holdings above are shown from the newest collection.';
   $('exposure-state').replaceChildren(badge(result?.exposure_status));
-  replace('issuer-chart',barChart(result?.issuer_exposure,'weight','issuer_id','Top issuer weights · portfolio NAV · direct and fund look-through'));
-  replace('sector-chart',barChart(result?.sector_exposure,'weight','sector','Additive sector weights · portfolio NAV · unknown exposure retained'));
+  replace('issuer-chart',barChart(result?.issuer_exposure,'weight','issuer_id',null),
+    chartCaption({units:'Share of portfolio NAV (%)',date:observationDate(),scope:'Top issuers; direct holdings and fund look-through',coverage:readinessNote('exposure')}));
+  replace('sector-chart',barChart(result?.sector_exposure,'weight','sector',null),
+    chartCaption({units:'Share of portfolio NAV (%)',date:observationDate(),scope:'Additive sector weights; unknown exposure retained',coverage:readinessNote('exposure')}));
+  renderWhatChanged();renderPortfolioRisks();renderPriorityLists();renderOverlap();
   replace('risk-metrics',metric('Volatility',pct(risk.annualized_volatility),'Annualized'),metric('Beta',num(risk.beta),'Approved benchmark'),metric('Tracking error',pct(risk.tracking_error),'Annualized'));
-  replace('risk-history',lineChart(risk.history,risk.history_label || 'Hypothetical historical risk illustration'));
+  replace('risk-history',lineChart(risk.history,risk.history_label || 'Hypothetical historical risk illustration'),
+    chartCaption({units:'Rebased weekly index (hypothetical)',date:observationDate(),scope:risk.history_label || 'Constant-weight weekly replay',coverage:readinessNote('risk')}));
   $('risk-caption').textContent=`${risk.history_label || 'History unavailable'} · ${risk.observations ?? 0} common observations · ${friendly(risk.status)}`;
   replace('risk-detail',kv({status:risk.status,observations:risk.observations,max_drawdown:pct(risk.max_drawdown),volatility_interval:risk.volatility_interval}),
     autoTable(risk.risk_contributions || []),autoTable(risk.stresses || []),listIssues(risk.issues),
     disclosure('Five-year risk sensitivity',kv(risk.five_year_sensitivity || {status:'Unavailable; five-year history coverage is required.'})),
-    disclosure('Benchmark history illustration',lineChart((risk.history || []).map(row=>({date:row.date,value:row.benchmark})),'Benchmark total-return history illustration')));
+    disclosure('Benchmark history illustration',lineChart((risk.history || []).map(row=>({date:row.date,value:row.benchmark})),'Benchmark total-return history illustration'),
+      chartCaption({units:'Rebased weekly benchmark index (hypothetical)',date:observationDate(),
+        scope:`${resolved().mandate?.benchmark_id || 'Approved benchmark'} · constant-weight weekly replay`,
+        coverage:readinessNote('risk')})));
   replace('review-priorities',result?listIssues(result.issues?.slice(0,8),'No blocking data issues reported. Review the assumptions before considering changes.'):empty());
   const macros=(result?.macro || []).map(row=>{
-    const node=el('article',null,'macro-card');node.append(metric(row.series_id,num(row.latest_value),`${row.units || 'Units unavailable'} · ${row.observation_date || 'Undated'}`),lineChart(row.history,`${row.series_id} observed history`),el('p',`Vintage ${row.vintage_date || 'unknown'} · context only`,'chart-note'));return node;
+    const node=el('article',null,'macro-card');node.append(metric(row.series_id,num(row.latest_value),`${row.units || 'Units unavailable'} · ${row.observation_date || 'Undated'}`),lineChart(row.history,`${row.series_id} observed history`),
+      chartCaption({units:row.units || 'Units unavailable',date:row.observation_date || observationDate(),scope:`Vintage ${row.vintage_date || 'unknown'} · context only`,coverage:`coverage ${(row.history || []).length} observations`}));return node;
   });replace('macro-panels',...(macros.length?macros:[empty('Import dated macro vintages or configure a provider.','Macro observations unavailable')]));
+  applyView();
+}
+// What changed since the comparable previous review: the decision that was recorded
+// then, the few balances this run can compare, and each security's own dated brief. A
+// balance is never restated as a return, because flows between reviews are unknown here.
+function decisionInsight() {
+  const record=service.last_decision;
+  if(!record || typeof record!=='object')return [];
+  const alternative=record.selected_alternative || record.candidate_id;
+  return [{metric:'Last recorded decision',comparison:`${friendly(record.action)}${alternative?` · ${alternative}`:' · no alternative chosen'}`,
+    source_run:`run ${String(record.run_id || '').slice(0,12)} · ${record.as_of || 'undated'}`,rationale:record.rationale}];
+}
+function summaryComparison() {
+  const now=result?.summary || {}, earlier=previousRun?.result?.summary;
+  if(!earlier)return [];
+  const label=`run ${String(previousRun.run_id).slice(0,12)} · ${previousRun.result?.metadata?.as_of || 'undated'}`;
+  return [
+    {metric:'Portfolio NAV',comparison:`${money(earlier.total_value,earlier.currency)} → ${money(now.total_value,now.currency)}`,source_run:label,
+      rationale:'Balance change only: contributions, withdrawals and other flows between the two reviews are unknown, so this is not a return.'},
+    {metric:'Reconciled coverage',comparison:`${pct(earlier.coverage)} → ${pct(now.coverage)}`,source_run:label,rationale:'Share of account value each review reconciled.'},
+    {metric:'Captured positions',comparison:`${text(earlier.position_count)} → ${text(now.position_count)}`,source_run:label,rationale:'Positions captured in each review.'},
+  ];
+}
+function briefChanges() {
+  const rows=[];
+  for(const [sid,record] of Object.entries(result?.research || {})) {
+    const brief=record?.brief;
+    if(!brief)continue;
+    for(const bullet of brief.changes_since_previous_review || [])
+      rows.push({metric:brief.name || sid,comparison:bullet?.text || text(bullet),
+        source_run:`as of ${brief.as_of || 'undated'}`,rationale:(bullet?.source_ids || []).join(', ')});
+  }
+  return rows;
+}
+function renderWhatChanged() {
+  const rows=result?[...decisionInsight(),...summaryComparison(),...briefChanges()]:[];
+  const shown=rows.slice(0,12);
+  $('what-changed-state').textContent=rows.length?`${rows.length} stated`:'Nothing stated';
+  replace('what-changed',
+    ...(shown.length?shown.map(insight):[result?empty('No recorded decision, comparable earlier review or dated brief change.','Nothing this review can evidence'):empty()]),
+    rows.length>shown.length?el('p',`+${rows.length-shown.length} more`,'muted'):null,
+    result?el('p',previousRun
+      ?`Compared with the previous ${friendly(result.metadata?.review_kind || 'review').toLowerCase()} review, run ${String(previousRun.run_id).slice(0,12)}.`
+      :'No earlier review of this kind is retained; only this review’s own dated changes are listed.','muted'):null);
+}
+// Concentration is stated against the cap the owner confirmed, never against a default.
+function concentrationRows() {
+  const cap=numeric(resolved().mandate?.issuer_cap);
+  return (result?.issuer_exposure || []).slice(0,12).map(row=>({issuer_id:row.issuer_id,weight:row.weight,
+    issuer_cap:cap,over_cap:cap!==null && numeric(row.weight)!==null?numeric(row.weight)-cap:null}));
+}
+function renderPortfolioRisks() {
+  const risk=result?.risk || {};
+  $('risk-state').replaceChildren(badge(risk.status));
+  replace('risk-contribution-chart',barChart(risk.risk_contributions,'contribution','security_id',null),
+    chartCaption({units:'Contribution to annualized volatility (%)',date:observationDate(),
+      scope:numeric(risk.denominator)!==null?`Covered holdings · denominator ${money(risk.denominator)}`:risk.scope || 'Reconciled NAV weights',
+      coverage:readinessNote('risk')}));
+  replace('stress-table',table(risk.stresses || [],[{key:'scenario',render:value=>friendly(value)},
+    {key:'return',label:'Portfolio return',render:pct},{key:'status',render:badge},{key:'basis',wrap:true}],
+    'Mechanical shocks the owner stated; not probabilities and not forecasts.'));
+  replace('concentration-table',table(concentrationRows(),[{key:'issuer_id',label:'Issuer'},
+    {key:'weight',label:'Household weight',render:pct},{key:'issuer_cap',label:'Confirmed cap',render:pct},
+    {key:'over_cap',label:'Over the cap',render:value=>numeric(value)===null?'—':numeric(value)>0?pct(value):'—'}],
+    resolved().mandate?.issuer_cap?'Household issuer weights against the confirmed issuer cap.':'No issuer cap is confirmed; weights are shown without a limit.'));
+}
+// This month's reading list: each row says which rules named the security and opens the
+// evidence behind them. Nothing here is a recommendation.
+function priorityRow(row) {
+  const node=button('',()=>showSecurity(row.security_id),'priority-row');
+  const reasons=(row.reasons || []).map(reason=>friendly(reason.rule)).join(' · ');
+  node.append(el('strong',`${row.security_id}${row.name?` · ${row.name}`:''}`,'priority-name'),
+    el('span',reasons || 'No rule stated','priority-reasons'),
+    el('small',[row.evidence?.sector,numeric(row.current_weight)!==null?`weight ${pct(row.current_weight)}`:null,
+      numeric(row.issuer_weight)!==null?`issuer ${pct(row.issuer_weight)}`:null].filter(Boolean).join(' · '),'priority-note'));
+  return node;
+}
+function renderPriorityLists() {
+  const priorities=result?.priorities || {};
+  for(const [id,key,fallback] of [['holdings-review','holdings_to_review','No holding collected a stated reason this review.'],
+    ['new-candidates','new_candidates','No unowned company collected a stated reason this review.']]) {
+    const rows=(priorities[key] || []).slice(0,10);
+    replace(id,...(rows.length?rows.map(priorityRow):[result?empty(fallback,'Nothing to review here'):empty()]),
+      result?el('p',priorities.rules?`${(priorities[key] || []).length} listed · ordered by how many independent reasons each collected`:'Automatic research did not run for this review; this list is empty rather than guessed.','muted'):null);
+  }
+}
+// Where the same issuer is held twice: directly and inside a fund. The residual a fund
+// did not disclose stays visible as unclassified rather than being spread silently.
+function overlapRows() {
+  const rows=(result?.issuer_exposure || []).filter(row=>numeric(row.indirect_value)>0 || (row.sources || []).length>1)
+    .slice(0,12).map(row=>({issuer_id:row.issuer_id,sector:row.sector,direct_value:row.direct_value,
+      indirect_value:row.indirect_value,funds:(row.sources || []).join(', ')}));
+  const residual=numeric(result?.summary?.unclassified_value);
+  if(residual)rows.push({issuer_id:'Unclassified residual',sector:'Unknown',direct_value:null,
+    indirect_value:residual,funds:'Exposure no fund disclosed; never spread across the known issuers'});
+  return rows;
+}
+function fundSectorBars() {
+  const rows=(result?.fund_sectors || []).filter(row=>row && typeof row==='object');
+  const funds=[...new Set(rows.map(row=>row.fund_id))];
+  return funds.map(fund=>{
+    const node=el('section',null,'fund-sectors');
+    node.append(el('h3',`${fund} disclosed sectors`),
+      barChart(rows.filter(row=>row.fund_id===fund),'weight','sector',null));
+    return node;
+  });
+}
+function renderOverlap() {
+  const unclassified=numeric(result?.summary?.unclassified_value);
+  const overlap=table(overlapRows(),[{key:'issuer_id',label:'Issuer'},{key:'sector'},
+      {key:'direct_value',label:'Held directly',render:value=>money(value)},
+      {key:'indirect_value',label:'Held through funds',render:value=>money(value)},
+      {key:'funds',label:'Contributing funds',wrap:true}],
+      'Issuers reached twice: directly and through a fund’s disclosed holdings.');
+  overlap.classList?.add('overlap-table');
+  replace('overlap-view',overlap,
+    ...fundSectorBars(),
+    el('p',unclassified?`Unclassified residual ${money(unclassified)} · exposure a fund did not disclose stays unclassified.`:'No unclassified residual in this review.','muted'),
+    chartCaption({units:`Value in ${result?.summary?.currency || 'the base currency'}`,date:observationDate(),
+      scope:'Direct holdings and disclosed fund holdings',coverage:coverageSummary('fund_disclosures','prices')}));
 }
 function securityRow(id) { return (result?.holdings || []).find(row=>row.security_id===id) || (result?.signals || []).find(row=>row.security_id===id) || {}; }
 function securityButton(id) { return button(id || 'Unresolved',()=>showSecurity(id),'text-button'); }
+// A published locator is data, not markup: only an https address the service already
+// vetted becomes a link, and everything else stays readable text.
+function sourceLink(source) {
+  const locator=typeof source?.locator==='string' && /^https:\/\//.test(source.locator)?source.locator:null;
+  const label=[source?.id,source?.received_at?`received ${source.received_at}`:null,source?.published_at?`published ${source.published_at}`:null].filter(Boolean).join(' · ');
+  if(!locator)return el('li',label || text(source));
+  const item=el('li'), link=el('a',label || locator);
+  link.href=locator;link.rel='noreferrer noopener';link.target='_blank';item.append(link);return item;
+}
+function bulletList(items) {
+  const rows=(items || []).filter(Boolean);
+  if(!rows.length)return el('p','Nothing stated in this section.','muted');
+  const list=el('ul',null,'issue-list');
+  for(const row of rows) {
+    const item=el('li',typeof row==='string'?row:row.text || text(row));
+    const sources=(row?.source_ids || []).join(', ');
+    if(sources)item.append(el('small',` · ${sources}`,'insight-source'));
+    list.append(item);
+  }
+  return list;
+}
+const BRIEF_SECTIONS=[['changes_since_previous_review','Changes since the previous review'],
+  ['key_financial_developments','Key financial developments'],['market_expectations','Market expectations'],
+  ['thesis','Thesis'],['counter_thesis','Counter-thesis'],['catalysts','Dated catalysts'],
+  ['invalidation_conditions','Invalidation conditions']];
+function detailEvidence(id) {
+  const brief=result?.research?.[id]?.brief;
+  if(!brief)return [empty('This review retained no dated brief for this security.','No brief')];
+  const sources=el('ul',null,'issue-list');
+  for(const source of brief.sources || [])sources.append(sourceLink(source));
+  return [el('p',`${brief.name || id} · as of ${text(brief.as_of)} · ${brief.horizon_months ?? '—'}-month horizon · ${text(brief.method_version)}`,'muted'),
+    ...BRIEF_SECTIONS.flatMap(([key,label])=>[el('h3',label),bulletList(brief[key])]),
+    el('h3','Sources'),(brief.sources || []).length?sources:el('p','No source with a known receipt was retained.','muted')];
+}
+function detailCalculation(id) {
+  const company=result?.company_research?.[id], proposals=result?.research?.[id]?.proposals;
+  const nodes=[];
+  if(company?.eps)nodes.push(el('h3','EPS and multiple'),table(company.eps.scenarios,[{key:'label',label:'Outcome'},
+    {key:'horizon_price',label:'Horizon price',render:value=>money(value,company.eps.currency)},
+    {key:'total_return',label:'Total return',render:pct},{key:'status',render:badge}],'Reviewed assumptions calculated by this run.'));
+  if(company?.dcf)nodes.push(el('h3','Discounted cash flow'),kv({status:company.dcf.status,
+    intrinsic_value_per_share:money(company.dcf.value_per_share,company.dcf.currency),
+    terminal_reinvestment_rate:pct(company.dcf.terminal_reinvestment_rate)}));
+  if(proposals?.eps)nodes.push(el('h3','Proposed EPS inputs'),table(proposals.eps.scenarios,[{key:'label',label:'Outcome'},
+    {key:'eps',label:'Horizon EPS',render:value=>num(value,2)},{key:'pe',label:'Matching P/E',render:value=>num(value,2)},
+    {key:'distributions_per_starting_share',label:'Cash / starting share',render:value=>num(value,2)}],
+    `Proposed from ${text(proposals.eps.proposal_meta?.estimate_period)} consensus; not adopted until kept.`));
+  if(proposals?.dcf)nodes.push(el('h3','Proposed DCF inputs'),kv({discount_rate:pct(proposals.dcf.discount_rate),
+    terminal_growth_rate:pct(proposals.dcf.terminal_growth_rate),terminal_roic:pct(proposals.dcf.terminal_roic),
+    diluted_shares:num(proposals.dcf.diluted_shares,0)}));
+  if(!nodes.length)nodes.push(empty('No valuation was calculated and none was proposed for this security.','No calculation'));
+  return nodes;
+}
+function detailAssumptions(id) {
+  const proposals=result?.research?.[id]?.proposals, rows=[];
+  for(const kind of ['eps','dcf']) {
+    const meta=proposals?.[kind]?.proposal_meta;
+    if(!meta)continue;
+    for(const name of meta.assumptions_visible || [])
+      rows.push({model:kind.toUpperCase(),assumption:friendly(name),evidence:meta.evidence?.[name] || 'Stated by the model, not observed',
+        basis:meta.basis || 'proposed'});
+  }
+  const kept=draft.workspace.valuations?.[id];
+  return [table(rows,[{key:'model'},{key:'assumption'},{key:'evidence',wrap:true},{key:'basis'}],
+    'The assumptions each proposal makes and the evidence behind them.'),
+    kept?kv({origin:kept.origin,source:kept.source,version:kept.version,horizon_months:kept.horizon_months}):el('p','No proposal has been kept for this security.','muted'),
+    ...(proposals?.reasons || []).length?[el('h3','Why a proposal was refused'),listIssues((proposals.reasons || []).map(row=>({message:row.detail || text(row),severity:row.severity})))]:[]];
+}
+function detailLimitations(id) {
+  const coverage=result?.coverage?.by_security?.[id];
+  const brief=result?.research?.[id]?.brief;
+  const rows=(result?.readiness || []).map(row=>({output:friendly(row.output),status:row.status,missing:(row.missing || []).join(', ')}));
+  return [el('h3','Provider coverage for this security'),
+    coverage?kv(coverage):el('p','This review recorded no per-security coverage; nothing is claimed about it.','muted'),
+    el('h3','What each output of this run needs'),table(rows,[{key:'output'},{key:'status',render:badge},{key:'missing',wrap:true}]),
+    el('h3','Stated limitations'),listIssues(brief?.limitations || result?.coverage?.limitations,'No limitation was recorded for this security.')];
+}
 function showSecurity(id) {
   detailId=id;const holdings=(result?.holdings || []).filter(row=>row.security_id===id), score=(result?.signals || []).find(row=>row.security_id===id);
   $('security-dialog-title').textContent=id || 'Unresolved security';replace('security-dialog-content',autoTable(holdings),score?kv(score):empty('This instrument has no company score.','Company score unavailable'));
+  replace('detail-evidence',...detailEvidence(id));replace('detail-calculation',...detailCalculation(id));
+  replace('detail-assumptions',...detailAssumptions(id));replace('detail-limitations',...detailLimitations(id));
   $('security-dialog').showModal();
 }
 function renderHoldings() {
@@ -505,6 +767,37 @@ function renderScreen() {
     {key:'eligible',render:value=>badge(value?'eligible':'ineligible')},{key:'reasons',label:'Coverage / eligibility',wrap:true}],
   'Ranks are relative research scores, not return forecasts. Open a security for raw inputs and peer coverage.'));
 }
+// A proposal is this review's reviewable starting point, never an adopted assumption:
+// keeping one copies it into the workspace as a prefill that still has to be
+// recalculated, reviewed and saved.
+const proposalFor = kind => result?.research?.[securityId]?.proposals?.[kind] || null;
+function keepProposal(kind) {
+  const proposal=proposalFor(kind);
+  if(!proposal)throw new Error(`This review proposed no ${kind.toUpperCase()} model for ${securityId || 'this security'}.`);
+  if(!draft.baseRunId)throw new Error('Load a saved run before keeping a proposal.');
+  draft=applyProposal(draft,securityId,kind,proposal,horizon());persist();renderAll();
+  announce(`Proposed ${kind.toUpperCase()} assumptions copied for review. Recalculate to value them, then save to retain them.`);
+}
+function assumptionTags(kind,proposal) {
+  const meta=proposal?.proposal_meta;
+  if(!meta)return [el('span',`${kind.toUpperCase()} · no proposal this review`,'assumption-tag muted')];
+  const tags=(meta.assumptions_visible || []).map(name=>el('span',`${kind.toUpperCase()} · ${friendly(name)}`,'assumption-tag'));
+  for(const [name,source] of Object.entries(meta.evidence || {}))tags.push(el('span',`${friendly(name)} · ${source}`,'assumption-tag evidence'));
+  return tags;
+}
+function renderProposals() {
+  const actions=[], tags=[];
+  for(const kind of ['eps','dcf']) {
+    const proposal=proposalFor(kind);
+    const action=button(`Use proposed ${kind.toUpperCase()} assumptions`,()=>keepProposal(kind),proposal?'secondary':'quiet');
+    action.disabled=!proposal || !draft.baseRunId;
+    action.title=proposal?`Copy this review's proposed ${kind.toUpperCase()} inputs into the workspace for review.`
+      :`This review proposed no ${kind.toUpperCase()} model for ${securityId || 'this security'}.`;
+    actions.push(action);tags.push(...assumptionTags(kind,proposal));
+  }
+  replace('proposal-actions',...actions);
+  replace('assumption-strip',...tags,el('p','A proposal is evidence-backed input, not an established assumption. Review each value before recalculating.','muted'));
+}
 function epsDefaults() {
   const security=securityRow(securityId);
   return {starting_price:numeric(security.price),currency:security.currency || resolved().mandate?.base_currency || null,
@@ -512,20 +805,40 @@ function epsDefaults() {
 }
 function valuationValue(kind) { return draft.workspace.valuations?.[securityId]?.[kind]; }
 function updateValuation(kind, mutate) {
-  workspaceEdit(next=>{
-    const values=next.valuations[securityId] ||= {origin:'manual',source:'User scenario input',version:1,horizon_months:horizon()};
-    const model=clone(values[kind] || (kind==='eps'?epsDefaults():dcfDefaults()));mutate(model);values[kind]=model;
-    values.version=(values.version || 0)+1;
-  });
+  const model=clone(draft.workspace.valuations?.[securityId]?.[kind] || (kind==='eps'?epsDefaults():dcfDefaults()));
+  mutate(model);
+  draft=keepValuationEdit(draft,securityId,kind,model,
+    {origin:'manual',source:'User scenario input',version:1,horizon_months:horizon()});
+  persist();renderState(true);renderDiff();
+}
+// The grid is shaded by where each cell sits between the grid's own lowest and highest
+// value, so the eye finds the drivers; the number and its contrast stay unchanged, and a
+// cell without a value is left unshaded rather than shaded as a zero.
+function heatLegend(low,high,currency) {
+  const node=el('div',null,'heat-legend');
+  node.append(el('span',money(low,currency),'heat-end'),el('span',null,'heat-bar'),el('span',money(high,currency),'heat-end'),
+    el('small','Shading compares cells within this grid only.','muted'));
+  return node;
 }
 function sensitivity(id,grid,type) {
   if(!grid){replace(id,empty('Supply complete inputs and recalculate to compare drivers.','Sensitivity unavailable'));return;}
   const x=type==='eps'?grid.pe_values:grid.terminal_growth_rates, y=type==='eps'?grid.eps_values:grid.discount_rates;
   const rows=(grid.cells || []).map((cells,index)=>({axis:y[index],...Object.fromEntries(cells.map((cell,j)=>[`c${j}`,cell]))}));
+  const amount=cell=>numeric(type==='eps'?cell?.horizon_price:cell?.value_per_share);
+  const values=(grid.cells || []).flat().map(amount).filter(value=>value!==null);
+  const low=values.length?Math.min(...values):null, high=values.length?Math.max(...values):null, span=(high-low) || 1;
   const node=table(rows,[{key:'axis',label:type==='eps'?'EPS / P/E':'Discount / growth',render:type==='eps'?num:pct},...x.map((value,index)=>({key:`c${index}`,label:type==='eps'?num(value):pct(value),render:cell=>{
-    const item=el('span',money(type==='eps'?cell.horizon_price:cell.value_per_share,grid.currency));item.title=cell.issues?.join('; ') || (type==='eps'?`Horizon return ${pct(cell.total_return)}`:'Conditional intrinsic value per share');return item;
+    const cellValue=amount(cell);
+    const item=el('span',money(type==='eps'?cell.horizon_price:cell.value_per_share,grid.currency),cellValue===null?'':'heat');
+    if(cellValue!==null)item.style.setProperty('--heat',((cellValue-low)/span).toFixed(3));
+    item.title=cell.issues?.join('; ') || (type==='eps'?`Horizon return ${pct(cell.total_return)}`:'Conditional intrinsic value per share');return item;
   }}))],type==='eps'?'Horizon price per share; hover a cell for total return or missing reason.':'Conditional intrinsic value per share; invalid terminal combinations remain unavailable.');
-  node.classList.add('sensitivity');replace(id,node);
+  node.classList.add('sensitivity');
+  replace(id,node,values.length?heatLegend(low,high,grid.currency):null,
+    chartCaption({units:type==='eps'?`Horizon price per share (${grid.currency || 'currency unstated'})`
+      :`Intrinsic value per share (${grid.currency || 'currency unstated'})`,
+      date:observationDate(),scope:`${securityId || 'this security'} · grid around the central case`,
+      coverage:readinessNote('company_valuation')}));
 }
 function renderEPS() {
   const data=valuationValue('eps') || epsDefaults();
@@ -618,9 +931,12 @@ function renderCompany() {
   $('research-security').replaceChildren(...(ids.length?ids:['']).map(id=>{const item=el('option',id || 'Enter an exact security ID');item.value=id;return item;}));$('research-security').value=securityId;
   if(!securityId){for(const id of ['eps-form','dcf-form','evidence-form'])replace(id,empty('Choose a retained security or enter its exact identifier.','Select a company'));return;}
   const security=securityRow(securityId);
-  replace('security-summary',kv({security_id:securityId,issuer:security.issuer_id,currency:security.currency,horizon:`${horizon()} months`,basis:'Subjective assumptions; prices may be unavailable'}),
+  const kept=draft.workspace.valuations?.[securityId];
+  replace('security-summary',kv({security_id:securityId,issuer:security.issuer_id,currency:security.currency,horizon:`${horizon()} months`,
+    valuation_origin:kept?.origin || 'none kept',valuation_source:kept?.source || 'not stated',
+    basis:'Subjective assumptions; prices may be unavailable'}),
     disclosure('Retained financial statements and source observations',autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),el('p',result?.observations?.fundamentals?.scope || 'Only facts eligible at the saved cutoff are displayed.','muted')));
-  renderEPS();renderDCF();renderEvidence();
+  renderProposals();renderEPS();renderDCF();renderEvidence();
   jsonEditor('company-json','Company assessment and valuation inputs',{
     assessment:draft.workspace.assessments[securityId] || assessmentDefaults(),
     valuations:draft.workspace.valuations[securityId] || {},
@@ -637,6 +953,100 @@ function renderCompany() {
       }
     });
   },`company-${securityId}`);
+}
+// Grouped bars for two series over the same states, drawn like `lineChart`: one baseline
+// at zero, one pair of bars per state, and every value also stated in the axis text so
+// the chart is not the only way to read it.
+function groupedBarChart(groups,series,caption) {
+  const usable=groups.filter(group=>group.values.some(value=>numeric(value)!==null));
+  if(!usable.length)return empty('No comparable outcomes are available for these states.','Comparison unavailable');
+  const values=usable.flatMap(group=>group.values.map(numeric)).filter(value=>value!==null);
+  const high=Math.max(...values,0), low=Math.min(...values,0), span=(high-low) || 1;
+  const container=el('div'), svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox','0 0 600 180');svg.setAttribute('class','grouped-chart');svg.setAttribute('role','img');svg.setAttribute('aria-label',caption);
+  const title=document.createElementNS(svg.namespaceURI,'title');title.textContent=caption;svg.append(title);
+  const place=value=>160-(value-low)/span*140, zero=place(0);
+  const axis=document.createElementNS(svg.namespaceURI,'line');
+  for(const [key,value] of Object.entries({x1:0,x2:600,y1:zero,y2:zero,stroke:'#c9d4c2','stroke-width':1}))axis.setAttribute(key,value);
+  svg.append(axis);
+  const width=600/usable.length;
+  usable.forEach((group,index)=>{
+    group.values.forEach((value,position)=>{
+      const amount=numeric(value);
+      if(amount===null)return;
+      const y=place(amount), rect=document.createElementNS(svg.namespaceURI,'rect');
+      rect.setAttribute('x',index*width+width*0.18+position*(width*0.3));
+      rect.setAttribute('width',width*0.26);
+      rect.setAttribute('y',Math.min(y,zero));
+      rect.setAttribute('height',Math.max(1,Math.abs(zero-y)));
+      rect.setAttribute('class',`series-${position}`);
+      const label=document.createElementNS(svg.namespaceURI,'title');
+      label.textContent=`${group.label} · ${series[position]} · ${pct(amount)}`;rect.append(label);
+      svg.append(rect);
+    });
+  });
+  const legend=el('div',null,'chart-legend');
+  legend.append(...series.map((name,index)=>el('span',name,`legend-key series-${index}`)));
+  const readout=el('div',null,'chart-readout');
+  readout.append(...usable.map(group=>el('span',`${group.label}: ${group.values.map(pct).join(' vs ')}`)));
+  container.append(svg,legend,readout);return container;
+}
+// The owner's stated view of the world: a few market states, a multiplier per sector and
+// a currency state per foreign quote currency. The next full review expands it into the
+// per-security joint scenarios the engine validates; a recalculation replays the frozen
+// scenarios this run already has.
+function sharedState() { return resolved().allocation?.shared_state || {}; }
+// One versioned statement of the world: an edit replaces it whole, exactly as the
+// service stores it, so half of a previous view can never stay merged underneath.
+function patchSharedState(values) { patch({allocation:{shared_state:merge(sharedState(),values)}}); }
+function stateProbability(labels,label,value) {
+  if(value===null){patchSharedState({probabilities:null});return;}
+  const current=sharedState().probabilities;
+  const next={...(current || Object.fromEntries(labels.map(name=>[name,null])))};
+  next[label]=value;patchSharedState({probabilities:next});
+}
+function renderSharedState() {
+  const state=sharedState(), labels=Object.keys(state.market_returns || {});
+  if(!labels.length){replace('shared-state-editor',el('p','This run retained no shared market state; per-security joint forecasts are used as supplied.','muted'));return;}
+  const markets=form(labels.map(label=>field(`${friendly(label)} market return (%)`,state.market_returns[label],
+    value=>patchSharedState({market_returns:{[label]:value}}),{type:'number',percent:true,
+    help:'Total return of the broad equity market in this state over the stated horizon.'})));
+  const sectors=table(Object.entries(state.sector_multipliers || {}).map(([sector,multiplier])=>({sector,multiplier})),
+    [{key:'sector'},{key:'multiplier',label:'Multiplier on the market state',render:(value,row)=>field(`${row.sector} multiplier`,value,
+      next=>patchSharedState({sector_multipliers:{[row.sector]:next}}),{type:'number'})}],
+    'Each sector moves with the market state times this multiplier. A multiplier is a stated view, not a measured beta.');
+  const fx=table(Object.entries(state.fx_returns || {}).map(([code,states])=>({code,...states})),
+    [{key:'code',label:'Currency'},...labels.map(label=>({key:label,label:friendly(label),render:(value,row)=>field(`${row.code} ${friendly(label)} currency return (%)`,value,
+      next=>patchSharedState({fx_returns:{[row.code]:{[label]:next}}}),{type:'number',percent:true})}))],
+    'Presentation currency per unit of the foreign currency in each state.');
+  const probabilities=form(labels.map(label=>field(`${friendly(label)} state probability (%)`,state.probabilities?.[label] ?? null,
+    value=>stateProbability(labels,label,value),{type:'number',percent:true,
+    help:'Optional. State every probability or leave every one blank; a partial distribution is refused.'})));
+  replace('shared-state-editor',el('h3','Stated market view'),
+    el('p','These states are expanded into per-security joint scenarios by the next full review (Update & analyze). Recalculating replays the joint scenarios this saved run already froze.','muted'),
+    markets,el('h3','Sector multipliers'),sectors,el('h3','Currency states'),fx,
+    el('h3','State probabilities (optional)'),probabilities,
+    button('Reset to this run’s saved market view',()=>{
+      patchSharedState(clone(draft.baseConfig.allocation?.shared_state || {}));renderScenarios();
+      announce('The stated market view was restored to this saved run’s assumptions.');
+    },'quiet'));
+}
+function selectedCandidateRow() {
+  const candidates=result?.allocation?.candidates || [];
+  return candidates.find(row=>row.candidate===selectedCandidate)
+    || candidates.find(row=>row.candidate===result?.allocation?.selected_candidate) || candidates[0] || null;
+}
+function renderScenarioComparison() {
+  const outcome=result?.scenarios || {}, candidate=selectedCandidateRow();
+  const groups=(outcome.scenarios || []).map(row=>({label:friendly(row.scenario),
+    values:[row.return,candidate?.scenarios?.[row.scenario] ?? null]}));
+  replace('scenario-comparison',
+    groupedBarChart(groups,['Current portfolio',candidate?friendly(candidate.candidate):'No alternative selected'],
+      'Current portfolio against the selected alternative, by joint state'),
+    chartCaption({units:`${outcome.horizon_months || horizon()}-month total return (%)`,date:observationDate(),
+      scope:candidate?`Current portfolio against ${candidate.candidate}, after costs and tax reserve`:'Current portfolio only; no alternative is selected',
+      coverage:readinessNote('baskets')}),
+    el('p',outcome.basis || 'Conditional on the stated assumptions; not a forecast.','muted'));
 }
 function scenarioLabels() {
   const observed=(result?.scenarios?.scenarios || []).map(row=>row.scenario);
@@ -664,10 +1074,14 @@ function renderScenarios() {
     if(next===null)delete map[row.security_id][name];else map[row.security_id][name]=next;
     patch({allocation:{return_overrides:map}});
   },{type:'number',percent:true})}))],'Manual overrides remain subjective. Use identical joint state labels across assets and benchmark.'));
+  renderSharedState();
   replace('stress-editor',form(['stress_equity_shock','stress_growth_shock','stress_rates_shock'].map(key=>field(`${friendly(key)} (%)`,config.risk?.[key],value=>patch({risk:{[key]:value}}),{type:'number',percent:true}))));
   jsonEditor('scenario-json','Allocation and risk assumptions',{allocation:config.allocation,risk:config.risk},value=>patch(value));
   const outcome=result?.scenarios || {};
-  replace('scenario-chart',barChart(outcome.scenarios,'return','scenario',`${outcome.horizon_months || horizon()}-month hypothetical portfolio total returns; bars show magnitude, labels show sign`));
+  replace('scenario-chart',barChart(outcome.scenarios,'return','scenario',null),
+    chartCaption({units:`${outcome.horizon_months || horizon()}-month total return (%)`,date:observationDate(),
+      scope:'Hypothetical portfolio outcomes; bars show magnitude, labels show sign',coverage:readinessNote('candidates')}));
+  renderScenarioComparison();
   replace('scenario-results',table(outcome.scenarios,[{key:'scenario'},{key:'probability',render:pct},{key:'return',label:'Portfolio return',render:pct},{key:'benchmark_return',render:pct},{key:'active_return',label:'Active return',render:pct},{key:'terminal_value',label:'Terminal value',render:value=>money(value)},{key:'net_return',label:'After reserved friction',render:pct},{key:'net_terminal_value',label:'Terminal value after reserved friction',render:value=>money(value)}]),kv({weighted_return:pct(outcome.weighted_return),net_weighted_return:pct(outcome.net_weighted_return),benchmark_weighted_return:pct(outcome.benchmark_weighted_return),basis:outcome.basis,status:outcome.status}));
   const prior=saved?.result?.scenarios;
   const comparison=(outcome.scenarios || []).map(row=>({scenario:row.scenario,saved_return:prior?.horizon_months===outcome.horizon_months?prior.scenarios?.find(item=>item.scenario===row.scenario)?.return:null,displayed_return:row.return}));
@@ -689,14 +1103,34 @@ function renderReview() {
   const candidate=candidates.find(row=>row.candidate===selectedCandidate) || allocation;
   $('basket-title').textContent=selectedCandidate?friendly(selectedCandidate):'Proposed basket';$('basket-state').replaceChildren(badge(candidate.status));
   replace('basket-metrics',metric('Execution cost',money(candidate.execution_cost),'Complete basket'),metric('Conditional tax reserve',money(candidate.conditional_tax_reserve),'Not final liability'),metric('Redeployed principal',money(candidate.redeployed_principal),'Hurdle denominator'));
-  replace('trade-basket',autoTable(candidate.proposals || []));replace('basket-funding',autoTable(candidate.accounts || []));
+  renderAllocationChange(candidate);
+  // The exact decimal amounts, beside the weights the chart above shows.
+  replace('trade-basket',table(candidate.proposals || [],[
+    {key:'security_id',label:'Security',render:securityButton},{key:'account_id',label:'Account'},{key:'action'},
+    {key:'current_weight',label:'Current weight',render:pct},{key:'target_weight',label:'Target weight',render:pct},
+    {key:'decimal_amounts',label:'Exact trade value',render:(value,row)=>`${value?.trade_value ?? num(row.trade_value)} ${row.currency || ''}`.trim()},
+    {key:'fractional_quantity_change',label:'Exact quantity change',render:(value,row)=>text(row.decimal_amounts?.quantity_change ?? num(value,8))},
+    {key:'price_used',label:'Price used',render:value=>num(value)},
+    {key:'estimated_cost',label:'Execution cost',render:value=>num(value)},
+    {key:'estimated_tax',label:'Conditional tax reserve',render:value=>num(value)},
+    {key:'executable',label:'Executable',render:value=>badge(value?'executable':'not executable')},
+    {key:'review_flags',label:'Review flags',wrap:true,
+      render:value=>Array.isArray(value)?(value.length?value.map(friendly).join(', '):'—'):text(value)},
+    {key:'basis',wrap:true},{key:'reason',wrap:true}],
+    'Exact decimal trade values and quantities for the complete basket. Nothing here places an order.'),
+    // The reserve above is only as good as the lots behind it, so the plan stays readable.
+    disclosure('Tax lot plan behind the conditional reserve',
+      autoTable((candidate.proposals || []).flatMap(leg=>(leg?.lot_plan || [])
+        .map(lot=>({security_id:leg.security_id,account_id:leg.account_id,...lot})))),
+      el('p','Lots the conditional tax reserve was estimated from. An estimate flagged for review is named in the basket table above.','muted')));
+  replace('basket-funding',autoTable(candidate.accounts || []));
   replace('basket-reasons',listIssues([...(allocation.issues || []),...(candidate.issues || []),...(candidate.decisions || []).map(row=>({message:`${row.security_id || row.account_id || ''}: ${row.reason || row.action}`}))]),candidate.validation?kv(candidate.validation):null,
     disclosure('Candidate joint outcomes after costs and tax reserve',table(Object.entries(candidate.scenarios || {}).map(([scenario,value])=>({scenario,return:value})),[{key:'scenario'},{key:'return',render:pct}],'Conditional horizon returns for the complete funded basket.')),
     disclosure('Trading-cost sensitivities',autoTable(candidate.cost_sensitivities || [])),
     disclosure('Substitution-hurdle sensitivities',autoTable(candidate.hurdle_sensitivities || [])),
     disclosure('Candidate method and solver diagnostics',kv(allocation.solver || {})));
   $('save-decision').disabled=!draft.baseRunId || busy;
-  replace('decision-history',autoTable(decisionRecords));
+  renderDecisionHistory();
   const runs=service.runs || [];
   replace('run-history',table(runs,[{key:'run_id',label:'Saved run',render:id=>button(String(id).slice(0,16),()=>loadRun(id),'text-button')},{key:'as_of',label:'Decision date'},{key:'created_at'},{key:'parent_run_id'}]));
   for(const id of ['compare-left','compare-right']){
@@ -710,6 +1144,79 @@ function renderReview() {
   }
   replace('evaluation-results',latestEvaluation?kv(latestEvaluation):empty('Supply actual observations after the endpoint and required latency mature.','No evaluation loaded'));
   renderLedgerEvaluation();
+}
+// What the selected basket would change, per security, before and after. The exact
+// amounts stay in the funding table below; the chart is a shape, not a settlement.
+function renderAllocationChange(candidate) {
+  const legs=(candidate?.proposals || []).filter(row=>row && typeof row==='object');
+  // A basket with many legs is read leg by leg in the table below; the chart shows the
+  // largest few so its stated values stay readable rather than overflowing the panel.
+  const shown=legs.slice(0,10);
+  const groups=shown.map(row=>({label:`${row.security_id}${row.account_id?` · ${row.account_id}`:''}`,
+    values:[row.current_weight,row.target_weight]}));
+  replace('allocation-before-after',
+    groupedBarChart(groups,['Current weight','Target weight'],'Household weight before and after the selected basket'),
+    legs.length>shown.length?el('p',`+${legs.length-shown.length} more legs, listed in the basket table below.`,'muted'):null,
+    chartCaption({units:'Share of the funding denominator (%)',date:observationDate(),
+      scope:candidate?.candidate?`Selected alternative ${candidate.candidate}`:'No alternative is selected',
+      coverage:readinessNote('baskets')}),
+    el('p','Exact amounts, including the decimal trade values and quantities, are in the basket and funding tables below.','muted'));
+}
+function renderDecisionHistory() {
+  const rows=(decisionRecords || []).map(record=>({...(record.payload || record),
+    recorded_at:record.created_at || record.recorded_at}));
+  replace('decision-history',table(rows,[{key:'as_of',label:'Decision date'},
+    {key:'action',render:value=>friendly(value)},{key:'selected_alternative',label:'Selected alternative'},
+    {key:'compared_candidates',label:'Compared against',wrap:true,render:value=>Array.isArray(value)?value.join(', '):text(value)},
+    {key:'rationale',wrap:true},{key:'recorded_at',label:'Recorded',render:value=>when(value)}],
+    'Decisions recorded against this saved run. Recording a decision never changes a saved forecast.'));
+}
+// Recording the decision is one explicit step: which alternative, weighed against which
+// others, and why. The dialog refuses a decision the saved run cannot support.
+// A refused decision is answered inside the dialog the owner is reading: the page's own
+// error line sits behind the modal backdrop, where neither eye nor screen reader reaches
+// it while the dialog is open.
+function decisionError(message='') {
+  $('decision-error').textContent=message;$('decision-error').hidden=!message;
+  const rationale=$('decision-rationale');
+  if(message){rationale.setAttribute('aria-invalid','true');rationale.focus();}
+  else rationale.removeAttribute('aria-invalid');
+}
+// The recorded action and the recorded alternative are one statement, so the two controls
+// are kept in step rather than letting the action silently discard the alternative.
+let decisionAlternative='';
+function syncDecisionAlternative() {
+  const select=$('decision-alternative'), noAction=$('decision-action').value==='no_action';
+  select.disabled=noAction;
+  select.value=noAction?'':(select.value || decisionAlternative);
+  select.title=noAction?'A no-change decision records no alternative. Choose another action to name one.':'';
+}
+function openDecisionDialog() {
+  if(!draft.baseRunId)throw new Error('Choose a saved run before recording a decision.');
+  if(draft.dirty)throw new Error('Save or reset the current draft so this decision refers to a retained run.');
+  const candidates=(result?.allocation?.candidates || []).map(row=>row.candidate).filter(Boolean);
+  $('decision-compared').textContent=candidates.length
+    ?`Compared against ${candidates.join(', ')} · run ${String(draft.baseRunId).slice(0,12)} · ${text(result?.metadata?.as_of)}`
+    :'This run produced no feasible alternative, so only a no-change decision can be recorded.';
+  const chosen=selectedCandidateRow()?.candidate || '';
+  $('decision-alternative').replaceChildren(...[['','No alternative chosen'],...candidates.map(id=>[id,friendly(id)])].map(([value,label])=>{
+    const option=el('option',label);option.value=value;return option;
+  }));
+  decisionAlternative=candidates.includes(chosen)?chosen:'';
+  $('decision-action').value='no_action';$('decision-rationale').value='';
+  decisionError();syncDecisionAlternative();
+  $('decision-dialog').showModal();
+}
+async function recordDecision() {
+  try {
+    decisionError();
+    const record=decisionRecord(draft,result,{action:$('decision-action').value,
+      candidate_id:$('decision-alternative').value || null,rationale:$('decision-rationale').value});
+    await api('/api/research/decision',record);
+  } catch(failure){decisionError(failure.message);return;}
+  $('decision-dialog').close();$('decision-rationale').value='';decisionError();
+  await refreshService();await loadDecisions();renderOverview();
+  announce('Decision recorded. No saved forecast was changed.');
 }
 function configField(group,key,label= friendly(key),options={}) {
   return field(label,resolved()[group]?.[key],value=>patch({[group]:{[key]:value}}),options);
@@ -745,6 +1252,17 @@ function renderSettings() {
     configField('allocation','max_names','Maximum sleeve names',{type:'number'}),
     field('New-flow treatment',config.allocation?.flow_policy,value=>patch({allocation:{flow_policy:value || null}}),{options:[['','Unconfirmed'],['approved_benchmark','Approved benchmark']]}),
   ]),...(accountNodes.length?accountNodes:[empty('Load a reconciled snapshot to see exact account identifiers.','Accounts unavailable')]));
+  const policies=config.mandate?.account_candidate_policy || {};
+  const accounts=(result?.summary?.accounts || []).map(row=>row.account_id).filter(Boolean);
+  replace('candidate-policy-form',form([
+    ...accounts.map(id=>field(`${id} candidate comparison`,policies[id] || 'none',value=>{
+      const map={...(resolved().mandate?.account_candidate_policy || {})};map[id]=value;patch({mandate:{account_candidate_policy:map}});
+    },{options:[['none','None: compare held securities only'],['eligible_universe','Eligible universe: compare screened candidates']],
+      help:'Unowned companies are compared for this account only where this says so.'})),
+    field('Watchlist symbols (comma separated)',(config.signals?.watchlist || []).join(', '),value=>{
+      patch({signals:{watchlist:value.split(',').map(item=>item.trim()).filter(Boolean)}});
+    },{wide:true,help:'Exact listing symbols researched first when a review has budget. A watchlist is not a second universe.'}),
+  ]),...(accounts.length?[]:[el('p','Load a reconciled snapshot to see exact account identifiers.','muted')]));
   jsonEditor('account-settings-json','Explicit account permissions, dealing rules, sleeve members and source-backed flows',{
     mandate:{account_permissions:config.mandate?.account_permissions || {},dealing_rules:config.mandate?.dealing_rules || {}},
     allocation:{sleeve_membership:config.allocation?.sleeve_membership || {},new_flows:config.allocation?.new_flows || {}},
@@ -824,7 +1342,11 @@ function renderLedgerEvaluation() {
 }
 function renderContext() {
   const runs=service.runs || [];
-  $('research-run').replaceChildren(...(runs.length?runs:[{run_id:'',as_of:'No saved run'}]).map(run=>{const option=el('option',`${run.as_of || run.created_at || 'Saved run'}${run.run_id?` · ${run.run_id.slice(0,12)}`:''}`);option.value=run.run_id;return option;}));$('research-run').value=draft.baseRunId || '';
+  // One selector over two dated views: the newest collection, or one saved analysis.
+  const options=[[CURRENT_VIEW,'Current holdings (no analysis)'],
+    ...runs.map(run=>[run.run_id,`${run.as_of || run.created_at || 'Saved run'} · ${run.run_id.slice(0,12)}`])];
+  $('research-run').replaceChildren(...options.map(([value,label])=>{const option=el('option',label);option.value=value;return option;}));
+  $('research-run').value=view==='saved' && draft.baseRunId?draft.baseRunId:CURRENT_VIEW;
   const accounts=result?.summary?.accounts || [];
   if(account && !accounts.some(row=>row.account_id===account))account='';
   $('account-scope').replaceChildren(...[{account_id:'',name:'All accounts'},...accounts].map(row=>{const option=el('option',row.name || row.account_id);option.value=row.account_id;return option;}));$('account-scope').value=account;
@@ -847,20 +1369,41 @@ function draftChoice(message) {
   });
 }
 async function refreshService() { service=await api('/api/research'); }
+// What changed is stated against the newest earlier review of the same kind, which the
+// service names for each run. A previous run that cannot be read is simply not compared.
+async function loadPreviousRun(id,owner) {
+  if(owner!==draft.baseRunId)return;  // The run this comparison belongs to is no longer shown.
+  previousRun=null;
+  if(id){
+    try {
+      const response=await api(`/api/research/runs/${encodeURIComponent(id)}`);
+      if(owner!==draft.baseRunId)return;
+      previousRun={run_id:id,result:response.result};
+    } catch { previousRun=null; }
+  }
+  try { renderWhatChanged(); } catch { /* the panel keeps its last state */ }
+}
+async function refreshPreviousRun(runId) {
+  if(!runId){previousRun=null;return;}
+  try { await loadPreviousRun((await api(`/api/research/runs/${encodeURIComponent(runId)}`)).previous_run_id,runId); }
+  catch { previousRun=null; }
+}
 async function loadDecisions() {
-  if(!draft.baseRunId){decisionRecords=[];return;}
+  if(!draft.baseRunId){decisionRecords=[];renderDecisionHistory();return;}
   const base=draft.baseRunId;
-  try{const records=await api(`/api/research/records?kind=decision&run_id=${encodeURIComponent(base)}`);if(base===draft.baseRunId){decisionRecords=Array.isArray(records)?records:records.records || [];replace('decision-history',autoTable(decisionRecords));}}
+  try{const records=await api(`/api/research/records?kind=decision&run_id=${encodeURIComponent(base)}`);if(base===draft.baseRunId){decisionRecords=Array.isArray(records)?records:records.records || [];renderDecisionHistory();}}
   catch(failure){error(failure.message);}
 }
 async function loadRun(id,ask=true) {
-  if(ask && draft.dirty){const choice=await draftChoice('Retain this run’s draft for later, discard it, or cancel loading another run.');if(choice==='cancel'){$('research-run').value=draft.baseRunId || '';return;}if(choice==='discard')sessionStorage.removeItem(draftKey(draft.baseRunId));else persist();}
+  if(ask && draft.dirty){const choice=await draftChoice('Retain this run’s draft for later, discard it, or cancel loading another run.');if(choice==='cancel'){restoreRunSelection();return;}if(choice==='discard')sessionStorage.removeItem(draftKey(draft.baseRunId));else persist();}
   const ticket=gate.next();busy=true;renderState();announce('Loading saved inputs and results…');
   try {
     const response=await api(`/api/research/runs/${encodeURIComponent(id)}`);if(!gate.current(ticket))return;
     saved=response;result=response.result;draft=restoreDraft(sessionStorage,id,response.config,response.workspace);selectedCandidate='';latestEvaluation=null;
+    view='saved';previousRun=null;
     $('comparator-records')?.replaceChildren();$('run-comparison').replaceChildren();renderAll();await loadDecisions();loadOperationBehindRun();
-  } catch(failure){error(`${failure.message} The previous result remains visible.`);}
+    loadPreviousRun(response.previous_run_id,id);
+  } catch(failure){error(`${failure.message} The previous result remains visible.`);if(gate.current(ticket))restoreRunSelection();}
   finally{if(gate.current(ticket)){busy=false;renderState(true);}}
 }
 const wait = milliseconds => new Promise(resolve=>setTimeout(resolve,milliseconds));
@@ -888,8 +1431,10 @@ async function submitJob(kind,payload,evaluationOnly=false) {
     else {
       saved=response;
       const newId=result.run_id;
-      if(kind==='save')sessionStorage.removeItem(draftKey(base));
-      draft=newDraft(newId,response.config,response.workspace);selectedCandidate='';latestEvaluation=null;$('comparator-records')?.replaceChildren();$('run-comparison').replaceChildren();await loadDecisions();
+      // A monthly review carries the draft's own patch into the run it produces, so a
+      // draft keyed to no run is retired here rather than orphaned.
+      if(kind==='save' || !base)sessionStorage.removeItem(draftKey(base));
+      draft=newDraft(newId,response.config,response.workspace);selectedCandidate='';latestEvaluation=null;view='saved';$('comparator-records')?.replaceChildren();$('run-comparison').replaceChildren();await loadDecisions();await refreshPreviousRun(newId);
     }
     persist();renderAll();
   } catch(failure){error(`${failure.message} The previous usable result and your draft have been retained.`);}
@@ -998,6 +1543,11 @@ async function finishWorkflow(workflow) {
   if(workflow.status==='complete' && workflow.run_id){
     await refreshService();
     await loadRun(workflow.run_id,false);
+    // The operation used saved settings, so a draft retained before any run existed is
+    // carried onto the run just published rather than left under an unreachable key.
+    const carried=adoptOrphanDraft(sessionStorage,draft);
+    if(carried!==draft){draft=carried;persist();renderAll();
+      announce('The retained draft was carried onto the review just saved. Recalculate it before saving.');}
   } else if(workflow.status==='failed'){
     error(`${workflow.error || 'The review did not complete.'} The last usable review and your draft have been retained.`);
   }
@@ -1087,18 +1637,28 @@ for(const node of document.querySelectorAll('[data-go]'))node.addEventListener('
 document.addEventListener('portfolio:holdings',()=>navigate('holdings'));
 document.addEventListener('portfolio:sources-changed',()=>{loadCurrent().then(loadExceptions);});
 window.addEventListener('hashchange',()=>navigate(location.hash.slice(1)));
-for(const node of document.querySelectorAll('[data-company-tab]')){
-  node.addEventListener('click',()=>{
-    for(const button of document.querySelectorAll('[data-company-tab]'))button.setAttribute('aria-selected',String(button===node));
-    for(const name of ['eps','dcf','evidence'])$(`company-${name}`).hidden=name!==node.dataset.companyTab;
-  });
-  node.addEventListener('keydown',event=>{
-    if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
-    event.preventDefault();const tabs=[...document.querySelectorAll('[data-company-tab]')],i=tabs.indexOf(node);
-    const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(i+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
-    tabs[next].click();tabs[next].focus();
-  });
+// One tablist behavior for the company panels and for the security detail: a click or an
+// arrow key selects, and the selected panel is the only one on screen.
+function wireTabs(attribute,names,panelId,onSelect) {
+  const tabs=[...document.querySelectorAll(`[${attribute}]`)];
+  const select=node=>{
+    for(const tab of tabs)tab.setAttribute('aria-selected',String(tab===node));
+    const chosen=node.getAttribute(attribute);
+    for(const name of names)$(panelId(name)).hidden=name!==chosen;
+    if(onSelect)onSelect(chosen);
+  };
+  for(const node of tabs){
+    node.addEventListener('click',()=>select(node));
+    node.addEventListener('keydown',event=>{
+      if(!['ArrowLeft','ArrowRight','Home','End'].includes(event.key))return;
+      event.preventDefault();const index=tabs.indexOf(node);
+      const next=event.key==='Home'?0:event.key==='End'?tabs.length-1:(index+(event.key==='ArrowRight'?1:-1)+tabs.length)%tabs.length;
+      select(tabs[next]);tabs[next].focus();
+    });
+  }
 }
+wireTabs('data-company-tab',['eps','dcf','evidence'],name=>`company-${name}`);
+wireTabs('data-detail-tab',['evidence','calculation','assumptions','limitations'],name=>`detail-${name}`);
 function wire(id,action) {
   $(id).addEventListener('click',async()=>{
     try{error();await action();}catch(failure){error(failure.message);}finally{renderState();}
@@ -1125,7 +1685,17 @@ wire('reset-draft',async()=>{
   sessionStorage.removeItem(draftKey(draft.baseRunId));draft=newDraft(draft.baseRunId,saved?.config || service.config,saved?.workspace || {});
   result=saved?.result || result;renderAll();
 });
-$('research-run').addEventListener('change',()=>{if($('research-run').value)loadRun($('research-run').value).catch(failure=>error(failure.message));});
+$('research-run').addEventListener('change',()=>{
+  const choice=selectRun(service.runs || [],$('research-run').value);
+  if(choice.view!=='saved'){
+    view=CURRENT_VIEW;applyView();
+    announce('Current holdings only. No analysis is displayed; choose a saved run to see one.');return;
+  }
+  // The view follows the run that actually loaded; a refused or cancelled load leaves
+  // the selector, the view and the sections agreeing on the run still on screen.
+  if(choice.runId===draft.baseRunId){view='saved';applyView();announce('Showing the analysis of the loaded saved run.');return;}
+  loadRun(choice.runId).catch(failure=>{error(failure.message);restoreRunSelection();});
+});
 $('account-scope').addEventListener('change',()=>{account=$('account-scope').value;renderHoldings();announce('Account display changed. Portfolio calculations and constraints retain their saved scope.');});
 $('holdings-search').addEventListener('input',renderHoldings);$('screen-search').addEventListener('input',renderScreen);
 $('research-security').addEventListener('change',()=>{securityId=$('research-security').value;renderCompany();});
@@ -1153,13 +1723,10 @@ wire('import-csv',async()=>{
   if(file.size>10*1024*1024)throw new Error('Use an import file smaller than 10 MB.');
   const response=await api('/api/research/inputs',{kind:$('import-kind').value,csv:await file.text()});announce(response.message || 'Input saved for the next review.');
 });
-wire('save-decision',async()=>{
-  if(!draft.baseRunId)throw new Error('Choose a saved run before recording a decision.');
-  if(draft.dirty)throw new Error('Save or reset the current draft so this decision refers to a retained run.');
-  const rationale=$('decision-rationale').value.trim();if(!rationale)throw new Error('Record a decision rationale.');
-  await api('/api/research/decision',{run_id:draft.baseRunId,candidate_id:selectedCandidate || null,action:$('decision-action').value,rationale});
-  $('decision-rationale').value='';await loadDecisions();announce('Decision recorded without changing the saved forecast.');
-});
+$('decision-action').addEventListener('change',syncDecisionAlternative);
+wire('save-decision',()=>openDecisionDialog());
+wire('confirm-decision',()=>recordDecision());
+wire('close-decision-dialog',()=>{decisionError();$('decision-dialog').close();});
 wire('compare-runs',async()=>{
   const left=$('compare-left').value,right=$('compare-right').value;if(!left || !right)throw new Error('Choose two saved runs.');
   const response=await api(`/api/research/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`);

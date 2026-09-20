@@ -238,6 +238,7 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
   const {window, $, origin, runtimeErrors} = await launch(t, workflowScript, {
     ready: $ => $('draft-state')?.textContent === 'Empty',
   });
+  let published = '';
   const workflows = async () => {
     const response = await fetch(`${origin}/api/research/workflows`);
     assert.equal(response.status, 200);
@@ -315,6 +316,101 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
       'the caption names the operation behind the loaded run');
     assert.equal((await workflows()).length, 1, 'exactly one operation was created');
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
+    assert.deepEqual(runtimeErrors, []);
+    published = $('research-run').value;
+  });
+
+  // Current holdings and a saved analysis are dated separately and are never read as one
+  // view: the selector says which of the two is on screen, and choosing current holdings
+  // withdraws every analysed section rather than leaving month-old numbers beside today's
+  // collection.
+  await t.test('the run selector shows current holdings or one saved analysis, not both', async () => {
+    assert.ok(published, 'the published review is selected');
+    const [first] = $('research-run').options;
+    assert.equal(first.value, 'current');
+    assert.match(first.textContent, /Current holdings/);
+    assert.match(first.textContent, /no analysis/i);
+    const analysed = [...window.document.querySelectorAll('#page-overview [data-analysis]')];
+    assert.ok(analysed.length >= 4, `Overview needs analysed sections: ${analysed.length}`);
+    for (const node of analysed) assert.equal(node.hidden, false, 'a loaded run shows its analysis');
+
+    setInput(window, $('research-run'), 'current');
+    await until(() => analysed.every(node => node.hidden), 'the analysed sections to withdraw');
+    assert.match($('analysis-caption').textContent, /No completed analysis/);
+    assert.equal(accountCards($), 2, 'current holdings stay on screen without an analysis');
+    assert.equal($('current-collection-state').textContent, 'Published');
+
+    // The selector sits above the page switcher, so its claim governs every page: no
+    // other page may keep showing the withdrawn run's holdings, baskets or scenarios.
+    for (const name of ['holdings', 'research', 'scenarios', 'review']) {
+      window.document.querySelector(`[data-page="${name}"]`).click();
+      const sections = [...$(`page-${name}`).querySelectorAll('[data-analysis]')];
+      assert.ok(sections.length > 0, `${name} needs analysed sections: ${sections.length}`);
+      for (const node of sections) {
+        assert.equal(node.hidden, true, `${name} still shows a run the selector withdrew`);
+      }
+      assert.match($(`page-${name}`).querySelector('[data-analysis-note]').textContent,
+        /No completed analysis/, `${name} states which of the two dated views is on screen`);
+    }
+    window.document.querySelector('[data-page="overview"]').click();
+
+    setInput(window, $('research-run'), published);
+    await until(() => analysed.every(node => !node.hidden), 'the saved analysis to return');
+    assert.equal($('research-run').value, published);
+    assert.match($('analysis-caption').textContent, /Last completed analysis/);
+    for (const name of ['holdings', 'research', 'scenarios', 'review']) {
+      assert.match($(`page-${name}`).querySelector('[data-analysis-note]').textContent,
+        new RegExp(published.slice(0, 8)), `${name} names the run its numbers came from`);
+    }
+    assert.equal($('draft-state').textContent, 'Saved', 'switching views retains the saved draft');
+    assert.equal($('research-error').hidden, true, $('research-error').textContent);
+    assert.deepEqual(runtimeErrors, []);
+  });
+
+  // An operation collects and analyses fresh holdings using the saved settings. It is
+  // separate from the frozen draft of another run, and finishing it may not throw that
+  // draft away: the owner said to keep it.
+  await t.test('a completed operation keeps the unsaved draft of the run it left behind',
+    async () => {
+    setInput(window, namedInput(window, 'Cost per side (basis points)'), 27);
+    await until(() => $('draft-state').textContent === 'Dirty', 'the edited draft');
+    $('update-analyze').click();
+    await until(() => $('draft-dialog').hasAttribute('open'), 'the explicit draft choice');
+    $('draft-dialog').querySelector('[data-draft-choice="retain"]').click();
+    await until(() => $('research-run').value !== published
+      && $('draft-state').textContent === 'Saved', 'the second review to publish', 240000);
+    const second = $('research-run').value;
+    assert.notEqual(second, published);
+
+    setInput(window, $('research-run'), published);
+    await until(() => $('research-run').value === published
+      && $('draft-state').textContent !== 'Calculating', 'the earlier run reloaded');
+    assert.equal($('draft-state').textContent, 'Dirty', 'the retained draft survived the operation');
+    assert.equal(namedInput(window, 'Cost per side (basis points)').value, '27');
+    $('reset-draft').click();
+    await until(() => $('draft-dialog').hasAttribute('open'), 'the explicit reset choice');
+    $('draft-dialog').querySelector('[data-draft-choice="discard"]').click();
+    await until(() => $('draft-state').textContent === 'Saved', 'the discarded draft');
+    assert.equal($('research-error').hidden, true, $('research-error').textContent);
+    assert.deepEqual(runtimeErrors, []);
+  });
+
+  // A chart with no units, no date and no stated scope is a picture, not a measurement.
+  // Every chart the page can reach is policed, not only the ones on the entry point.
+  await t.test('every chart states its units, date, scope and coverage', () => {
+    for (const name of ['research', 'scenarios', 'review', 'overview']) {
+      window.document.querySelector(`[data-page="${name}"]`).click();
+    }
+    const captions = [...window.document.querySelectorAll('.chart-caption')];
+    assert.ok(captions.length >= 4, `Charts need captions: ${captions.length}`);
+    for (const caption of captions) {
+      const parts = caption.textContent.split(' \u00b7 ').map(part => part.trim()).filter(Boolean);
+      assert.ok(parts.length >= 4, `Caption states units, date, scope and coverage: ${caption.textContent}`);
+      assert.match(caption.textContent, /coverage/i, caption.textContent);
+      assert.doesNotMatch(caption.textContent, /undefined|NaN|\[object/, caption.textContent);
+    }
+    const notes = window.document.querySelectorAll('.chart-note');
+    assert.ok(notes.length >= captions.length);
     assert.deepEqual(runtimeErrors, []);
   });
 });

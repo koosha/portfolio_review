@@ -1479,3 +1479,197 @@ footer {
     grid-template-columns:1fr
   }
 }
+.chart-caption {
+  color:#5f6d5b;
+  border-top:1px solid var(--border);
+  padding-top:8px
+}
+.insight-list {
+  display:grid;
+  gap:9px;
+  margin-top:14px
+}
+.insight {
+  display:grid;
+  grid-template-columns:minmax(140px,1fr) 2.4fr;
+  gap:4px 14px;
+  padding:11px 13px;
+  border:1px solid var(--border);
+  border-left:3px solid #a5bf91;
+  border-radius:8px;
+  background:#fbfcfa
+}
+.insight-metric {
+  font-size:12px
+}
+.insight-comparison {
+  font-size:12px;
+  font-variant-numeric:tabular-nums
+}
+.insight-source {
+  grid-column:1/-1;
+  font-size:10px;
+  color:var(--muted)
+}
+.priority-list {
+  display:grid;
+  gap:8px;
+  margin-top:14px
+}
+.priority-row {
+  display:grid;
+  grid-template-columns:minmax(120px,1fr) 1.6fr;
+  gap:3px 12px;
+  text-align:left;
+  background:#fff;
+  color:inherit;
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:11px 13px;
+  font-weight:400
+}
+.priority-row:hover {
+  border-color:#a5bf91;
+  filter:none
+}
+.priority-row:focus-visible {
+  outline:2px solid var(--green);
+  outline-offset:2px
+}
+.priority-name {
+  font-size:12px
+}
+.priority-reasons {
+  font-size:11px;
+  color:#4c6a4f
+}
+.priority-note {
+  grid-column:1/-1;
+  font-size:10px;
+  color:var(--muted)
+}
+.overlap-table td {
+  font-variant-numeric:tabular-nums
+}
+.fund-sectors {
+  margin-top:16px
+}
+.fund-sectors h3 {
+  font-size:12px;
+  margin:0
+}
+.proposal-strip {
+  margin:14px 0;
+  padding:12px 13px;
+  border:1px solid var(--border);
+  border-radius:9px;
+  background:#f8faf6
+}
+.assumption-strip {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin-top:10px
+}
+.assumption-tag {
+  font-size:10px;
+  padding:4px 8px;
+  border-radius:11px;
+  background:#e5efdf;
+  color:#395b38
+}
+.assumption-tag.evidence {
+  background:#eef0ec;
+  /* Evidence provenance is read, not decoration: this pair clears WCAG AA at 10px,
+     which the muted token on this tint does not. */
+  color:#4c5a50
+}
+.assumption-strip .muted {
+  flex:1 1 100%;
+  margin:4px 0 0;
+  font-size:10px
+}
+.sensitivity td .heat {
+  display:block;
+  padding:5px 6px;
+  border-radius:4px;
+  background:rgba(93,133,80,calc(var(--heat,0)*.45))
+}
+.heat-legend {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  font-size:10px;
+  color:var(--muted)
+}
+.heat-legend .heat-bar {
+  flex:1 1 90px;
+  height:7px;
+  border-radius:3px;
+  background:linear-gradient(90deg,rgba(93,133,80,.05),rgba(93,133,80,.45))
+}
+.heat-legend .heat-end {
+  font-variant-numeric:tabular-nums
+}
+.heat-legend small {
+  flex:1 1 100%
+}
+.grouped-chart {
+  width:100%;
+  height:165px;
+  display:block;
+  margin-top:12px
+}
+.grouped-chart .series-0 {
+  fill:#3d7452
+}
+.grouped-chart .series-1 {
+  fill:#c2a05a
+}
+/* Grouped bars state every value in text as well as in colour, so the readout wraps
+   instead of sharing lineChart's single-line, non-wrapping axis row. */
+.chart-readout {
+  display:flex;
+  flex-wrap:wrap;
+  gap:4px 14px;
+  font-size:10px;
+  color:var(--muted);
+  margin-top:6px
+}
+.chart-legend {
+  display:flex;
+  flex-wrap:wrap;
+  gap:12px;
+  font-size:10px;
+  color:var(--muted);
+  margin-top:6px
+}
+.legend-key::before {
+  content:"";
+  display:inline-block;
+  width:9px;
+  height:9px;
+  border-radius:2px;
+  margin-right:5px;
+  vertical-align:-1px
+}
+.legend-key.series-0::before {
+  background:#3d7452
+}
+.legend-key.series-1::before {
+  background:#c2a05a
+}
+.stage-strip .stage-chip[data-status=running] {
+  background:#fffdf6
+}
+.stage-strip .stage-chip[data-status=complete] {
+  background:#f4f8f1
+}
+@media (max-width:720px) {
+  .insight, .priority-row {
+    grid-template-columns:1fr
+  }
+  .grouped-chart {
+    height:190px
+  }
+}

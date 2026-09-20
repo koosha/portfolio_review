@@ -22,6 +22,7 @@ from portfolio_lab.pipeline import (
 
 from .application import validate_workspace, validate_workspace_revision
 from .calendar import REVIEW_KINDS, decision_context, review_context
+from .decisions import decision_fields, last_decision
 from .public import _clean, _safe_text, public_config, public_result, public_workspace
 from .repository import ResearchRepository
 
@@ -196,6 +197,7 @@ class ResearchService:
             "default_review_kind": DEFAULT_REVIEW_KIND,
             "active_workflow": self._active_workflow(),
             "last_workflow": self._last_workflow(),
+            "last_decision": last_decision(self.store.records("decision")),
             "schema_version": 1,
         }
 
@@ -359,7 +361,48 @@ class ResearchService:
             "result": public_result(saved),
             "config": public_config(saved["saved_config"]),
             "workspace": public_workspace(bundle.get("workspace", {})),
+            "previous_run_id": self._previous_run_id(saved["run_id"], saved.get("metadata", {})),
         }
+
+    def _previous_run_id(self, run_id, metadata):
+        """The previous review of the same kind by review date, or ``None``.
+
+        What changed since the last review compares like with like: a current review
+        against the previous current review, never against a historical month-end saved
+        in between. The previous review is the one dated before this one, not the one
+        saved before it, so a month backfilled out of order still compares against the
+        review that actually preceded it. Only each candidate's metadata is read, never
+        its whole archive.
+        """
+        review_kind = metadata.get("review_kind", SUBMITTED_REVIEW_KIND)
+        as_of = metadata.get("as_of")
+        rows = {row["run_id"]: row for row in self.store.list_runs()}
+        if run_id not in rows:
+            return None
+        this = rows[run_id]
+        earlier = [
+            row
+            for identifier, row in rows.items()
+            if identifier != run_id and self._is_earlier(row, this, as_of)
+        ]
+        # Same-dated reviews are separated by when they were saved; an undated review can
+        # only be ordered by that.
+        earlier.sort(
+            key=lambda row: (row.get("as_of") or "", row.get("created_at") or ""), reverse=True
+        )
+        for row in earlier:
+            saved = self.store.load_run_part(row["run_id"], "metadata") or {}
+            if saved.get("review_kind", SUBMITTED_REVIEW_KIND) == review_kind:
+                return row["run_id"]
+        return None
+
+    @staticmethod
+    def _is_earlier(row, this, as_of):
+        """Whether ``row`` names a review preceding ``this`` one."""
+        theirs, mine = row.get("as_of"), as_of or this.get("as_of")
+        if theirs and mine and theirs != mine:
+            return theirs < mine
+        return (row.get("created_at") or "") < (this.get("created_at") or "")
 
     def submit(self, payload):
         if not isinstance(payload, dict):
@@ -788,26 +831,23 @@ class ResearchService:
         }
 
     def save_decision(self, payload):
+        """Record one monthly decision beside the run it was taken on.
+
+        The record states what was chosen, what it was weighed against and which review
+        it belongs to, so the next review can say what changed without re-deriving any
+        of it. Recording a decision is not a calculation: no saved run is rewritten.
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("Send an object describing the research decision.")
         run_id = str(payload.get("run_id", ""))
-        result = self.store.load_run(run_id)
-        candidate_id = payload.get("candidate_id")
-        candidates = result.get("allocation", {}).get("candidates", [])
-        if candidate_id is not None and candidate_id not in {
-            row.get("candidate") for row in candidates
-        }:
-            raise ValueError("Choose a candidate belonging to this saved run.")
-        rationale = payload.get("rationale")
-        if not isinstance(rationale, str) or not rationale.strip() or len(rationale) > 10000:
-            raise ValueError("Record a decision or no-action rationale.")
-        action = payload.get("action", "no_action")
-        if action not in {"no_action", "review_candidate", "override"}:
-            raise ValueError("Unsupported research decision action.")
-        data = {
-            "action": action,
-            "candidate_id": candidate_id,
-            "rationale": rationale.strip(),
-            "execution": "none",
-        }
+        data = decision_fields(payload, self.store.load_run(run_id), SUBMITTED_REVIEW_KIND)
+        if data["workflow_id"] is not None:
+            # A named operation must exist: an unresolvable one is an unverifiable claim
+            # about which review produced this decision.
+            try:
+                self.store.workflow(data["workflow_id"])
+            except KeyError as exc:
+                raise ValueError("Name the review operation this decision was taken in.") from exc
         record_id = self.store.append_record(
             "decision", data, run_id=run_id, parent_id=payload.get("parent_id")
         )
