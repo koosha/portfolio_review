@@ -1045,6 +1045,21 @@ footer {
   margin:8px 0 0;
   overflow-wrap:anywhere
 }
+/* The standing statement of how this collection's values got their currency. It is a
+   div, not a p, so it needs its own spacing; it is ordinary copy because an unlabelled
+   source is ordinary, and it must never sit in the exception panel. */
+.current-panel .value-currency-basis {
+  margin:8px 0 0;
+  overflow-wrap:anywhere
+}
+/* A currency that was assumed rather than stated is still said in words; this only gives
+   those words a quiet edge so they never read as a label the source printed. The same
+   modifier serves the per-account line, matching .account-meta.has-exceptions. */
+.value-currency-basis.assumed,
+.account-meta.assumed {
+  border-left:2px solid var(--border);
+  padding-left:8px
+}
 .current-panel .mini-metrics {
   margin:15px 0 4px
 }

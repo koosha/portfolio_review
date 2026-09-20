@@ -171,13 +171,65 @@ class AdapterTests(unittest.TestCase):
         self.assertIsNone(result["ledger"]["accounts"][0]["cash"])
         self.assertFalse(result["accounts"].iloc[0]["complete"])
 
-    def test_account_currency_does_not_infer_position_currency_or_convert(self):
+    def test_unlabeled_rows_are_not_an_exception_and_still_reconcile_to_nav(self):
+        """A source with no currency column is ordinary, not broken.
+
+        The row keeps no currency of its own -- an account label is not a row label and
+        still performs no conversion -- but the captured value is read as reported in the
+        account's own currency, so the NAV check runs instead of being skipped in silence.
+        """
         _, results = self.publish({self.a: table()})
         evidence = self.evidence(results[self.a]["snapshot_id"])
         del evidence["accounts"][0]["position_currency"]
         result = load_collector(self.store.path, self.as_of, evidence)
         self.assertIsNone(result["ledger"]["positions"][0]["currency"])
-        self.assertIn("MISSING_POSITION_CURRENCY", {issue["code"] for issue in result["issues"]})
+        self.assertEqual({issue["code"] for issue in result["issues"]}, set())
+        self.assertTrue(result["accounts"].iloc[0]["complete"])
+        self.assertEqual(result["ledger"]["accounts"][0]["reconciliation_residual"], "0.00")
+
+    def test_unlabeled_rows_that_do_not_reach_nav_still_raise_nav_mismatch(self):
+        _, results = self.publish({self.a: table()})
+        evidence = self.evidence(results[self.a]["snapshot_id"], total_value="99.04")
+        del evidence["accounts"][0]["position_currency"]
+        result = load_collector(self.store.path, self.as_of, evidence)
+        self.assertIn("NAV_MISMATCH", {issue["code"] for issue in result["issues"]})
+        self.assertFalse(result["accounts"].iloc[0]["complete"])
+
+    def test_a_row_labelled_in_another_currency_still_refuses_the_nav_sum(self):
+        capture = table()
+        capture["headers"].append("Currency")
+        for row in capture["rows"]:
+            row.append("CAD" if row[0] == "DEMO" else "USD")
+        _, results = self.publish({self.a: capture})
+        evidence = self.evidence(results[self.a]["snapshot_id"])
+        del evidence["accounts"][0]["position_currency"]
+        result = load_collector(self.store.path, self.as_of, evidence)
+        self.assertEqual(result["ledger"]["positions"][0]["currency"], "CAD")
+        self.assertIsNone(result["ledger"]["accounts"][0].get("reconciliation_residual"))
+        self.assertFalse(result["accounts"].iloc[0]["complete"])
+
+    def test_an_unlabeled_row_with_no_value_is_still_a_missing_value_error(self):
+        """Dropping the currency exception does not drop the value one: a held quantity
+        with no market value is a real gap and stays an error on an unlabelled page."""
+        capture = table()
+        capture["rows"][0][3] = ""
+        _, results = self.publish({self.a: capture})
+        evidence = self.evidence(results[self.a]["snapshot_id"])
+        del evidence["accounts"][0]["position_currency"]
+        result = load_collector(self.store.path, self.as_of, evidence)
+        codes = {(issue["code"], issue["severity"]) for issue in result["issues"]}
+        self.assertIn(("MISSING_POSITION_VALUE", "error"), codes)
+        self.assertNotIn("MISSING_POSITION_CURRENCY", {code for code, _ in codes})
+        self.assertFalse(result["accounts"].iloc[0]["complete"])
+
+    def test_an_account_with_no_currency_at_all_is_still_an_error(self):
+        _, results = self.publish({self.a: table()})
+        evidence = self.evidence(results[self.a]["snapshot_id"], currency=None, complete=False)
+        del evidence["accounts"][0]["position_currency"]
+        result = load_collector(self.store.path, self.as_of, evidence)
+        codes = {(issue["code"], issue["severity"]) for issue in result["issues"]}
+        self.assertIn(("MISSING_CURRENCY", "error"), codes)
+        self.assertNotIn("MISSING_POSITION_CURRENCY", {code for code, _ in codes})
         self.assertFalse(result["accounts"].iloc[0]["complete"])
 
     def test_cash_currency_mismatch_and_absent_domicile_are_not_inferred(self):

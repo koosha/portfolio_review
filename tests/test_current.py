@@ -643,3 +643,43 @@ class CurrentSnapshotTests(unittest.TestCase):
         serialized = json.dumps(response, allow_nan=False)
         self.assertNotIn(self.temp.name, serialized)
         self.assertNotIn("finance.yahoo.com", serialized)
+
+    def test_unlabeled_values_state_their_basis_rather_than_raising_an_exception(self):
+        """A source with no currency column is the ordinary case, not an exception.
+
+        The unlabelled account's values are read as reported in the review's presentation
+        currency and say so in words; the labelled account's say the source printed the
+        label. Neither is raised as an issue, and neither can be mistaken for a
+        conversion: an amount converted at a dated rate names its FX pair and date, which
+        a value already read in the presentation currency never does.
+        """
+        self.publish(self.captures())
+        with cached_providers():
+            response = self.snapshot()
+        raised = {issue["code"] for issue in response["exceptions"]}
+        raised |= {record["code"] for record in response["open_exceptions"]}
+        self.assertNotIn("MISSING_POSITION_CURRENCY", raised)
+        accounts = self.by_source(response)
+        labelled, unlabelled = accounts[self.a], accounts[self.b]
+        self.assertEqual(labelled["value_currency"]["currency"], "USD")
+        self.assertEqual(labelled["value_currency"]["basis"], "row")
+        self.assertIn("labelled USD by the source", labelled["value_currency"]["label"])
+        self.assertEqual(unlabelled["value_currency"]["currency"], "USD")
+        self.assertEqual(unlabelled["value_currency"]["basis"], "presentation")
+        self.assertIn("read as reported in USD", unlabelled["value_currency"]["label"])
+        symbols = {position["symbol"]: position for position in response["positions"]}
+        self.assertEqual(symbols["OTHER"]["value_currency_basis"], "presentation")
+        self.assertIsNone(symbols["OTHER"]["fx_pair"])
+        self.assertIsNone(symbols["OTHER"]["fx_observation_date"])
+        self.assertEqual(response["totals"]["usd"]["value_currency"]["basis"], "mixed")
+
+    def test_an_attested_reporting_currency_is_still_stated_as_attested(self):
+        """The owner can still say what a source reports in, through account facts."""
+        _, results = self.publish(self.captures())
+        evidence = self.evidence({sid: row["snapshot_id"] for sid, row in results.items()})
+        with cached_providers():
+            response = self.snapshot(supplemental=evidence)
+        unlabelled = self.by_source(response)[self.b]["value_currency"]
+        self.assertEqual(unlabelled["currency"], "USD")
+        self.assertEqual(unlabelled["basis"], "attested")
+        self.assertIn("you stated for this account", unlabelled["label"])

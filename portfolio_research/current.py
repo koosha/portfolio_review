@@ -55,6 +55,30 @@ DATE_LABELS = {
     "review_month": "New York calendar month of generation.",
 }
 TOTALS_LABEL = "Captured subtotals grouped by the currency the source labelled; unlabeled amounts are listed separately and no FX conversion was applied."
+# How a holding's value currency was established, stated plainly. "presentation" is the
+# ordinary case for a source with no currency column: nothing is missing and nothing is
+# asked, the values are simply read in the currency the review presents in.
+VALUE_CURRENCY_LABELS = {
+    "row": "Values labelled {currency} by the source on each captured row.",
+    "attested": "Values read as {currency}, the reporting currency you stated for this account.",
+    "account": "Values read as {currency}, the currency this account itself states.",
+    "presentation": (
+        "Values read as reported in {currency}: this source labels no currency and the "
+        "account states none, so its values are read in the review's presentation currency. "
+        "State a different one under Data if this account reports in another currency."
+    ),
+    "mixed": (
+        "Values read as {currency}, established differently across these holdings; each one "
+        "is listed with the basis it was read on."
+    ),
+}
+UNSTATED_VALUE_CURRENCY_LABEL = "Values read as {currency}."
+MIXED_VALUE_CURRENCY_LABEL = (
+    "Holdings here are reported in more than one currency; each one is listed with its own."
+)
+NO_VALUE_CURRENCY_LABEL = (
+    "No value currency is established, so captured amounts are shown exactly as collected."
+)
 
 
 def _decimal_text(value):
@@ -127,6 +151,30 @@ def _account_usd(presented_account, held, unconverted_accounts):
     }
 
 
+def _value_currency(held):
+    """How this account's holdings got the currency their values are read in.
+
+    An unlabeled captured value is the ordinary shape of a source with no currency column,
+    not a gap, so nothing is raised about it. What the owner is owed instead is the basis:
+    a currency the source printed, one they attested, the account's own, or -- when none of
+    those exist -- the review's presentation currency, which is what a statement reports in
+    unless it says otherwise. This says which of those happened. It is not a conversion:
+    a holding actually converted at a dated rate names its FX pair and observation date.
+    """
+    currencies = {row.get("reported_currency") for row in held}
+    if not currencies:
+        return None
+    if len(currencies) > 1:
+        return {"currency": None, "basis": "mixed", "label": MIXED_VALUE_CURRENCY_LABEL}
+    currency = currencies.pop()
+    if currency is None:
+        return {"currency": None, "basis": None, "label": NO_VALUE_CURRENCY_LABEL}
+    bases = {row.get("value_currency_basis") for row in held}
+    basis = bases.pop() if len(bases) == 1 else "mixed"
+    template = VALUE_CURRENCY_LABELS.get(basis, UNSTATED_VALUE_CURRENCY_LABEL)
+    return {"currency": currency, "basis": basis, "label": template.format(currency=currency)}
+
+
 def _identity_counts(held):
     statuses = [row.get("resolution_status") for row in held]
     return {
@@ -148,6 +196,7 @@ def _usd_totals(presented):
             "unconverted_accounts": [],
             "method_version": normalization["method_version"],
             "label": NO_CURRENCY_LABEL,
+            "value_currency": _value_currency(positions),
         }
     return {
         "currency": currency,
@@ -157,6 +206,7 @@ def _usd_totals(presented):
         "unconverted_accounts": list(normalization.get("unconverted_account_ids", [])),
         "method_version": normalization["method_version"],
         "label": USD_LABEL.format(currency=currency),
+        "value_currency": _value_currency(positions),
     }
 
 
@@ -270,6 +320,7 @@ def _account(account, ledger, capture, account_codes, presentation):
             presentation["held"].get(aid, []),
             presentation["unconverted_accounts"],
         ),
+        "value_currency": _value_currency(presentation["held"].get(aid, [])),
         "identity": _identity_counts(presentation["held"].get(aid, [])),
         "open_exception_count": sum(
             record.get("account_id") == aid for record in presentation["exceptions"]

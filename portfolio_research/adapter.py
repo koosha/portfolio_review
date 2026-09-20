@@ -154,6 +154,21 @@ def _account_issue(issues, by_account, accounts, code, message, severity="error"
         by_account.setdefault(aid, set()).add(code)
 
 
+def _reported_currency(position, account):
+    """The currency a captured value is reported in: the row's own label, else the account's.
+
+    A source with no currency column still reports every value in one currency, and which
+    one is a fact about the account. Reading an unlabeled row as the account's own stated
+    currency is what lets the NAV reconciliation run at all on such a source: refusing to
+    read it leaves ``NAV_MISMATCH`` permanently unable to fire, which is silence, not
+    caution. A row that carries its own label, or an attested ``position_currency``, is
+    never overridden, so a holding genuinely reported in another currency still refuses
+    the sum. Where the account states no currency this returns ``None`` and nothing is
+    reconciled, exactly as before.
+    """
+    return position["currency"] or account["currency"]
+
+
 def _iso_date(value, label, nullable=True):
     if value is None and nullable:
         return None
@@ -883,6 +898,14 @@ def load_collector(
                 "quantity": _decimal(row.get("quantity"), "quantity"),
                 "price": _decimal(row.get("price"), "price"),
                 "market_value": _decimal(row.get("market_value"), "market_value"),
+                # An unlabeled value is not a gap, so no issue is raised about one: a
+                # source that publishes no currency column -- the ordinary shape of a
+                # Yahoo portfolio page -- still reports every value in one currency, and
+                # which one is a fact about the account. Only what the source or the owner
+                # actually stated is recorded here; the account's own currency and the
+                # review's presentation currency answer later, in the presentation layer
+                # that knows them, which names the basis it settled on so the owner reads
+                # "read as reported" instead of an exception nothing can answer.
                 "currency": row.get("currency") or account_evidence.get("position_currency"),
                 "currency_basis": "row"
                 if row.get("currency")
@@ -895,14 +918,6 @@ def load_collector(
                 "average_cost": _decimal(row.get("average_cost"), "average_cost"),
                 "total_cost": _decimal(row.get("total_cost"), "total_cost"),
             }
-            if position["currency"] is None:
-                _account_issue(
-                    issues,
-                    account_codes,
-                    aid,
-                    "MISSING_POSITION_CURRENCY",
-                    "A holding's value currency is unknown; an account label or security trading currency is not a conversion.",
-                )
             if position["market_value"] is None:
                 _account_issue(
                     issues,
@@ -987,7 +1002,8 @@ def load_collector(
                 account["total_value"] is not None
                 and account["cash"] is not None
                 and all(
-                    row["market_value"] is not None and row["currency"] == account["currency"]
+                    row["market_value"] is not None
+                    and _reported_currency(row, account) == account["currency"]
                     for row in held
                 )
             ):
@@ -1007,7 +1023,8 @@ def load_collector(
                     )
                     account["complete"] = False
             if any(
-                row["market_value"] is None or row["currency"] != account["currency"]
+                row["market_value"] is None
+                or _reported_currency(row, account) != account["currency"]
                 for row in held
             ):
                 account["complete"] = False

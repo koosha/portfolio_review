@@ -317,6 +317,33 @@ function completenessBadge(value) {
   const [label,className]=completenessLabels[value] || [value ? friendly(value) : 'Completeness unknown',value ? '' : 'warning'];
   return el('span',label,`badge ${className}`.trim());
 }
+// How a holding's value currency was established, said in one word beside the currency so
+// an assumption never reads like a label. This is not a conversion: a holding converted at
+// a dated rate names its FX pair and observation date in its own column.
+const valueBasisWords={row:'labelled by source',attested:'stated by you',account:'account currency',presentation:'read as reported'};
+// The covered-USD total on this panel rests on how each value currency was established,
+// so the issues that qualify it are shown ahead of the cap rather than behind it: a
+// warning about the basis of a number belongs on the same screen as the number.
+const currencyBasisCodes=new Set(['VALUE_ARITHMETIC_MISMATCH','VALUE_CURRENCY_UNCHECKED','INFERRED_ACCOUNT_CURRENCY','INFERRED_CASH_CURRENCY']);
+// How many of the remaining collection issues are listed outright; the rest stay on the
+// page inside a disclosure, because a count of discarded warnings is not a report.
+const CURRENT_ISSUE_LIMIT=8;
+function valueCurrencyCell(row) {
+  const currency=row?.reported_currency ?? row?.value_currency;
+  if(currency===null || currency===undefined || currency==='')return '\u2014';
+  const word=valueBasisWords[row?.value_currency_basis];
+  return word?`${currency} \u00b7 ${word}`:String(currency);
+}
+// The standing statement of that basis for a whole account or collection. It replaces the
+// error the collector used to raise about an unlabeled row, which named nothing an owner
+// could answer; an account that labels no currency is ordinary, not broken.
+function valueCurrencyLine(summary,className='account-meta') {
+  const label=typeof summary?.label==='string'?summary.label:'';
+  if(!label)return null;
+  const node=el('div',label,`${className}${summary?.basis==='presentation'?' assumed':''}`.trim());
+  node.title='How this value currency was established. Amounts converted at a dated FX observation name their pair and date separately.';
+  return node;
+}
 function subtotalLine(line) {
   const missing=numeric(line?.missing_value_count) || 0;
   const parts=[`Holdings ${num(line?.holdings)}`,`Cash ${num(line?.cash)}`,line?.currency || 'unlabeled'];
@@ -365,6 +392,7 @@ function accountCard(row, context={}) {
   const held=objectRows(context.positions).filter(position=>position.account_id===row?.account_id);
   const usdLine=accountUsdLine(row,held);if(usdLine)subtotals.append(usdLine);
   node.append(subtotals);
+  const valueLine=valueCurrencyLine(row?.value_currency);if(valueLine)node.append(valueLine);
   if(context.identity)node.append(identityLine(row,held,objectRows(context.exceptions)));
   if(row?.value_basis==='attested')node.append(el('div',`Attested valuation ${row.valuation_date || 'date unavailable'}`,'account-meta'));
   const exceptions=listOf(row?.exceptions).length;
@@ -379,7 +407,7 @@ function renderAccountCards() {
   replace('current-accounts',...(accounts.length?accounts.map(row=>accountCard(row,context)):[empty('Pull holdings to capture the newest collection.','No captured accounts')]));
 }
 function renderCurrent() {
-  const containers=['current-totals','current-accounts','current-positions','current-exceptions'];
+  const containers=['current-value-currency','current-totals','current-accounts','current-positions','current-exceptions'];
   if(!current){collectionBadge('Loading…');$('current-dates').textContent='Loading the newest collection…';for(const id of containers)replace(id);return;}
   $('exception-panel').hidden=!current.supported;
   if(!current.supported){collectionBadge('Unavailable');$('current-dates').textContent=current.reason || 'Current holdings are unavailable for this source.';for(const id of containers)replace(id);return;}
@@ -391,24 +419,28 @@ function renderCurrent() {
   const totals=objectRows(snapshot.totals?.by_currency), usd=snapshot.totals?.usd && typeof snapshot.totals.usd==='object'?snapshot.totals.usd:null;
   const covered=usd?metric('Covered value (USD)',num(usd.covered_total),`${numeric(usd.covered_position_count) ?? 0} positions · ${numeric(usd.unconverted_position_count) ?? 0} unconverted · not reconciled NAV`):null;
   if(covered)covered.title=typeof usd.label==='string'?usd.label:'USD presentation of covered amounts using dated FX observations; not reconciled NAV';
+  replace('current-value-currency',valueCurrencyLine(usd?.value_currency,'muted value-currency-basis'));
   replace('current-totals',covered,...(totals.length?totals.map(row=>metric(`Captured subtotal (${row?.currency || 'unlabeled'})`,num(row?.total),`${row?.account_count ?? 0} ${row?.account_count===1?'account':'accounts'} · not reconciled NAV`)):[el('p','No captured subtotals in the newest collection.','muted')]));
   renderAccountCards();
   const names=new Map(accounts.map(row=>[row?.account_id,row?.name || row?.account_id]));
   replace('current-positions',table(positions,[
     {key:'symbol'},{key:'name',wrap:true},{key:'quantity',render:value=>num(value,4)},{key:'price',render:value=>num(value)},
     {key:'market_value',label:'Market value',render:value=>num(value)},{key:'currency'},
-    {key:'quote_currency',label:'Quote currency'},{key:'reported_currency',label:'Value currency',render:(value,row)=>text(value ?? row?.value_currency)},
+    {key:'quote_currency',label:'Quote currency'},{key:'reported_currency',label:'Value currency',render:(_value,row)=>valueCurrencyCell(row)},
     {key:'market_value_usd',label:'USD value',render:value=>num(value)},
     {key:'fx_pair',label:'FX (pair · date)',render:(value,row)=>value?`${value} · ${row?.fx_observation_date || 'undated'}`:'—'},
     {key:'account_id',label:'Account',render:value=>names.get(value) || text(value)},{key:'observed_at',label:'Observed',render:value=>when(value)},
   ],`${positions.length} captured positions · values as observed at capture · USD only with a dated FX observation`));
   const issues=listOf(snapshot.exceptions).filter(issue=>['error','warning'].includes(issue?.severity) && !resolvable(issue));
-  const shown=issues.slice(0,8);
+  const qualifying=issues.filter(issue=>currencyBasisCodes.has(issue?.code));
+  const rest=issues.filter(issue=>!currencyBasisCodes.has(issue?.code));
+  const shown=[...qualifying,...rest.slice(0,CURRENT_ISSUE_LIMIT)];
+  const overflow=rest.slice(CURRENT_ISSUE_LIMIT);
   replace('current-exceptions',
     collection.newer_collection_in_progress?el('p','A newer collection is still in progress; the newest complete collection is shown until it publishes.','current-progress'):null,
     collection.newer_collection_failed?el('p','A newer collection did not complete; the newest complete collection is shown.','current-alert'):null,
     listIssues(shown,'No collection warnings or errors.'),
-    issues.length>shown.length?el('p',`+${issues.length-shown.length} more`,'muted'):null);
+    overflow.length?disclosure(`+${overflow.length} more`,listIssues(overflow)):null);
 }
 async function loadCurrent() {
   const request=++currentRequest;

@@ -242,7 +242,7 @@ def _normalize_position(position, account, security, context):
     currency, basis = _value_currency(position, account, context)
     reported = position.get("market_value")
     usd, fx_fields, _status = _convert(reported, currency, on_date, context)
-    unchecked = _reconciled(position, currency, price_major, quote_major, on_date, context)
+    unchecked = _reconciled(position, currency, basis, price_major, quote_major, on_date, context)
     price_usd = _price_usd(position, currency, price_major, quote_major, on_date, context)
     if unchecked:
         # The value currency could not be checked against the listing's, so nothing

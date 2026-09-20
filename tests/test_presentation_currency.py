@@ -228,6 +228,85 @@ class PositionPresentationTests(unittest.TestCase):
         self.assertEqual(row["market_value_usd"], "5000")
         self.assertEqual(issues, [])
 
+    def test_a_row_with_no_price_cannot_check_its_assumed_currency_and_says_so(self):
+        """The guard must never decline in silence while the amount is still counted.
+
+        A rate exists, so this is not the missing-rate case: the row itself carries no
+        price, so quantity x price cannot be formed and an assumed USD value quoted in
+        CAD is unverifiable. Counting it would overstate the holding by about 39%.
+        """
+        row, issues = self.normalize(
+            self.position("VFV.TO", "100", None, "12800.00"),
+            self.security("CAD"),
+            fx=self.rates(),
+        )
+        self.assertEqual(row["reported_currency"], "USD")
+        self.assertEqual(row["value_currency_basis"], "presentation")
+        self.assertIsNone(row["market_value_usd"])
+        self.assertIsNone(row["price_usd"])
+        self.assertEqual(self.codes(issues), ["VALUE_CURRENCY_UNCHECKED"])
+        # The reason is named, so this reads differently from a missing dated rate.
+        self.assertIn("no price", issues[0]["message"])
+        self.assertIn("Data page", issues[0]["message"])
+        self.assertEqual(issues[0]["severity"], "warning")
+
+    def test_a_zero_quantity_cannot_check_its_assumed_currency_either(self):
+        """Nothing to multiply the price by, so the assumption stands on nothing."""
+        row, issues = self.normalize(
+            self.position("VFV.TO", "0", "128.00", "12800.00"),
+            self.security("CAD"),
+            fx=self.rates(),
+        )
+        self.assertIsNone(row["market_value_usd"])
+        self.assertEqual(self.codes(issues), ["VALUE_CURRENCY_UNCHECKED"])
+
+    def test_a_short_position_is_reconciled_rather_than_skipped(self):
+        """A negative quantity used to skip the check outright; it reconciles now."""
+        row, issues = self.normalize(
+            self.position("VFV.TO", "-10", "285.20", "-2056.30"),
+            self.security("CAD"),
+            fx=self.rates(),
+        )
+        self.assertEqual(row["market_value_usd"], "-2056.30")
+        self.assertEqual(issues, [])
+
+    def test_a_short_position_whose_value_is_really_the_quote_currency_warns(self):
+        """The same 39% overstatement, on the short side, is still caught."""
+        _row, issues = self.normalize(
+            self.position("VFV.TO", "-10", "285.20", "-2852.00"),
+            self.security("CAD"),
+            fx=self.rates(),
+        )
+        self.assertEqual(self.codes(issues), ["VALUE_ARITHMETIC_MISMATCH"])
+
+    def test_a_us_listing_with_no_price_is_still_presented(self):
+        """The owner's sweep and fund rows: no price, but the exchange states USD.
+
+        The exchange naming the very currency the value is read in corroborates the
+        assumption on its own, so a missing price costs a quantity check, not a currency
+        one, and the holding is not withheld over it.
+        """
+        row, issues = self.normalize(
+            self.position("QAJDS", "319.04", None, "319.04"),
+            self.security("USD"),
+            fx=self.rates(),
+        )
+        self.assertEqual(row["reported_currency"], "USD")
+        self.assertEqual(row["value_currency_basis"], "presentation")
+        self.assertEqual(row["market_value_usd"], "319.04")
+        self.assertEqual(issues, [])
+
+    def test_a_stated_currency_with_no_price_needs_no_check(self):
+        """A currency the source printed stands on the label, not on the arithmetic."""
+        row, issues = self.normalize(
+            self.position("VFV.TO", "100", None, "12800.00", currency="USD"),
+            self.security("CAD"),
+            fx=self.rates(),
+        )
+        self.assertEqual(row["value_currency_basis"], "row")
+        self.assertEqual(row["market_value_usd"], "12800.00")
+        self.assertEqual(issues, [])
+
     def test_a_holding_with_no_listing_at_all_is_left_alone(self):
         """An unresolvable symbol has no quote currency, so there is nothing to check."""
         row, issues = self.normalize(self.position("ABC.DE", "4", "25", "100"), {})

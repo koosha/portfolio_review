@@ -460,6 +460,31 @@ class CurrentExceptionServiceTests(unittest.TestCase):
         # The owner's evidence is stored as its own version; nothing was edited in place.
         self.assertEqual(len(self.service.store.records("supplemental")), 1)
 
+    def test_a_read_value_currency_reads_differently_from_a_dated_conversion(self):
+        """Both accounts end in USD; the page says which one was converted to get there.
+
+        A labels nothing, so its values are read as reported in the presentation currency:
+        an identity, with no rate and no FX pair. B labels its rows CAD, so its values are
+        converted at a dated observation, which names its pair and its date. The stated
+        basis is what tells those two apart, and it replaces the exception the collector
+        used to raise about A's unlabelled rows.
+        """
+        current = self.service.current()["current"]
+        accounts = {row["source_id"]: row for row in current["accounts"]}
+        read, converted = accounts[self.a]["value_currency"], accounts[self.b]["value_currency"]
+        self.assertEqual((read["currency"], read["basis"]), ("USD", "presentation"))
+        self.assertIn("read as reported in USD", read["label"])
+        self.assertEqual((converted["currency"], converted["basis"]), ("CAD", "row"))
+        held = self.held()
+        self.assertIsNone(held[(self.a, "AAPL")]["fx_pair"])
+        self.assertIsNone(held[(self.a, "AAPL")]["fx_observation_date"])
+        self.assertEqual(held[(self.b, "RY.TO")]["fx_pair"], "CADUSD")
+        self.assertTrue(held[(self.b, "RY.TO")]["fx_observation_date"])
+        self.assertNotIn(
+            "MISSING_POSITION_CURRENCY",
+            {row["code"] for row in current["exceptions"]},
+        )
+
     def test_security_listing_resolution_maps_the_chosen_listing_from_today(self):
         shop = self.open_exception("AMBIGUOUS_LISTING", "SHOP")
         self.service.save_resolution(

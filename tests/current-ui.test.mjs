@@ -3,7 +3,7 @@
 // not test browser layout, accessibility APIs, Chrome policy or extension behavior.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {launch, namedInput, setInput, until} from './support/dom-http.mjs';
+import {boot, launch, namedInput, open, setInput, until} from './support/dom-http.mjs';
 
 // Two synthetic accounts published in one batch on a Sunday: A labels every row in USD,
 // B carries no currency column, so captured subtotals must stay separate and unconverted.
@@ -171,13 +171,75 @@ test('a holding on a known exchange raises no currency question', {timeout: 1200
   }
   // Account B's page carried no currency column, but SIMB is a bare ticker: a US listing
   // quoted in USD. Its captured subtotal stays unlabeled; its value is still rolled up.
-  assert.equal(positionCell($, 'SIMB', 'Value currency'), 'USD');
+  // The cell names the currency and how it was established, so an assumption never reads
+  // like a label and neither reads like a conversion: converted rows name an FX pair.
+  assert.equal(positionCell($, 'SIMB', 'Value currency'), 'USD · read as reported');
+  assert.equal(positionCell($, 'SIMA', 'Value currency'), 'USD · labelled by source');
+  assert.equal(positionCell($, 'SIMB', 'FX (pair · date)'), '—');
   assert.equal(positionCell($, 'SIMB', 'USD value'), '21');
+  // The standing statement that replaced the collector's blocking exception. It is shown
+  // as ordinary copy, not listed as an error or a question.
+  // Across the two accounts one label was printed and one was not, so the collection-level
+  // line says the currency and that its basis differs; each card says its own.
+  assert.match($('current-value-currency').textContent, /Values read as USD/);
+  assert.match(unlabeledCard($).textContent, /read as reported in USD/);
+  assert.doesNotMatch($('current-exceptions').textContent, /value currency is unknown|MISSING_POSITION_CURRENCY/);
   await until(() => coveredMetric($)?.querySelector('.metric-value')?.textContent === '48.5',
     'both accounts rolled up to USD without an attestation');
   assert.match(unlabeledCard($).textContent, /USD 24.25/);
   assert.match(coveredMetric($).querySelector('.metric-note').textContent, /not reconciled NAV/);
   assert.equal($('research-error').hidden, true, $('research-error').textContent);
+  assert.deepEqual(runtimeErrors, []);
+});
+
+// The covered-USD total on this panel is only as good as the basis each value currency
+// was established on, and the warnings that qualify that basis are appended after every
+// collector issue. The owner's own collection raises exactly eight collector errors, so
+// a cap of eight used to consume the list outright and the currency warning behind the
+// number was rendered as a bare "+1 more" with nothing to open. This drives that exact
+// order through the page: ten collector errors ahead of one currency warning.
+const cappedCurrent = (origin, extra) => async path => {
+  if (!String(path).includes('/api/research/current')) return undefined;
+  const answer = await fetch(new URL(path, origin), {headers: {Origin: origin}});
+  const payload = await answer.json();
+  payload.current = {...(payload.current || {}), exceptions: extra};
+  return new Response(JSON.stringify(payload), {status: answer.status,
+    headers: {'Content-Type': 'application/json'}});
+};
+const collectorError = index => ({code: `SYNTHETIC_COLLECTOR_ISSUE_${index}`,
+  message: `Synthetic collector error ${index}.`, severity: 'error'});
+const MISMATCH_MESSAGE = 'SIMB: quantity x the price quoted in CAD does not reach the value '
+  + 'reported in USD at that date\u2019s rate; check the source.';
+
+test('the currency warning behind the presented total survives the issue cap',
+  {timeout: 120000}, async t => {
+  const {origin} = await boot(t, mappedScript);
+  const errors = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(collectorError);
+  const warning = {code: 'VALUE_ARITHMETIC_MISMATCH', message: MISMATCH_MESSAGE,
+    severity: 'warning'};
+  const {$, runtimeErrors} = await open(t, origin, {
+    ready: $ => $('current-collection-state')?.textContent === 'Published',
+    intercept: cappedCurrent(origin, [...errors, warning]),
+  });
+
+  await until(() => $('current-exceptions').textContent.includes('Synthetic collector error 1.'),
+    'the injected collection issues to render');
+  const panel = $('current-exceptions');
+  // The warning qualifying the covered total is listed outright, not behind a disclosure.
+  const listed = [...panel.querySelectorAll(':scope > .issue-list > li')].map(node => node.textContent);
+  assert.ok(listed.includes(MISMATCH_MESSAGE),
+    `The currency warning is not listed on the panel: ${listed.join(' | ')}`);
+  assert.equal(listed.length, 9, 'the cap still holds for the collector issues themselves');
+
+  // The two issues past the cap stay on the page and can be opened, rather than being
+  // counted and thrown away.
+  const overflow = panel.querySelector('details');
+  assert.ok(overflow, 'The issues past the cap are dropped instead of being made reachable');
+  assert.equal(overflow.querySelector('summary').textContent, '+2 more');
+  assert.match(overflow.textContent, /Synthetic collector error 9\./);
+  assert.match(overflow.textContent, /Synthetic collector error 10\./);
+  const counts = [...panel.querySelectorAll('p')].filter(node => /^\+\d+ more$/.test(node.textContent));
+  assert.deepEqual(counts, [], 'a bare count of hidden issues is not a report');
   assert.deepEqual(runtimeErrors, []);
 });
 

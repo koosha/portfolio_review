@@ -6,10 +6,16 @@ currency its account reports every market value in. They are established separat
 neither is ever inferred by comparing quantity x price against the reported value -- that
 arithmetic is only ever a check.
 
-The check earns its keep by refusing rather than guessing. When the two currencies differ
-it needs a dated rate between them, and when no such rate exists the value currency cannot
-be confirmed, so :func:`_reconciled` says so and the caller withholds the amount instead
-of counting an unverified assumption into the presented total.
+The check earns its keep by refusing rather than guessing, and by never declining in
+silence. A value currency the account states or the source printed needs no corroboration;
+one merely assumed -- defaulted from the account or from the review's presentation
+currency -- is corroborated by the exchange whenever the exchange names that same
+currency. When it names a different one, only quantity x price can say whether the source
+already converted the value, so every way that arithmetic can fail to run -- no dated
+rate, no price, no quantity -- is reported as ``VALUE_CURRENCY_UNCHECKED`` and the caller
+withholds the amount instead of counting an unverified assumption into the presented
+total. A listing that names no currency at all is the one exception: it is already an
+open question about the listing, and the account is not in doubt about what it reports.
 """
 
 from __future__ import annotations
@@ -26,6 +32,11 @@ RECONCILE_TOLERANCE = Decimal("0.02")
 # Intermediates the reconciliation check may route a pair through when no provider
 # published it directly, so a London listing valued in CAD is still testable.
 CROSS_CURRENCIES = ("USD", "CAD")
+# Bases on which a value currency is assumed rather than stated. A currency the source
+# printed or the owner attested stands on its own; one of these stands on the check.
+ASSUMED_BASES = frozenset({"presentation", "account"})
+REFRESH_FX = "Refresh market data to load a dated FX observation."
+STATE_CURRENCY = "State this source's reporting currency on the Data page to count it."
 _CURRENCY = re.compile(r"[A-Za-z]{3}")
 
 
@@ -259,22 +270,67 @@ def _check_rate(quote_major, currency, on_date, context):
     return _cross_rate(context["fx"], quote_major, currency, on_date)
 
 
-def _unchecked_currency(position, currency, quote_major, on_date, context):
+def _unchecked_currency(position, why, remedy, context):
+    """Report a value currency nothing available can confirm, and withhold the amount.
+
+    Always returns ``True`` so a caller can both report and refuse in one statement:
+    every route into here leaves the holding out of the presented total rather than
+    counting an assumption no evidence stands behind.
+    """
     context["issues"].append(
         {
             "code": "VALUE_CURRENCY_UNCHECKED",
             "message": (
-                f"{position['raw_symbol']} is quoted in {quote_major} but its value is taken "
-                f"as {currency}, and no {quote_major}/{currency} rate dated on or before "
-                f"{on_date} is available to check that; the holding is left out of the "
-                "presented total. Refresh market data to load a dated FX observation."
+                f"{position['raw_symbol']} {why}; the holding is left out of the presented "
+                f"total. {remedy}"
             ),
             "severity": "warning",
         }
     )
+    return True
 
 
-def _reconciled(position, currency, price_major, quote_major, on_date, context):
+NO_PRODUCT = "the captured row has nothing for quantity x price to check that against"
+
+
+def _uncheckable(quantity, price_major):
+    """Why quantity x price cannot be formed from this row, else ``None``."""
+    if price_major is None:
+        return "the captured row carries no price to check that against"
+    if quantity is None:
+        return "the captured row carries no quantity to check that against"
+    if quantity == 0 or price_major == 0:
+        return NO_PRODUCT
+    return None
+
+
+def _quoted_against(quote_major, currency, tail):
+    """The shared phrasing for a holding quoted in one currency and valued in another."""
+    return f"is quoted in {quote_major} but its value is taken as {currency}, and {tail}"
+
+
+def _no_rate_why(quote_major, currency, on_date):
+    return _quoted_against(
+        quote_major,
+        currency,
+        f"no {quote_major}/{currency} rate dated on or before {on_date} is available to check that",
+    )
+
+
+def _mismatch(position, currency, quote_major):
+    """Quantity x price and the reported value cannot all three be right."""
+    return {
+        "code": "VALUE_ARITHMETIC_MISMATCH",
+        "message": (
+            f"{position['raw_symbol']}: quantity x the price quoted in {quote_major} does "
+            f"not reach the value reported in {currency} at that date's rate; check the "
+            "source's quantity, price or reported value."
+        ),
+        "severity": "warning",
+    }
+
+
+def _reconciled(position, currency, basis, price_major, quote_major, on_date, context):
     """Check quantity x the quoted price against the reported value at that date.
 
     The listing says what a holding is quoted in and the account says what its values are
@@ -282,37 +338,48 @@ def _reconciled(position, currency, price_major, quote_major, on_date, context):
     decides nothing -- it is a data-quality warning about the captured row, never a
     question about the currency.
 
-    When the two currencies differ the check needs a dated rate between them, and that
-    rate is exactly what an offline review may be missing. A missing rate is reported,
-    never passed over in silence: the value currency is then unverifiable, so this
-    returns ``True`` and the caller leaves the holding unconverted rather than counting
-    an unchecked assumption into the presented total.
+    An *assumed* value currency -- one defaulted from the account or the review rather
+    than printed by the source or attested by the owner -- needs corroboration, and it
+    has it whenever the exchange names the same currency the value is read in. When the
+    exchange names a different one the row either was converted by the source or was not,
+    and only this arithmetic can say which; so whenever the check is needed and cannot
+    run -- no dated rate, no price, no quantity -- it is reported rather than passed
+    over, and the caller withholds the amount instead of counting an unverified
+    assumption into the presented total.
     """
-    quantity, value = _number(position.get("quantity")), _number(position.get("market_value"))
-    if None in (quantity, value, price_major, quote_major, currency) or quantity <= 0:
+    value = _number(position.get("market_value"))
+    if value is None or currency is None or _major(currency) != currency:
         return False
-    if _major(currency) != currency or _major(quote_major) != quote_major:
+    if quote_major is None or _major(quote_major) != quote_major:
+        # A listing that states no currency is already one open exception in its own
+        # right, and that is the only question it raises: a second warning here would
+        # ask the owner about a value currency their account is not in doubt about.
         return False
+    assumed = basis in ASSUMED_BASES
+    quantity = _number(position.get("quantity"))
+    # The exchange naming the same currency the value is read in is corroboration enough;
+    # only a differing one leaves the assumption resting on this arithmetic.
+    needed = assumed and quote_major != currency
+    blocked = _uncheckable(quantity, price_major)
+    if blocked:
+        why = _quoted_against(quote_major, currency, blocked)
+        return needed and _unchecked_currency(position, why, STATE_CURRENCY, context)
     rate = _check_rate(quote_major, currency, on_date, context)
     if rate is None:
-        _unchecked_currency(position, currency, quote_major, on_date, context)
-        return True
+        why = _no_rate_why(quote_major, currency, on_date)
+        return _unchecked_currency(position, why, REFRESH_FX, context)
     with localcontext() as decimal_context:
         decimal_context.prec = PRECISION
+        # Signs are kept so a short reconciles against its own negative value rather than
+        # being skipped; only the tolerance is scaled by magnitude.
         expected = quantity * price_major * rate
-        if expected <= 0 or abs(value - expected) / expected <= RECONCILE_TOLERANCE:
+        scale = abs(expected)
+        if scale == 0:
+            why = _quoted_against(quote_major, currency, NO_PRODUCT)
+            return needed and _unchecked_currency(position, why, STATE_CURRENCY, context)
+        if abs(value - expected) / scale <= RECONCILE_TOLERANCE:
             return False
-    context["issues"].append(
-        {
-            "code": "VALUE_ARITHMETIC_MISMATCH",
-            "message": (
-                f"{position['raw_symbol']}: quantity x the price quoted in {quote_major} does "
-                f"not reach the value reported in {currency} at that date's rate; check the "
-                "source's quantity, price or reported value."
-            ),
-            "severity": "warning",
-        }
-    )
+    context["issues"].append(_mismatch(position, currency, quote_major))
     return False
 
 
