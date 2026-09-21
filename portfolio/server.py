@@ -23,6 +23,22 @@ def make_handler(store, browser, port, research=None):
             origin = self.headers.get("Origin", "")
             return origin if re.fullmatch(r"chrome-extension://[a-p]{32}", origin) else None
 
+        def page_navigation(self):
+            """Whether this is a browser opening the page itself, rather than reading data.
+
+            A link on another site may send the browser here: the response is a document
+            that site cannot read, and every request the loaded page then makes is
+            same-origin, so nothing is exposed by displaying it. Refusing the navigation
+            only makes a link to the local app look broken. Anything under ``/api/`` is a
+            read of the owner's data and keeps the strict rule.
+            """
+            if self.command != "GET" or urlsplit(self.path).path.startswith("/api/"):
+                return False
+            return (
+                self.headers.get("Sec-Fetch-Mode") == "navigate"
+                and self.headers.get("Sec-Fetch-Dest") == "document"
+            )
+
         def log_message(self, format, *args):
             pass  # Portfolio names, filenames, and request data stay out of logs.
 
@@ -71,9 +87,10 @@ def make_handler(store, browser, port, research=None):
                     return False
                 return True
             origin = self.headers.get("Origin")
-            if (origin and origin not in local_origins) or self.headers.get(
-                "Sec-Fetch-Site"
-            ) == "cross-site":
+            cross_site = self.headers.get("Sec-Fetch-Site") == "cross-site"
+            if (origin and origin not in local_origins) or (
+                cross_site and not self.page_navigation()
+            ):
                 self.reply(403, {"error": "Cross-site access denied."})
                 return False
             if mutation and not secrets.compare_digest(

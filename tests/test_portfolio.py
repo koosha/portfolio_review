@@ -244,6 +244,29 @@ class HTTPTests(unittest.TestCase):
             self.request("GET", "/api/state", headers={"Sec-Fetch-Site": "cross-site"})[0], 403
         )
 
+    def test_a_link_from_another_site_may_open_the_page(self):
+        """A link elsewhere may send the browser here; the page it gets is not readable there."""
+        navigation = {
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document",
+        }
+        self.assertEqual(self.request("GET", "/", headers=navigation)[0], 200)
+        # The data behind the page keeps the strict rule, however the request is dressed.
+        self.assertEqual(self.request("GET", "/api/state", headers=navigation)[0], 403)
+        self.assertEqual(self.request("GET", "/api/export", headers=navigation)[0], 403)
+        # A cross-site fetch of the page is not a navigation and stays refused.
+        self.assertEqual(
+            self.request(
+                "GET",
+                "/",
+                headers={"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Dest": "empty"},
+            )[0],
+            403,
+        )
+        # A cross-site POST is a mutation, navigation headers or not.
+        self.assertEqual(self.request("POST", "/api/sources", "{}", navigation)[0], 403)
+
     def test_mutations_require_token(self):
         self.assertEqual(
             self.request("POST", "/api/sources", "{}", {"Content-Type": "application/json"})[0], 403
