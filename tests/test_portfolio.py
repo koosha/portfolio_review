@@ -255,16 +255,25 @@ class HTTPTests(unittest.TestCase):
         # The data behind the page keeps the strict rule, however the request is dressed.
         self.assertEqual(self.request("GET", "/api/state", headers=navigation)[0], 403)
         self.assertEqual(self.request("GET", "/api/export", headers=navigation)[0], 403)
-        # A cross-site fetch of the page is not a navigation and stays refused.
+        # Only a document navigation is one: a page loading this app any other way --
+        # into a frame, as a script, as a stylesheet, or by fetch -- stays refused.
+        for dest in ("empty", "iframe", "frame", "script", "style", "image"):
+            self.assertEqual(
+                self.request(
+                    "GET",
+                    "/",
+                    headers={"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Dest": dest},
+                )[0],
+                403,
+                f"Sec-Fetch-Dest: {dest} is not a navigation",
+            )
+        # A cross-site POST is refused for being a POST, not merely for lacking the token:
+        # it stays refused even when it carries the token a loaded page would hold.
+        token = self.request("GET", "/api/state")[1]["token"]
         self.assertEqual(
-            self.request(
-                "GET",
-                "/",
-                headers={"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Dest": "empty"},
-            )[0],
+            self.request("POST", "/api/sources", "{}", {**navigation, "X-Local-Token": token})[0],
             403,
         )
-        # A cross-site POST is a mutation, navigation headers or not.
         self.assertEqual(self.request("POST", "/api/sources", "{}", navigation)[0], 403)
 
     def test_mutations_require_token(self):
