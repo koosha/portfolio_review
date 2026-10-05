@@ -54,7 +54,7 @@ function renderSources() {
   const target=$('sources'); target.replaceChildren();
   if(!state.sources.length) {
     const empty=node('div',undefined,'empty');
-    empty.append(node('strong','Load your Yahoo portfolios'),node('div','Connect Yahoo in Data, then click Find portfolios.'));
+    empty.append(node('strong','Load your Yahoo portfolios'),node('div','Connect Yahoo in Settings, then click Find portfolios.'));
     target.append(empty); return;
   }
   for(const source of state.sources) {

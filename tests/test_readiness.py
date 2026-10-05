@@ -23,6 +23,7 @@ EXPECTED_OUTPUTS = [
     "company_valuation",
     "candidates",
     "baskets",
+    "recommendations",
 ]
 
 

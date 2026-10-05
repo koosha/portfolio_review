@@ -170,6 +170,21 @@ test('a saved decision names the alternative, the basket it was compared against
   assert.throws(() => decisionRecord(newDraft(null), result, {action:'no_action',rationale:'No saved run.'}));
   assert.throws(() => decisionRecord(editDraft(draft, {patch:{mandate:{issuer_cap:.2}}}), result, {action:'no_action',rationale:'Unsaved edits.'}));
 });
+test('following the recommendations sends only the rows the owner changed', () => {
+  const draft = newDraft('run-10');
+  const result = {metadata:{review_kind:'current',as_of:'2026-09-30'},allocation:{candidates:[{candidate:'no_change'}]},
+    recommendations:{rows:[{security_id:'A',action:'buy',buy_share:1},{security_id:'B',action:'sell',sell_fraction:.4}]}};
+  const record = decisionRecord(draft, result, {rationale:'Followed the recommendations.'});
+  assert.equal(record.action, 'follow_recommendations');
+  assert.equal(record.candidate_id, null);
+  assert.deepEqual(record.recommendations, {rows:[]});
+  const changed = decisionRecord(draft, result, {rationale:'Kept B.',overrides:[{security_id:'B',action:'hold'}]});
+  assert.deepEqual(changed.recommendations.rows, [{security_id:'B',action:'hold'}]);
+  assert.throws(() => decisionRecord(draft, result, {rationale:'x',overrides:[{security_id:'Z',action:'hold'}]}), /recommended/);
+  assert.throws(() => decisionRecord(draft, {}, {rationale:'Nothing to follow.'}), /no recommendations/);
+  assert.equal('recommendations' in decisionRecord(draft, result, {action:'no_action',rationale:'No change.'}), false);
+  assert.doesNotThrow(() => validateConfigurationPatch({review:{buy_min_return:.1}}));
+});
 test('the run selector separates current holdings from one saved analysis', () => {
   const runs = [{run_id:'r-new',as_of:'2026-09-18'},{run_id:'r-old',as_of:'2026-08-18'}];
   assert.equal(CURRENT_VIEW, 'current');
@@ -283,10 +298,10 @@ test('the new chart and assumption styles stay legible and wrap on narrow layout
 });
 test('one accessible application shell preserves collector controls and loads external scripts', async () => {
   const html = await readFile(new URL('../static/index.html', import.meta.url), 'utf8');
-  for (const page of ['overview','holdings','research','scenarios','review','data','settings']) {
+  for (const page of ['review','holdings','research','settings']) {
     assert.match(html, new RegExp(`data-page="${page}"`));
   }
-  for (const id of ['sources','refresh','connect','discover','disconnect','snapshot-panel','snapshot-select','records','pairing-key','current-accounts','current-dates','analysis-caption']) {
+  for (const id of ['sources','refresh','connect','discover','disconnect','snapshot-panel','snapshot-select','records','pairing-key','current-accounts','current-dates','analysis-caption','recommendations-table','review-parameters']) {
     assert.equal([...html.matchAll(new RegExp(`id="${id}"`, 'g'))].length, 1);
   }
   assert.ok(!/<iframe|\sonclick=/.test(html));

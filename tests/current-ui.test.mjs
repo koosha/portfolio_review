@@ -77,7 +77,7 @@ const mappedScript = script(mapped.replace('%s', ", mapping(b, 'SIMB')"));
 // the owner still answers by hand. Its currency is not in question either way.
 const listingScript = script(mapped.replace('%s', ''));
 
-const pages = ['holdings', 'research', 'scenarios', 'review', 'data', 'settings', 'overview'];
+const pages = ['holdings', 'research', 'settings', 'review'];
 const accountCards = $ => $('current-accounts').querySelectorAll('.account-card').length;
 
 test('a fresh Sunday collection appears on Overview without a saved review', {timeout: 120000}, async t => {
@@ -108,7 +108,7 @@ test('a fresh Sunday collection appears on Overview without a saved review', {ti
       assert.equal(accountCards($), 2);
       assert.match($('analysis-caption').textContent, /No completed analysis/);
     }
-    assert.equal($('page-overview').hidden, false);
+    assert.equal($('page-review').hidden, false);
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
     assert.deepEqual(runtimeErrors, []);
   });
@@ -336,18 +336,18 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
     return response.json();
   };
 
-  await t.test('the month-end controls are an advanced option on the Data page', () => {
-    assert.ok($('page-data').contains($('monthly-review')), 'month-end review moved to Data');
-    assert.ok($('page-data').contains($('refresh-research')), 'refresh moved to Data');
-    assert.ok($('page-data').contains($('review-date')), 'review date moved to Data');
+  await t.test('the month-end controls are an advanced option in Settings', () => {
+    for (const id of ['monthly-review', 'refresh-research', 'review-date']) {
+      assert.ok($('settings-advanced').contains($(id)), `${id} is an advanced setting`);
+    }
     assert.ok($('update-analyze'), 'the one monthly operation has a header action');
     assert.equal($('workflow-progress').hidden, true, 'no operation has run yet');
     assert.equal($('cancel-workflow').hidden, true);
     assert.match($('analysis-caption').textContent, /No completed analysis/);
   });
 
-  await t.test('provider health is reported on the Data page without credentials', async () => {
-    window.document.querySelector('[data-page="data"]').click();
+  await t.test('provider health is reported in Settings without credentials', async () => {
+    window.document.querySelector('[data-page="settings"]').click();
     await until(() => $('provider-health').querySelectorAll('.provider-card').length > 0,
       'provider health cards');
     const names = [...$('provider-health').querySelectorAll('.provider-card')]
@@ -358,7 +358,7 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
     const extension = [...$('provider-health').querySelectorAll('.provider-card')]
       .find(node => node.dataset.provider === 'chrome_extension');
     assert.match(extension.textContent, /Connected/);
-    window.document.querySelector('[data-page="overview"]').click();
+    window.document.querySelector('[data-page="review"]').click();
   });
 
   await t.test('a duplicate click is the same operation and it publishes one usable review',
@@ -421,8 +421,8 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
     assert.equal(first.value, 'current');
     assert.match(first.textContent, /Current holdings/);
     assert.match(first.textContent, /no analysis/i);
-    const analysed = [...window.document.querySelectorAll('#page-overview [data-analysis]')];
-    assert.ok(analysed.length >= 4, `Overview needs analysed sections: ${analysed.length}`);
+    const analysed = [...window.document.querySelectorAll('#page-review [data-analysis]')];
+    assert.ok(analysed.length >= 4, `Review needs analysed sections: ${analysed.length}`);
     for (const node of analysed) assert.equal(node.hidden, false, 'a loaded run shows its analysis');
 
     setInput(window, $('research-run'), 'current');
@@ -433,26 +433,25 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
 
     // The selector sits above the page switcher, so its claim governs every page: no
     // other page may keep showing the withdrawn run's holdings, baskets or scenarios.
-    for (const name of ['holdings', 'research', 'scenarios', 'review']) {
+    for (const name of ['holdings', 'research', 'review']) {
       window.document.querySelector(`[data-page="${name}"]`).click();
       const sections = [...$(`page-${name}`).querySelectorAll('[data-analysis]')];
       assert.ok(sections.length > 0, `${name} needs analysed sections: ${sections.length}`);
       for (const node of sections) {
         assert.equal(node.hidden, true, `${name} still shows a run the selector withdrew`);
       }
-      assert.match($(`page-${name}`).querySelector('[data-analysis-note]').textContent,
-        /No completed analysis/, `${name} states which of the two dated views is on screen`);
+      // The caption lives in the toolbar every page shares.
+      assert.match($('analysis-caption').textContent, /No completed analysis/,
+        `${name} states which of the two dated views is on screen`);
     }
-    window.document.querySelector('[data-page="overview"]').click();
+    window.document.querySelector('[data-page="review"]').click();
 
     setInput(window, $('research-run'), published);
     await until(() => analysed.every(node => !node.hidden), 'the saved analysis to return');
     assert.equal($('research-run').value, published);
     assert.match($('analysis-caption').textContent, /Last completed analysis/);
-    for (const name of ['holdings', 'research', 'scenarios', 'review']) {
-      assert.match($(`page-${name}`).querySelector('[data-analysis-note]').textContent,
-        new RegExp(published.slice(0, 8)), `${name} names the run its numbers came from`);
-    }
+    assert.match($('analysis-caption').textContent, new RegExp(published.slice(0, 8)),
+      'the shared caption names the run its numbers came from');
     assert.equal($('draft-state').textContent, 'Saved', 'switching views retains the saved draft');
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
     assert.deepEqual(runtimeErrors, []);
@@ -489,7 +488,7 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
   // A chart with no units, no date and no stated scope is a picture, not a measurement.
   // Every chart the page can reach is policed, not only the ones on the entry point.
   await t.test('every chart states its units, date, scope and coverage', () => {
-    for (const name of ['research', 'scenarios', 'review', 'overview']) {
+    for (const name of ['research', 'holdings', 'review']) {
       window.document.querySelector(`[data-page="${name}"]`).click();
     }
     const captions = [...window.document.querySelectorAll('.chart-caption')];

@@ -43,7 +43,7 @@ test('research event handlers integrate with a disposable synthetic HTTP applica
     assert.match($('research-mode').textContent, /SYNTHETIC DEMO/);
     assert.ok($('overview-metrics').textContent.includes('Portfolio NAV'));
     assert.ok($('company-screen').querySelectorAll('tbody tr').length > 0);
-    for (const page of ['holdings', 'research', 'scenarios', 'review', 'data', 'settings', 'overview']) {
+    for (const page of ['holdings', 'research', 'settings', 'review']) {
       window.document.querySelector(`[data-page="${page}"]`).click();
       assert.equal($(`page-${page}`).hidden, false);
       assert.equal($('research-run').value, initialRunId);
@@ -92,8 +92,8 @@ test('research event handlers integrate with a disposable synthetic HTTP applica
   // cancelled may not leave the selector naming one run while the page shows another, or
   // withdraw every section under a selector that names a run.
   await t.test('a cancelled run load leaves the selector, the view and the sections agreeing', async () => {
-    const analysed = [...window.document.querySelectorAll('#page-overview [data-analysis]')];
-    assert.ok(analysed.length >= 4, `Overview needs analysed sections: ${analysed.length}`);
+    const analysed = [...window.document.querySelectorAll('#page-review [data-analysis]')];
+    assert.ok(analysed.length >= 4, `Review needs analysed sections: ${analysed.length}`);
     setInput(window, namedInput(window, 'Cost per side (basis points)'), 15);
     await until(() => $('draft-state').textContent === 'Dirty', 'the edited draft');
     setInput(window, $('research-run'), 'current');
@@ -296,7 +296,7 @@ test('one researched review drives the dashboard, its controls and a recorded de
     window.document.querySelector('[data-page="research"]').click();
     setInput(window, $('research-security'), 'SIM01');
     assert.ok($('eps-grid').querySelector('.chart-caption'), 'a shaded grid states its basis');
-    for (const name of ['scenarios', 'review', 'overview']) {
+    for (const name of ['research', 'holdings', 'review']) {
       window.document.querySelector(`[data-page="${name}"]`).click();
     }
     const captions = [...window.document.querySelectorAll('.chart-caption')];
@@ -401,7 +401,7 @@ test('one researched review drives the dashboard, its controls and a recorded de
   });
 
   await t.test('a stated market view is retained and reset restores the saved assumptions', async () => {
-    window.document.querySelector('[data-page="scenarios"]').click();
+    window.document.querySelector('[data-page="research"]').click();window.document.querySelector('[data-research-tab="scenarios"]').click();
     const central = namedInput(window, 'Central market return (%)');
     const savedCentral = central.value, savedCash = cashField(window).value;
     const savedResults = $('scenario-results').textContent;
@@ -448,11 +448,13 @@ test('one researched review drives the dashboard, its controls and a recorded de
     assert.match($('decision-compared').textContent, /no_change|No Change/i,
       'the alternatives the choice is weighed against are shown');
     assert.match($('decision-compared').textContent, /sleeve/i);
-    // The dialog opens on a no-change decision, so it may not also show a preselected
-    // alternative that recording would silently discard.
+    // The dialog opens on following the recommendations, so it may not also show a
+    // preselected alternative that recording would silently discard.
+    assert.equal($('decision-action').value, 'follow_recommendations');
     assert.equal($('decision-alternative').value, '');
     assert.equal($('decision-alternative').disabled, true,
-      'a no-change decision records no alternative');
+      'following the recommendations records no optimizer alternative');
+    setInput(window, $('decision-rationale'), '');
     // A refused decision is answered inside the dialog; the page's own error line sits
     // behind the backdrop where neither eye nor screen reader reaches it.
     $('confirm-decision').click();
@@ -474,13 +476,13 @@ test('one researched review drives the dashboard, its controls and a recorded de
     assert.match($('decision-history').textContent, /sleeve alternative is evidenced/);
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
 
-    window.document.querySelector('[data-page="data"]').click();
+    window.document.querySelector('[data-page="settings"]').click();
     setInput(window, $('review-date'), '2026-08-31');
     $('monthly-review').click();
     await until(() => $('draft-state').textContent === 'Saved' && $('research-run').value !== savedRunId,
       'the next review to publish', 240000);
     reviewedRunId = $('research-run').value;
-    window.document.querySelector('[data-page="overview"]').click();
+    window.document.querySelector('[data-page="review"]').click();
     await until(() => /simple_equal_issuer_sleeve/.test($('what-changed').textContent),
       'the previous decision restated by the next review');
     assert.match($('what-changed').textContent, /sleeve alternative is evidenced/);

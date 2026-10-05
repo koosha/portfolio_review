@@ -63,6 +63,30 @@ class ResearchServiceTests(unittest.TestCase):
         self.assertEqual(len(company["dcf_sensitivity"]["cells"]), 5)
         self.assertEqual(hashlib.sha256(self.source.read_bytes()).hexdigest(), self.source_hash)
 
+    def test_recommendations_follow_the_adopted_valuation_and_recalculate(self):
+        result = self.initial["output"]["result"]
+        rows = {row["security_id"]: row for row in result["recommendations"]["rows"]}
+        self.assertEqual(rows["SIM01"]["expected_return_basis"], "adopted_eps_central")
+        self.assertAlmostEqual(rows["SIM01"]["expected_return"], 0.11)
+        request = {
+            "kind": "preview",
+            "base_run_id": self.run_id,
+            "request_key": uuid.uuid4().hex,
+            "patch": {"review": {"buy_min_return": 5.0}},
+        }
+        preview = self.service.wait(self.service.submit(request)["job_id"])
+        self.assertEqual(preview["status"], "complete", preview["error"])
+        changed = preview["output"]["result"]["recommendations"]
+        self.assertEqual(changed["parameters"]["buy_min_return"], 5.0)
+        self.assertFalse([row for row in changed["rows"] if row["action"] == "buy"])
+        self.assertEqual(changed["buy_share_sum"], 0)
+        self.assertEqual(preview["output"]["config"]["review"]["buy_min_return"], 5.0)
+        from portfolio_lab.pipeline import report_html
+
+        report = report_html(result)
+        self.assertIn("<h2>Recommendations</h2>", report)
+        self.assertIn("buy % of available cash", report)
+
     def test_duplicate_submission_is_one_job_and_different_payload_rejected(self):
         request, result = self.preview()
         repeated = self.service.submit(request)

@@ -27,8 +27,6 @@ RESULT_FIELDS = {
     "forecast_inputs",
     "company_research",
     "timeline",
-    "comparison",
-    "prospective",
     "input_status",
     "observations",
     "readiness",
@@ -38,6 +36,7 @@ RESULT_FIELDS = {
     "universe",
     "exclusions",
     "priorities",
+    "recommendations",
 }
 SOURCE_FIELDS = {"source_id", "provider", "received_at", "available_at", "sha256", "rows", "status"}
 # The only hosts a published locator may point at. A provider-supplied URL is data: an

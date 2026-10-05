@@ -4,14 +4,16 @@ import {clone, merge, numberOrNull, newDraft, editDraft, changeHorizon, previewR
 
 const $ = id => document.getElementById(id);
 const labels = ['adverse', 'central', 'favorable'];
-const pages = ['overview','holdings','research','scenarios','review','data','settings'];
+const pages = ['review','holdings','research','settings'];
+// Pages that were merged keep working as bookmarks.
+const pageAliases = {overview:'review',data:'settings',scenarios:'research'};
 const gate = new RequestGate();
 let service = {}, result = null, saved = null, draft = newDraft(null), token = '', busy = false;
 // 'loading' until the first load settles, then 'ready' or 'failed'. A failed load never
 // assigns a token, so every control it gates stays disabled for the life of the page;
 // the owner is owed the reason rather than a tooltip that says it is still loading.
 let bootstrap = 'loading';
-let page = 'overview', securityId = '', detailId = '', selectedCandidate = '', account = '';
+let page = 'review', securityId = '', detailId = '', selectedCandidate = '', account = '';
 let view = CURRENT_VIEW, previousRun = null;
 let supplemental = null, supplementalSupported = false, decisionRecords = [], latestEvaluation = null;
 let fieldCounter = 0;
@@ -121,13 +123,12 @@ function applyView() {
   const analysed=view==='saved' && !!result;
   for(const node of document.querySelectorAll('[data-analysis]'))node.hidden=!analysed;
   const caption=analysed
-    ?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}${analysisOperationNote()}`
-    :result?'No completed analysis shown · current holdings above are the newest collection. Choose a saved run to see its analysis.'
-    :'No completed analysis yet · Current holdings above are shown from the newest collection.';
+    ?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · valuation ${text(result.metadata?.valuation_date)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · ${result.run_id?`run ${String(result.run_id).slice(0,12)}`:'unsaved recalculation'}${analysisOperationNote()}`
+    :result?'No completed analysis shown · choose a saved run to see one.'
+    :'No completed analysis yet · run Update & analyze.';
+  // The caption sits in the toolbar every page shares, so no page can display a
+  // month-old run while the selector says no analysis is shown.
   $('analysis-caption').textContent=caption;
-  // Every analysed page repeats the same statement, so no page can display a month-old
-  // run while the one selector above them says no analysis is shown.
-  for(const node of document.querySelectorAll('[data-analysis-note]'))node.textContent=caption;
 }
 // The selector, the view and the sections on screen are one statement. A load that did
 // not happen restores all three together rather than leaving them disagreeing.
@@ -241,6 +242,7 @@ function jsonEditor(id,label,value,onApply,key=id) {
   replace(id,node);
 }
 function navigate(next) {
+  next=pageAliases[next] || next;
   if(!pages.includes(next)) return;
   const moved=page!==next;
   page=next;
@@ -259,8 +261,10 @@ function renderState(writeStatus=false) {
   const unapplied=Object.keys(draft.rawEditors || {}).length;
   const state=busy?'calculating':unapplied?'dirty':previewReady(draft)?'preview':draft.dirty?'dirty':draft.baseRunId?'saved':'empty';
   $('draft-state').textContent=friendly(state);$('draft-state').className=`badge ${state}`;
-  $('recalculate').disabled=busy || !draft.baseRunId || !!unapplied;
-  $('recalculate').title=!draft.baseRunId?'Run Update & analyze to retain base inputs.':unapplied?'Apply or discard advanced JSON edits first.':'';
+  for(const id of ['recalculate','recalculate-review']) {
+    $(id).disabled=busy || !draft.baseRunId || !!unapplied;
+    $(id).title=!draft.baseRunId?'Run Update & analyze first.':unapplied?'Apply or discard advanced JSON edits first.':'';
+  }
   $('save-run').disabled=busy || !previewReady(draft) || !!unapplied;
   $('save-run').title=previewReady(draft)?'Save this calculation as an immutable child run.':'Recalculate the current draft before saving.';
   // An operation is authorized with the local token, so nothing that starts one may be
@@ -290,7 +294,7 @@ function renderState(writeStatus=false) {
   // Recording a decision needs a loaded run and a finished calculation, so it is settled
   // here with the other controls: a run loaded while busy re-enables it when busy clears.
   $('save-decision').disabled=busy || !draft.baseRunId;
-  if(!busy && writeStatus) announce(unapplied?'Advanced JSON has unapplied edits. Apply or discard them before calculating.':draft.dirty && !previewReady(draft)?'Draft changed · displayed results are out of date until recalculated.':previewReady(draft)?'Preview calculated · save a new run to retain this result.':draft.baseRunId?'Saved inputs · display filters leave the analytical scope unchanged.':'Run Update & analyze to create the first retained input set.');
+  if(!busy && writeStatus) announce(unapplied?'Apply or discard the JSON edit first.':draft.dirty && !previewReady(draft)?'Changed · Recalculate to update the results.':previewReady(draft)?'Recalculated · Save run to keep it.':draft.baseRunId?'Saved.':'Run Update & analyze to start.');
 }
 function renderDiff() {
   const changes=differences(draft.baseConfig,resolved());
@@ -537,7 +541,7 @@ function exceptionCard(record) {
   node.append(heading,el('p',record.message || 'This exception needs an explicit answer.','exception-message'));
   const builder=exceptionControls[kind];
   if(!builder){
-    node.append(el('p',kind==='fx_manual'?'Refresh market data to load a dated FX observation.':'This exception is answered through supplemental inputs on the Data page.','exception-note'));
+    node.append(el('p',kind==='fx_manual'?'Refresh market data to load a dated FX observation.':'This exception is answered under Settings → Account facts.','exception-note'));
     return node;
   }
   const {controls,collect}=builder(record), save=button('Save',()=>saveResolution(record,allowedValues(record,collect())),'');
@@ -576,7 +580,6 @@ function renderOverview() {
     metric('Explicit cash',summary.unknown_cash_accounts?.length?'Incomplete':money(summary.known_cash,currency),summary.unknown_cash_accounts?.length?`${summary.unknown_cash_accounts.length} accounts need cash evidence`:'Cash supplied with the snapshot'),
     metric('Coverage',pct(summary.coverage),summary.complete?'Accounts reconciled':'Unresolved amounts remain visible'),
     metric('Unclassified',money(summary.unclassified_value,currency),'Not assumed to be cash'));
-  $('overview-caption').textContent=result?`${text(result.metadata?.valuation_date)} · ${summary.position_count ?? '—'} positions · ${friendly(result.metadata?.scope)}`:'Run a review to reconcile completed holdings and available research inputs.';
   $('exposure-state').replaceChildren(badge(result?.exposure_status));
   replace('issuer-chart',barChart(result?.issuer_exposure,'weight','issuer_id',null),
     chartCaption({units:'Share of portfolio NAV (%)',date:observationDate(),scope:'Top issuers; direct holdings and fund look-through',coverage:readinessNote('exposure')}));
@@ -600,6 +603,60 @@ function renderOverview() {
       chartCaption({units:row.units || 'Units unavailable',date:row.observation_date || observationDate(),scope:`Vintage ${row.vintage_date || 'unknown'} · context only`,coverage:`coverage ${(row.history || []).length} observations`}));return node;
   });replace('macro-panels',...(macros.length?macros:[empty('Import dated macro vintages or configure a provider.','Macro observations unavailable')]));
   applyView();
+}
+// This month's answer: per security, buy a share of available cash, sell part of the
+// position, or hold. Shares split whatever cash there is; the illustrative amount only
+// shows what a share means in money and is never saved.
+let illustrativeCash=100;
+const actionLabels={buy:'Buy',sell:'Sell',hold:'Hold'};
+const basisLabels={adopted_eps_central:'Your EPS',adopted_dcf:'Your DCF',proposed_eps_central:'Proposed EPS',proposed_dcf:'Proposed DCF',none:'None'};
+function actionBadge(action) { return el('span',actionLabels[action] || friendly(action),`badge action ${action || ''}`); }
+function recommendationReasons(row) {
+  return (row.reasons || []).map(reason=>reason?.detail).filter(Boolean).join('; ') || '—';
+}
+function renderRecommendations() {
+  const rec=result?.recommendations;
+  const rows=objectRows(rec?.rows).filter(row=>!account || !row.held || (row.account_ids || []).includes(account));
+  const counts=rec?.counts || {};
+  $('recommendations-state').textContent=rec?`${rec.horizon_months ?? horizon()}-month horizon · ${rec.nav?.basis==='reconciled_nav'?'reconciled NAV':'known position value'}`:'Unavailable';
+  const cash=el('label',null,'field');const input=el('input');input.type='number';input.min='0';input.step='any';
+  input.id='illustrative-cash';input.value=String(illustrativeCash);
+  input.addEventListener('input',()=>{const value=numeric(input.value);if(value!==null && value>=0){illustrativeCash=value;drawTable();}});
+  cash.htmlFor=input.id;cash.append(el('span','Cash to split'),input);
+  replace('recommendations-summary',
+    metric('Buys',`${counts.buy ?? 0}`,rec?`shares sum to ${pct(rec.buy_share_sum)}`:''),
+    metric('Sells',`${counts.sell ?? 0}`,rec?`frees ${money(rec.sale_proceeds,rec.currency)}`:''),
+    metric('Holds',`${counts.hold ?? 0}`,rec?`${counts.candidates_considered ?? 0} candidates screened`:''),
+    cash);
+  const drawTable=()=>replace('recommendations-table',rec?table(rows,[
+    {key:'symbol',label:'Security',render:(value,row)=>securityButton(row.security_id,value || row.security_id)},
+    {key:'name',wrap:true,render:(value,row)=>row.held?text(value):`${text(value)} · new`},
+    {key:'action',render:value=>actionBadge(value)},
+    {key:'buy_share',label:'Buy % of cash',render:value=>numeric(value)===null?'—':`${pct(value)} · ${money(numeric(value)*illustrativeCash,rec.currency)}`},
+    {key:'sell_fraction',label:'Sell % of position',render:(value,row)=>numeric(value)===null?'—':`${pct(value)} · ${money(row.sell_amount,rec.currency)}`},
+    {key:'current_weight',label:'Weight',render:pct},
+    {key:'expected_return',label:'Expected return',render:pct},
+    {key:'expected_return_basis',label:'Basis',render:(value,row)=>`${basisLabels[value] || friendly(value)} · ${row.confidence || 'low'}`},
+    {key:'reasons',label:'Why',wrap:true,render:(_value,row)=>el('span',recommendationReasons(row),'why')},
+  ]):empty('Run Update & analyze to get this month’s recommendations.','No recommendations'));
+  drawTable();
+  replace('recommendations-issues',rec?.issues?.length?listIssues(rec.issues):null);
+  renderReviewParameters();
+}
+function renderReviewParameters() {
+  const review=resolved().review || {};
+  const percentField=(key,label)=>configField('review',key,label,{type:'number',percent:true});
+  replace('review-parameters',form([
+    percentField('buy_min_return','Buy when expected return is at least (%)'),
+    percentField('sell_return_floor','Sell when expected return is below (%)'),
+    percentField('sell_full_return','Sell everything at or below (%)'),
+    configField('review','buy_min_score','Minimum composite score (0–1)',{type:'number'}),
+    percentField('max_position_weight','Position cap for buys (%, blank: issuer cap or 10%)'),
+    field('Split cash',review.buy_weighting || 'excess_return',value=>patch({review:{buy_weighting:value}}),
+      {options:[['excess_return','By expected return above the buy threshold'],['equal','Equally']]}),
+    configField('review','max_new_positions','New positions at most',{type:'number'}),
+    configField('review','include_new_candidates','Include new candidates',{type:'checkbox'}),
+  ]),el('p',`Expected returns are over ${horizon()} months. Change a value, then Recalculate.`,'muted'));
 }
 // What changed since the comparable previous review: the decision that was recorded
 // then, the few balances this run can compare, and each security's own dated brief. A
@@ -659,7 +716,7 @@ function renderPortfolioRisks() {
       coverage:readinessNote('risk')}));
   replace('stress-table',table(risk.stresses || [],[{key:'scenario',render:value=>friendly(value)},
     {key:'return',label:'Portfolio return',render:pct},{key:'status',render:badge},{key:'basis',wrap:true}],
-    'Mechanical shocks the owner stated; not probabilities and not forecasts.'));
+    'Mechanical shocks you stated.'));
   replace('concentration-table',table(concentrationRows(),[{key:'issuer_id',label:'Issuer'},
     {key:'weight',label:'Household weight',render:pct},{key:'issuer_cap',label:'Confirmed cap',render:pct},
     {key:'over_cap',label:'Over the cap',render:value=>numeric(value)===null?'—':numeric(value)>0?pct(value):'—'}],
@@ -721,7 +778,8 @@ function renderOverlap() {
       scope:'Direct holdings and disclosed fund holdings',coverage:coverageSummary('fund_disclosures','prices')}));
 }
 function securityRow(id) { return (result?.holdings || []).find(row=>row.security_id===id) || (result?.signals || []).find(row=>row.security_id===id) || {}; }
-function securityButton(id) { return button(id || 'Unresolved',()=>showSecurity(id),'text-button'); }
+// Also a table renderer, where the second argument is the row rather than a label.
+function securityButton(id,label) { return button((typeof label==='string' && label) || id || 'Unresolved',()=>showSecurity(id),'text-button'); }
 // A published locator is data, not markup: only an https address the service already
 // vetted becomes a link, and everything else stays readable text.
 function sourceLink(source) {
@@ -819,11 +877,11 @@ function renderHoldings() {
 }
 function renderScreen() {
   const search=$('screen-search').value.toLowerCase(), rows=(result?.signals || []).filter(row=>JSON.stringify(row).toLowerCase().includes(search));
-  $('screen-scope').textContent=`${result?.signals?.length || 0} supplied securities · not a market-wide claim`;
+  $('screen-scope').textContent=`${result?.signals?.length || 0} securities`;
   replace('company-screen',table(rows,[{key:'security_id',label:'Security',render:securityButton},{key:'sector'},
     {key:'quality',render:pct},{key:'value',render:pct},{key:'momentum',render:pct},{key:'score',label:'Composite rank',render:pct},
     {key:'eligible',render:value=>badge(value?'eligible':'ineligible')},{key:'reasons',label:'Coverage / eligibility',wrap:true}],
-  'Ranks are relative research scores, not return forecasts. Open a security for raw inputs and peer coverage.'));
+  'Relative percentile ranks within sector.'));
 }
 // A proposal is this review's reviewable starting point, never an adopted assumption:
 // keeping one copies it into the workspace as a prefill that still has to be
@@ -854,7 +912,7 @@ function renderProposals() {
     actions.push(action);tags.push(...assumptionTags(kind,proposal));
   }
   replace('proposal-actions',...actions);
-  replace('assumption-strip',...tags,el('p','A proposal is evidence-backed input, not an established assumption. Review each value before recalculating.','muted'));
+  replace('assumption-strip',...tags);
 }
 function epsDefaults() {
   const security=securityRow(securityId);
@@ -917,7 +975,7 @@ function renderEPS() {
   const action=button('Use reviewed EPS scenarios',async()=>{
     const value=rationale.querySelector('textarea').value.trim();if(!value)throw new Error('Explain why these reviewed scenarios should feed portfolio comparison.');
     const response=await api('/api/research/valuation-link',{base_run_id:draft.baseRunId,security_id:securityId,workspace:draft.workspace,reviewed:true,rationale:value});
-    patch(response.patch);renderScenarios();navigate('scenarios');announce('Reviewed EPS returns linked as subjective scenarios. Recalculate the portfolio.');
+    patch(response.patch);renderScenarios();navigate('research');document.querySelector('[data-research-tab="scenarios"]')?.click();announce('Reviewed EPS returns linked as subjective scenarios. Recalculate the portfolio.');
   });
   action.disabled=!draft.baseRunId;replace('valuation-link',rationale,action,el('p','Linking is an explicit review action. It does not create a calibrated forecast.','muted'));
 }
@@ -1175,7 +1233,7 @@ function renderReview() {
     {key:'review_flags',label:'Review flags',wrap:true,
       render:value=>Array.isArray(value)?(value.length?value.map(friendly).join(', '):'—'):text(value)},
     {key:'basis',wrap:true},{key:'reason',wrap:true}],
-    'Exact decimal trade values and quantities for the complete basket. Nothing here places an order.'),
+    'Exact trade values and quantities.'),
     // The reserve above is only as good as the lots behind it, so the plan stays readable.
     disclosure('Tax lot plan behind the conditional reserve',
       autoTable((candidate.proposals || []).flatMap(leg=>(leg?.lot_plan || [])
@@ -1222,11 +1280,17 @@ function renderAllocationChange(candidate) {
 function renderDecisionHistory() {
   const rows=(decisionRecords || []).map(record=>({...(record.payload || record),
     recorded_at:record.created_at || record.recorded_at}));
+  const positions=value=>{
+    const decided=objectRows(value?.rows);
+    if(!decided.length)return '—';
+    const count=action=>decided.filter(row=>row.action===action).length;
+    return `${count('buy')} buy · ${count('sell')} sell · ${count('hold')} hold${value.overrides?` · ${value.overrides} overridden`:''}`;
+  };
   replace('decision-history',table(rows,[{key:'as_of',label:'Decision date'},
-    {key:'action',render:value=>friendly(value)},{key:'selected_alternative',label:'Selected alternative'},
-    {key:'compared_candidates',label:'Compared against',wrap:true,render:value=>Array.isArray(value)?value.join(', '):text(value)},
-    {key:'rationale',wrap:true},{key:'recorded_at',label:'Recorded',render:value=>when(value)}],
-    'Decisions recorded against this saved run. Recording a decision never changes a saved forecast.'));
+    {key:'action',render:value=>friendly(value)},
+    {key:'recommendations',label:'Positions',render:positions},
+    {key:'selected_alternative',label:'Optimizer alternative'},
+    {key:'rationale',wrap:true},{key:'recorded_at',label:'Recorded',render:value=>when(value)}]));
 }
 // Recording the decision is one explicit step: which alternative, weighed against which
 // others, and why. The dialog refuses a decision the saved run cannot support.
@@ -1243,24 +1307,27 @@ function decisionError(message='') {
 // are kept in step rather than letting the action silently discard the alternative.
 let decisionAlternative='';
 function syncDecisionAlternative() {
-  const select=$('decision-alternative'), noAction=$('decision-action').value==='no_action';
-  select.disabled=noAction;
-  select.value=noAction?'':(select.value || decisionAlternative);
-  select.title=noAction?'A no-change decision records no alternative. Choose another action to name one.':'';
+  const action=$('decision-action').value, none=['no_action','follow_recommendations'].includes(action);
+  const select=$('decision-alternative');
+  select.disabled=none;
+  select.value=none?'':(select.value || decisionAlternative);
+  select.title=none?'This decision records no optimizer alternative.':'';
+  if(action==='follow_recommendations' && !$('decision-rationale').value.trim())$('decision-rationale').value='Followed the recommendations.';
 }
 function openDecisionDialog() {
   if(!draft.baseRunId)throw new Error('Choose a saved run before recording a decision.');
   if(draft.dirty)throw new Error('Save or reset the current draft so this decision refers to a retained run.');
   const candidates=(result?.allocation?.candidates || []).map(row=>row.candidate).filter(Boolean);
-  $('decision-compared').textContent=candidates.length
-    ?`Compared against ${candidates.join(', ')} · run ${String(draft.baseRunId).slice(0,12)} · ${text(result?.metadata?.as_of)}`
-    :'This run produced no feasible alternative, so only a no-change decision can be recorded.';
+  const counts=result?.recommendations?.counts || {};
+  $('decision-compared').textContent=[`${counts.buy ?? 0} buy · ${counts.sell ?? 0} sell · ${counts.hold ?? 0} hold`,
+    candidates.length?`Compared against ${candidates.join(', ')}`:null,
+    `run ${String(draft.baseRunId).slice(0,12)} · ${text(result?.metadata?.as_of)}`].filter(Boolean).join(' · ');
   const chosen=selectedCandidateRow()?.candidate || '';
   $('decision-alternative').replaceChildren(...[['','No alternative chosen'],...candidates.map(id=>[id,friendly(id)])].map(([value,label])=>{
     const option=el('option',label);option.value=value;return option;
   }));
   decisionAlternative=candidates.includes(chosen)?chosen:'';
-  $('decision-action').value='no_action';$('decision-rationale').value='';
+  $('decision-action').value=result?.recommendations?.rows?.length?'follow_recommendations':'no_action';$('decision-rationale').value='';
   decisionError();syncDecisionAlternative();
   $('decision-dialog').showModal();
 }
@@ -1293,7 +1360,7 @@ function renderSettings() {
     const id=row.account_id, block=el('section',null,'section-block');block.append(el('h3',id));
     block.append(field('Permitted security IDs (comma separated)',(config.mandate?.account_permissions?.[id] || []).join(', '),value=>{
       const map=clone(resolved().mandate?.account_permissions || {});map[id]=value.split(',').map(item=>item.trim()).filter(Boolean);patch({mandate:{account_permissions:map}});
-    },{help:'Blank does not grant trading permission. Include approved residual and benchmark instruments explicitly.'}));
+    }));
     const holdings=(result?.holdings || []).filter(item=>item.account_id===id);
     block.append(table(holdings,[{key:'security_id'},...['dealing_allowed','fractional_shares','quantity_increment'].map(key=>({key,label:friendly(key),render:(_,position)=>{
       const rule=config.mandate?.dealing_rules?.[id]?.[position.security_id];
@@ -1302,31 +1369,33 @@ function renderSettings() {
       },{type:key==='quantity_increment'?'number':'checkbox',help:rule?'':'Unconfirmed'});
     }}))]));accountNodes.push(block);
   }
-  replace('permissions-form',form([
+  replace('permissions-form',...accountNodes);
+  // Settings only the optimizer alternatives read; the recommendations never need them.
+  replace('optimizer-form',form([
+    configField('allocation','optimize','Enable experimental optimization',{type:'checkbox'}),
     configField('allocation','active_sleeve_weight','Systematic sleeve budget (%)',{type:'number',percent:true}),
     field('Sleeve budget denominator',config.allocation?.sleeve_budget_basis,value=>patch({allocation:{sleeve_budget_basis:value || null}}),{options:[['','Unconfirmed'],['account_nav','Each account NAV']]}),
     configField('allocation','residual_security_id','Eligible residual security ID'),
     configField('allocation','max_names','Maximum sleeve names',{type:'number'}),
     field('New-flow treatment',config.allocation?.flow_policy,value=>patch({allocation:{flow_policy:value || null}}),{options:[['','Unconfirmed'],['approved_benchmark','Approved benchmark']]}),
-  ]),...(accountNodes.length?accountNodes:[empty('Load a reconciled snapshot to see exact account identifiers.','Accounts unavailable')]));
+    configField('allocation','return_hurdle','12-month improvement / dollar redeployed (%)',{type:'number',percent:true}),
+  ]));
   const policies=config.mandate?.account_candidate_policy || {};
   const accounts=(result?.summary?.accounts || []).map(row=>row.account_id).filter(Boolean);
   replace('candidate-policy-form',form([
     ...accounts.map(id=>field(`${id} candidate comparison`,policies[id] || 'none',value=>{
       const map={...(resolved().mandate?.account_candidate_policy || {})};map[id]=value;patch({mandate:{account_candidate_policy:map}});
-    },{options:[['none','None: compare held securities only'],['eligible_universe','Eligible universe: compare screened candidates']],
-      help:'Unowned companies are compared for this account only where this says so.'})),
+    },{options:[['none','Held securities only'],['eligible_universe','Also screen new candidates']]})),
     field('Watchlist symbols (comma separated)',(config.signals?.watchlist || []).join(', '),value=>{
       patch({signals:{watchlist:value.split(',').map(item=>item.trim()).filter(Boolean)}});
-    },{wide:true,help:'Exact listing symbols researched first when a review has budget. A watchlist is not a second universe.'}),
-  ]),...(accounts.length?[]:[el('p','Load a reconciled snapshot to see exact account identifiers.','muted')]));
+    },{wide:true}),
+  ]),...(accounts.length?[]:[el('p','Run Update & analyze to list your accounts here.','muted')]));
   jsonEditor('account-settings-json','Explicit account permissions, dealing rules, sleeve members and source-backed flows',{
     mandate:{account_permissions:config.mandate?.account_permissions || {},dealing_rules:config.mandate?.dealing_rules || {}},
     allocation:{sleeve_membership:config.allocation?.sleeve_membership || {},new_flows:config.allocation?.new_flows || {}},
   },value=>patch(value));
   replace('cost-tax-form',form([
     configField('allocation','transaction_cost_bps','Cost per side (basis points)',{type:'number'}),
-    configField('allocation','return_hurdle','12-month improvement / dollar redeployed (%)',{type:'number',percent:true}),
     configField('allocation','min_trade_value','Minimum trade amount',{type:'number'}),
     configField('tax','enabled','Enable conditional US tax reserves',{type:'checkbox'}),
     configField('tax','short_term_rate','Short-term rate (%)',{type:'number',percent:true}),
@@ -1337,7 +1406,6 @@ function renderSettings() {
     configField('risk','lookback_years','Risk history (years)',{type:'number'}),
     configField('risk','min_weekly_observations','Minimum common weekly observations',{type:'number'}),
     configField('signals','min_sector_size','Minimum sector peers',{type:'number'}),
-    configField('allocation','optimize','Enable experimental optimization',{type:'checkbox',help:'Initially off. This is an advanced experiment; it does not establish investment performance.'}),
   ]));
   jsonEditor('settings-json','Resolved editable configuration',config,value=>patch(value));renderDiff();
 }
@@ -1407,15 +1475,13 @@ function renderContext() {
   const accounts=result?.summary?.accounts || [];
   if(account && !accounts.some(row=>row.account_id===account))account='';
   $('account-scope').replaceChildren(...[{account_id:'',name:'All accounts'},...accounts].map(row=>{const option=el('option',row.name || row.account_id);option.value=row.account_id;return option;}));$('account-scope').value=account;
-  $('valuation-context').textContent=`Valuation ${result?.metadata?.valuation_date || 'date unavailable'}`;
-  $('cutoff-context').textContent=`Decision cutoff ${result?.timeline?.decision_cutoff || 'unavailable'}`;
   const mode=result?.metadata?.mode || service.mode;
   $('research-mode').textContent=mode==='demo'?'SYNTHETIC DEMO · example data':`${friendly(mode || 'unavailable')} · ${service.dataset || 'source unavailable'}`;$('research-mode').className=`badge ${mode==='demo'?'demo':''}`;
   if(!$('review-date').value)$('review-date').value=service.default_as_of || '';
   if(!$('evaluation-date').value)$('evaluation-date').value=new Date().toISOString().slice(0,10);
 }
 function renderAll() {
-  renderContext();renderOverview();renderHoldings();renderScreen();renderCompany();renderScenarios();renderReview();renderSettings();renderData();renderState(true);
+  renderContext();renderRecommendations();renderOverview();renderHoldings();renderScreen();renderCompany();renderScenarios();renderReview();renderSettings();renderData();renderState(true);
 }
 function draftChoice(message) {
   return new Promise(resolve=>{
@@ -1471,7 +1537,7 @@ async function submitJob(kind,payload,evaluationOnly=false) {
     let job=await api('/api/research/jobs',{kind,request_key:crypto.randomUUID(),...payload});
     while(!['complete','failed'].includes(job.status)){
       if(!gate.current(ticket))return;
-      announce(`${friendly(job.kind)} · ${job.status}. Previous results remain available.`);
+      announce(`${friendly(job.kind)} · ${job.status}…`);
       await wait(650);job=await api(`/api/research/jobs/${encodeURIComponent(job.job_id)}`);
     }
     if(job.status==='failed')throw new Error(job.error || 'The calculation failed.');
@@ -1715,6 +1781,7 @@ function wireTabs(attribute,names,panelId,onSelect) {
   }
 }
 wireTabs('data-company-tab',['eps','dcf','evidence'],name=>`company-${name}`);
+wireTabs('data-research-tab',['companies','scenarios'],name=>`research-${name}`);
 wireTabs('data-detail-tab',['evidence','calculation','assumptions','limitations'],name=>`detail-${name}`);
 function wire(id,action) {
   $(id).addEventListener('click',async()=>{
@@ -1728,10 +1795,11 @@ wire('cancel-workflow',async()=>{
   announce('Cancellation requested. The operation stops before publishing and the last usable review is unchanged.');
 });
 wire('monthly-review',()=>monthly(false));wire('refresh-research',()=>monthly(true));
-wire('recalculate',async()=>{
+async function recalculate() {
   if(!draft.baseRunId)throw new Error('Run Update & analyze before recalculating frozen inputs.');
   await submitJob('preview',{base_run_id:draft.baseRunId,patch:draft.patch,workspace:draft.workspace});
-});
+}
+wire('recalculate',recalculate);wire('recalculate-review',recalculate);
 wire('save-run',async()=>{
   if(!previewReady(draft))throw new Error('Recalculate the current draft before saving.');
   await submitJob('save',{preview_job_id:draft.previewJobId});
@@ -1795,13 +1863,13 @@ wire('evaluate-run',async()=>{
 });
 window.addEventListener('beforeunload',event=>{if(draft.dirty){persist();event.preventDefault();event.returnValue='';}});
 async function initialize() {
-  navigate(pages.includes(location.hash.slice(1))?location.hash.slice(1):'overview');
+  const start=location.hash.slice(1);navigate(pages.includes(pageAliases[start] || start)?start:'review');
   try {
     const [local,status]=await Promise.all([api('/api/state'),api('/api/research'),loadCurrent().then(loadExceptions)]);token=local.token;service=status;bootstrap='ready';
     try{const response=await api('/api/research/supplemental');supplementalSupported=response.supported;supplemental=clone(response.saved || response.template || null);}catch(failure){error(`Supplemental input is unavailable: ${failure.message}`);}
     resumeWorkflow();loadProviderHealth();
     if(service.latest_run_id)await loadRun(service.latest_run_id,false);
     else{draft=restoreDraft(sessionStorage,null,service.config,{});renderAll();}
-  } catch(failure){bootstrap='failed';error(`Research could not load: ${failure.message} Reload this page to try again. Yahoo collection remains available in Data and Holdings.`);renderAll();}
+  } catch(failure){bootstrap='failed';error(`Research could not load: ${failure.message} Reload this page to try again. Yahoo collection remains available in Settings and Holdings.`);renderAll();}
 }
 initialize();
