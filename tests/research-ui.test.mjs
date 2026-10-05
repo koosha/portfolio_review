@@ -298,10 +298,10 @@ test('the new chart and assumption styles stay legible and wrap on narrow layout
 });
 test('one accessible application shell preserves collector controls and loads external scripts', async () => {
   const html = await readFile(new URL('../static/index.html', import.meta.url), 'utf8');
-  for (const page of ['overview','holdings','research','scenarios','review','data','settings']) {
+  for (const page of ['review','holdings','research','settings']) {
     assert.match(html, new RegExp(`data-page="${page}"`));
   }
-  for (const id of ['sources','refresh','connect','discover','disconnect','snapshot-panel','snapshot-select','records','pairing-key','current-accounts','current-dates','analysis-caption']) {
+  for (const id of ['sources','refresh','connect','discover','disconnect','snapshot-panel','snapshot-select','records','pairing-key','current-accounts','current-dates','analysis-caption','recommendations-table','review-parameters']) {
     assert.equal([...html.matchAll(new RegExp(`id="${id}"`, 'g'))].length, 1);
   }
   assert.ok(!/<iframe|\sonclick=/.test(html));

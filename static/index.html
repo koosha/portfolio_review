@@ -14,40 +14,27 @@
 <body>
 <a class="skip-link" href="#workspace-main">Skip to workspace</a>
 <aside class="sidebar">
-<a class="brand" href="#overview">
+<a class="brand" href="#review">
 <span class="brand-mark" aria-hidden="true">P</span>
 <span>Portfolio<br>
 <strong>Review</strong>
 </span>
 </a>
 <nav aria-label="Main navigation">
-<button data-page="overview" aria-current="page">
-<span aria-hidden="true">01</span>Overview</button>
+<button data-page="review" aria-current="page">
+<span aria-hidden="true">01</span>Review</button>
 <button data-page="holdings">
 <span aria-hidden="true">02</span>Holdings</button>
 <button data-page="research">
 <span aria-hidden="true">03</span>Research</button>
-<button data-page="scenarios">
-<span aria-hidden="true">04</span>Scenarios</button>
-<button data-page="review">
-<span aria-hidden="true">05</span>Review</button>
-<div class="nav-divider">
-</div>
-<button data-page="data">
-<span aria-hidden="true">06</span>Data</button>
 <button data-page="settings">
-<span aria-hidden="true">07</span>Settings</button>
+<span aria-hidden="true">04</span>Settings</button>
 </nav>
-<div class="sidebar-foot">● Local workspace<br>
-<small>Research, review, record.</small>
-</div>
+<div class="sidebar-foot">● Local workspace</div>
 </aside>
 <main id="workspace-main" tabindex="-1">
 <header class="workspace-header">
-<div>
-<p class="eyebrow">MONTHLY WORKSPACE</p>
-<h1 id="page-title">Overview</h1>
-</div>
+<h1 id="page-title">Review</h1>
 <div class="header-actions">
 <span id="research-mode" class="badge">Loading source…</span>
 <button id="update-analyze" disabled>Update &amp; analyze</button>
@@ -56,38 +43,127 @@
 </header>
 <div id="workflow-progress" class="stage-strip" role="status" aria-live="off" hidden>
 </div>
-<div class="context-bar" aria-label="Shared research context">
-<label>Account display<select id="account-scope">
-<option value="">All accounts</option>
-</select>
-</label>
+<div class="toolbar" aria-label="Review and draft">
 <label>Showing<select id="research-run">
 <option value="current">Current holdings (no analysis)</option>
 </select>
 </label>
-<div class="context-dates">
-<span id="valuation-context">Valuation date unavailable</span>
-<small id="cutoff-context">Decision cutoff unavailable</small>
-</div>
+<label>Accounts<select id="account-scope">
+<option value="">All accounts</option>
+</select>
+</label>
 <span id="draft-state" class="badge" role="status">Loading</span>
-</div>
-<div class="draft-actions">
-<p id="research-status" role="status" aria-live="polite">Loading research workspace…</p>
-<div>
+<div class="toolbar-actions">
 <button id="recalculate" class="secondary" disabled>Recalculate</button>
 <button id="save-run" class="secondary" disabled>Save run</button>
 <button id="reset-draft" class="quiet">Reset</button>
 </div>
+<p id="research-status" role="status" aria-live="polite">Loading…</p>
+<p id="analysis-caption" class="toolbar-caption">
+</p>
 </div>
 <div id="research-error" class="notice" role="alert" hidden>
 </div>
 <div id="notice" role="alert" hidden>
 </div>
-<section id="page-overview" class="page" aria-label="Overview">
-<div class="page-intro">
-<h2>Your portfolio, in context</h2>
-<p id="overview-caption" class="muted">Coverage and risks come before proposed changes.</p>
+<section id="page-review" class="page" aria-label="Review">
+<section id="recommendations-panel" class="panel" data-analysis aria-labelledby="recommendations-heading">
+<div class="section-heading">
+<h2 id="recommendations-heading">Recommendations</h2>
+<span id="recommendations-state" class="badge">
+</span>
 </div>
+<div id="recommendations-summary" class="mini-metrics">
+</div>
+<div id="recommendations-table">
+</div>
+<div id="recommendations-issues">
+</div>
+</section>
+<section id="review-parameters-panel" class="panel" data-analysis aria-labelledby="review-parameters-heading">
+<div class="section-heading">
+<h2 id="review-parameters-heading">Parameters</h2>
+<button id="recalculate-review" class="secondary" disabled>Recalculate</button>
+</div>
+<div id="review-parameters">
+</div>
+</section>
+<section id="exception-panel" class="panel exception-panel" aria-labelledby="exception-forms-heading">
+<div class="section-heading">
+<h2 id="exception-forms-heading">Exceptions</h2>
+<span id="exception-count" class="badge">Loading…</span>
+</div>
+<div id="current-exception-forms" aria-live="polite">
+</div>
+</section>
+<section class="panel" data-analysis aria-labelledby="what-changed-heading">
+<div class="section-heading">
+<h2 id="what-changed-heading">What changed</h2>
+<span id="what-changed-state" class="badge">
+</span>
+</div>
+<div id="what-changed" class="insight-list">
+</div>
+</section>
+<div class="two-column">
+<section class="panel" data-analysis aria-labelledby="holdings-review-heading">
+<h2 id="holdings-review-heading">Holdings to review</h2>
+<div id="holdings-review" class="priority-list">
+</div>
+</section>
+<section class="panel" data-analysis aria-labelledby="new-candidates-heading">
+<h2 id="new-candidates-heading">New candidates</h2>
+<div id="new-candidates" class="priority-list">
+</div>
+</section>
+</div>
+<section class="panel" data-analysis aria-labelledby="decision-heading">
+<div class="section-heading">
+<h2 id="decision-heading">Monthly decision</h2>
+<div>
+<a id="export-json" class="button secondary" download>Export JSON</a>
+<a id="export-html" class="button secondary" download>Export report</a>
+</div>
+</div>
+<button id="save-decision">Save monthly decision</button>
+<div id="decision-history">
+</div>
+</section>
+<details id="review-advanced" class="advanced">
+<summary>Optimizer alternatives (advanced)</summary>
+<section class="panel" data-analysis>
+<div class="section-heading">
+<h2>Feasible alternatives</h2>
+<span id="allocation-state" class="badge">
+</span>
+</div>
+<div id="candidate-cards" class="candidate-grid">
+</div>
+<div id="candidate-comparison">
+</div>
+</section>
+<section class="panel" data-analysis>
+<div class="section-heading">
+<h2 id="basket-title">Proposed basket</h2>
+<span id="basket-state" class="badge">
+</span>
+</div>
+<div id="basket-metrics" class="mini-metrics">
+</div>
+<div id="allocation-before-after">
+</div>
+<div id="trade-basket">
+</div>
+<h3>Account funding</h3>
+<div id="basket-funding">
+</div>
+<h3>Constraints &amp; no-action reasons</h3>
+<div id="basket-reasons">
+</div>
+</section>
+</details>
+</section>
+<section id="page-holdings" class="page" aria-label="Holdings" hidden>
 <section class="panel current-panel" aria-labelledby="current-holdings-heading">
 <div class="section-heading">
 <h2 id="current-holdings-heading">Current holdings</h2>
@@ -108,118 +184,12 @@
 <div id="current-exceptions">
 </div>
 </section>
-<section id="exception-panel" class="panel exception-panel" aria-labelledby="exception-forms-heading">
-<div class="section-heading">
-<h2 id="exception-forms-heading">Exceptions</h2>
-<span id="exception-count" class="badge">Loading…</span>
-</div>
-<p class="muted">Only questions the source, its exchange and provider metadata could not answer are listed; what currency a holding is quoted in is never one of them. Each answer is saved as dated supplemental evidence.</p>
-<div id="current-exception-forms" aria-live="polite">
-</div>
-</section>
-<p id="analysis-caption" class="eyebrow">
-</p>
-<div id="overview-metrics" class="metric-grid" data-analysis>
-</div>
-<section class="panel" data-analysis aria-labelledby="what-changed-heading">
-<div class="section-heading">
-<h2 id="what-changed-heading">What changed</h2>
-<span id="what-changed-state" class="badge">
-</span>
-</div>
-<div id="what-changed" class="insight-list">
-</div>
-</section>
-<section id="portfolio-risks" class="panel" data-analysis aria-labelledby="portfolio-risks-heading">
-<div class="section-heading">
-<h2 id="portfolio-risks-heading">Portfolio risks</h2>
-<span id="risk-state" class="badge">
-</span>
-</div>
-<div id="risk-contribution-chart">
-</div>
-<h3>Stress outcomes</h3>
-<div id="stress-table">
-</div>
-<h3>Concentration against the confirmed caps</h3>
-<div id="concentration-table">
-</div>
-</section>
-<div class="two-column">
-<section class="panel" data-analysis aria-labelledby="holdings-review-heading">
-<h2 id="holdings-review-heading">Holdings to review</h2>
-<div id="holdings-review" class="priority-list">
-</div>
-</section>
-<section class="panel" data-analysis aria-labelledby="new-candidates-heading">
-<h2 id="new-candidates-heading">New candidates</h2>
-<div id="new-candidates" class="priority-list">
-</div>
-</section>
-</div>
-<div class="two-column">
-<section class="panel" data-analysis>
-<div class="section-heading">
-<h2>Issuer exposure</h2>
-<span id="exposure-state" class="badge">
-</span>
-</div>
-<div id="issuer-chart">
-</div>
-</section>
-<section class="panel" data-analysis>
-<h2>Sector exposure</h2>
-<div id="sector-chart">
-</div>
-</section>
-</div>
-<section class="panel" data-analysis aria-labelledby="overlap-heading">
-<h2 id="overlap-heading">Issuer and fund overlap</h2>
-<div id="overlap-view">
-</div>
-</section>
-<div class="two-column">
-<section class="panel" data-analysis>
-<h2>Historical risk illustration</h2>
-<div id="risk-metrics" class="mini-metrics">
-</div>
-<div id="risk-history">
-</div>
-<p id="risk-caption" class="muted">
-</p>
-<details>
-<summary>Risk scope and components</summary>
-<div id="risk-detail">
-</div>
-</details>
-</section>
-<section class="panel" data-analysis>
-<h2>Review priorities</h2>
-<div id="review-priorities">
-</div>
-<button class="text-button" data-go="data">Resolve data gaps →</button>
-</section>
-</div>
-<section class="panel" data-analysis>
-<h2>Macro context</h2>
-<div id="macro-panels" class="macro-grid">
-</div>
-</section>
-</section>
-<section id="page-holdings" class="page" aria-label="Holdings" hidden>
-<div class="page-intro">
-<h2>Holdings &amp; accounts</h2>
-<p class="muted">Display filters do not change funding or portfolio-wide limits.</p>
-<p class="eyebrow" data-analysis-note>
-</p>
-</div>
 <section class="collection panel">
 <div class="section-heading">
 <h2>Portfolios <span id="source-count" class="count">0</span>
 </h2>
 <button id="refresh">Pull latest holdings</button>
 </div>
-<p class="muted">Select portfolios to pull.</p>
 <div id="sources">
 </div>
 <div id="refresh-results" aria-live="polite">
@@ -227,10 +197,8 @@
 </section>
 <section id="snapshot-panel" class="panel" hidden>
 <div class="section-heading">
-<div>
 <h2 id="snapshot-title">
 </h2>
-</div>
 <button id="close-snapshot" class="quiet">Close</button>
 </div>
 <div class="snapshot-controls">
@@ -247,7 +215,6 @@
 <summary>Capture details</summary>
 <div id="warnings">
 </div>
-<p class="muted">Values are as displayed by Yahoo. Missing quantities remain empty; capture time is not a quote timestamp.</p>
 </details>
 <div class="table-wrap">
 <table>
@@ -271,7 +238,7 @@
 </section>
 <section class="panel" data-analysis>
 <div class="section-heading">
-<h2>Research snapshot</h2>
+<h2>Analysed holdings</h2>
 <a class="button secondary" href="/api/export" download>Export captured holdings</a>
 </div>
 <div class="table-tools">
@@ -285,31 +252,87 @@
 </div>
 <div id="research-holdings">
 </div>
-</section>
-<section class="panel" data-analysis>
-<h2>Account reconciliation</h2>
+<details>
+<summary>Account reconciliation</summary>
 <div id="account-reconciliation">
 </div>
+</details>
 </section>
-</section>
-<section id="page-research" class="page" aria-label="Research" hidden>
-<div class="page-intro">
-<h2>Company research</h2>
-<p class="muted">Relative scores, conditional valuations and reviewed evidence remain distinct.</p>
-<p class="eyebrow" data-analysis-note>
-</p>
+<details id="portfolio-analysis" class="advanced">
+<summary>Portfolio analysis: exposure, risk and macro</summary>
+<div id="overview-metrics" class="metric-grid" data-analysis>
 </div>
-<section class="panel" data-analysis>
+<section id="portfolio-risks" class="panel" data-analysis aria-labelledby="portfolio-risks-heading">
 <div class="section-heading">
-<h2>Quality · Value · Momentum</h2>
-<span id="screen-scope" class="badge">
+<h2 id="portfolio-risks-heading">Portfolio risks</h2>
+<span id="risk-state" class="badge">
 </span>
 </div>
-<label>Search supplied universe<input id="screen-search" type="search">
-</label>
-<div id="company-screen">
+<div id="risk-contribution-chart">
+</div>
+<h3>Stress outcomes</h3>
+<div id="stress-table">
+</div>
+<h3>Concentration against the confirmed caps</h3>
+<div id="concentration-table">
 </div>
 </section>
+<div class="two-column">
+<section class="panel" data-analysis>
+<div class="section-heading">
+<h2>Issuer exposure</h2>
+<span id="exposure-state" class="badge">
+</span>
+</div>
+<div id="issuer-chart">
+</div>
+</section>
+<section class="panel" data-analysis>
+<h2>Sector exposure</h2>
+<div id="sector-chart">
+</div>
+</section>
+</div>
+<section class="panel" data-analysis aria-labelledby="overlap-heading">
+<h2 id="overlap-heading">Issuer and fund overlap</h2>
+<div id="overlap-view">
+</div>
+</section>
+<div class="two-column">
+<section class="panel" data-analysis>
+<h2>Historical risk</h2>
+<div id="risk-metrics" class="mini-metrics">
+</div>
+<div id="risk-history">
+</div>
+<p id="risk-caption" class="muted">
+</p>
+<details>
+<summary>Risk scope and components</summary>
+<div id="risk-detail">
+</div>
+</details>
+</section>
+<section class="panel" data-analysis>
+<h2>Data issues</h2>
+<div id="review-priorities">
+</div>
+<button class="text-button" data-go="settings">Resolve data gaps →</button>
+</section>
+</div>
+<section class="panel" data-analysis>
+<h2>Macro context</h2>
+<div id="macro-panels" class="macro-grid">
+</div>
+</section>
+</details>
+</section>
+<section id="page-research" class="page" aria-label="Research" hidden>
+<div class="subtabs page-tabs" role="tablist" aria-label="Research views">
+<button role="tab" data-research-tab="companies" aria-selected="true">Companies</button>
+<button role="tab" data-research-tab="scenarios" aria-selected="false">Scenarios</button>
+</div>
+<div id="research-companies" role="tabpanel">
 <section class="panel" data-analysis>
 <div class="section-heading">
 <h2>Valuation workspace</h2>
@@ -366,14 +389,19 @@
 </div>
 </details>
 </section>
-</section>
-<section id="page-scenarios" class="page" aria-label="Scenarios" hidden>
-<div class="page-intro">
-<h2>Explore joint outcomes</h2>
-<p class="muted">Common states span assets and benchmark. Probabilities are optional; weighted results require a complete distribution.</p>
-<p class="eyebrow" data-analysis-note>
-</p>
+<section class="panel" data-analysis>
+<div class="section-heading">
+<h2>Quality · Value · Momentum</h2>
+<span id="screen-scope" class="badge">
+</span>
 </div>
+<label>Search<input id="screen-search" type="search">
+</label>
+<div id="company-screen">
+</div>
+</section>
+</div>
+<div id="research-scenarios" role="tabpanel" hidden>
 <section class="panel" data-analysis>
 <div class="form-grid">
 <label>Horizon<select id="scenario-horizon">
@@ -401,107 +429,24 @@
 </section>
 <div class="two-column">
 <section class="panel" data-analysis>
-<h2>Current portfolio outcomes</h2>
+<h2>Portfolio outcomes</h2>
 <div id="scenario-chart">
 </div>
 <div id="scenario-results">
 </div>
-<h3>Current portfolio against the selected alternative</h3>
+<h3>Against the selected alternative</h3>
 <div id="scenario-comparison">
 </div>
 </section>
 <section class="panel" data-analysis>
-<h2>Scenario basis &amp; coverage</h2>
+<h2>Basis &amp; coverage</h2>
 <div id="scenario-issues">
 </div>
 </section>
 </div>
-</section>
-<section id="page-review" class="page" aria-label="Review" hidden>
-<div class="page-intro">
-<h2>Compare, decide, retain</h2>
-<p class="muted">Candidates are for review. Nothing places brokerage orders.</p>
-<p class="eyebrow" data-analysis-note>
-</p>
-</div>
-<section class="panel" data-analysis>
-<div class="section-heading">
-<h2>Feasible alternatives</h2>
-<span id="allocation-state" class="badge">
-</span>
-</div>
-<div id="candidate-cards" class="candidate-grid">
-</div>
-<div id="candidate-comparison">
 </div>
 </section>
-<section class="panel" data-analysis>
-<div class="section-heading">
-<h2 id="basket-title">Proposed basket</h2>
-<span id="basket-state" class="badge">
-</span>
-</div>
-<div id="basket-metrics" class="mini-metrics">
-</div>
-<div id="allocation-before-after">
-</div>
-<div id="trade-basket">
-</div>
-<h3>Account funding</h3>
-<div id="basket-funding">
-</div>
-<h3>Constraints &amp; no-action reasons</h3>
-<div id="basket-reasons">
-</div>
-</section>
-<section class="panel" data-analysis>
-<h2>Save the monthly decision</h2>
-<p class="muted">A decision records what was chosen against the alternatives this review compared. It changes no saved forecast.</p>
-<button id="save-decision">Save monthly decision</button>
-<div id="decision-history">
-</div>
-</section>
-<section class="panel">
-<div class="section-heading">
-<h2>Saved history &amp; comparisons</h2>
-<div>
-<a id="export-json" class="button secondary" download>Export JSON</a>
-<a id="export-html" class="button secondary" download>Export report</a>
-</div>
-</div>
-<div id="run-history">
-</div>
-<div class="form-grid">
-<label>Compare run<select id="compare-left">
-</select>
-</label>
-<label>With run<select id="compare-right">
-</select>
-</label>
-<button id="compare-runs" class="secondary">Compare runs</button>
-</div>
-<div id="run-comparison">
-</div>
-</section>
-<section class="panel">
-<h2>Prospective evaluation</h2>
-<p class="muted">Evaluate matured forecasts using observed endpoint prices. Contributions are not investment gains.</p>
-<div class="form-grid">
-<label>Evaluation date<input id="evaluation-date" type="date">
-</label>
-<label>Observed prices CSV<input id="evaluation-file" type="file" accept=".csv,text/csv">
-</label>
-</div>
-<button id="evaluate-run" class="secondary" disabled>Evaluate saved forecasts</button>
-<div id="evaluation-results">
-</div>
-</section>
-</section>
-<section id="page-data" class="page" aria-label="Data" hidden>
-<div class="page-intro">
-<h2>Inputs &amp; provenance</h2>
-<p class="muted">Collection, research refresh and frozen-input recalculation are separate operations.</p>
-</div>
+<section id="page-settings" class="page" aria-label="Settings" hidden>
 <section class="connect panel">
 <div class="section-heading">
 <h2>Yahoo Finance</h2>
@@ -514,7 +459,7 @@
 <li>In Chrome, open <strong>chrome://extensions</strong>, turn on <strong>Developer mode</strong>, and click <strong>Load unpacked</strong>.</li>
 <li>Select this extension folder:<input id="extension-path" readonly aria-label="Chrome extension folder">
 </li>
-<li>Open <strong>Local Portfolio</strong> from Chrome’s Extensions menu. Keep the local app address, paste this pairing key, and click <strong>Save connection</strong>.<div class="pairing-row">
+<li>Open <strong>Local Portfolio</strong> from Chrome’s Extensions menu, paste this pairing key, and click <strong>Save connection</strong>.<div class="pairing-row">
 <input id="pairing-key" type="password" readonly aria-label="Local pairing key">
 <button id="copy-pairing" class="secondary" type="button">Copy key</button>
 </div>
@@ -534,32 +479,51 @@
 </p>
 </section>
 <section class="panel">
-<div class="section-heading">
-<h2>Provider health</h2>
+<h2>Mandate</h2>
+<div id="mandate-form">
 </div>
-<p class="muted">What each source has answered and the next step when it cannot. Credentials are never displayed here; only whether one is configured.</p>
+</section>
+<section class="panel">
+<h2>Accounts &amp; candidates</h2>
+<div id="candidate-policy-form">
+</div>
+<div id="permissions-form">
+</div>
+<details>
+<summary>Flows, dealing rules and sleeve membership (JSON)</summary>
+<div id="account-settings-json">
+</div>
+</details>
+</section>
+<section class="panel">
+<h2>Costs &amp; taxes</h2>
+<div id="cost-tax-form">
+</div>
+</section>
+<section class="panel">
+<h2>Method</h2>
+<div id="method-form">
+</div>
+<details>
+<summary>Advanced configuration (JSON)</summary>
+<div id="settings-json">
+</div>
+</details>
+<div id="resolved-diff">
+</div>
+<div class="actions">
+<button id="save-settings" disabled>Save settings for future reviews</button>
+</div>
+</section>
+<section class="panel">
+<h2>Data providers</h2>
 <div id="provider-health" class="provider-grid">
 </div>
 <div id="provider-status">
 </div>
 </section>
 <section class="panel">
-<div class="section-heading">
-<h2>Historical month-end review (advanced)</h2>
-</div>
-<p class="muted">Update &amp; analyze reviews the newest collection. Use these only to recalculate a past month end from saved and cached inputs; saved runs and retained drafts stay available.</p>
-<div class="form-grid">
-<label>Intended review date<input id="review-date" type="date">
-</label>
-</div>
-<div class="actions">
-<button id="monthly-review" class="secondary" disabled>Run month-end review</button>
-<button id="refresh-research" class="secondary" disabled>Refresh inputs &amp; run review</button>
-</div>
-</section>
-<section class="panel">
-<h2>Supplement account facts</h2>
-<p class="muted">Record verified NAV, cash, currency and snapshot date. An unresolved NAV residual is not cash.</p>
+<h2>Account facts</h2>
 <div id="supplemental-forms">
 </div>
 <details>
@@ -567,7 +531,7 @@
 <div id="supplemental-json">
 </div>
 </details>
-<button id="save-supplemental" class="secondary" disabled>Save supplemental facts</button>
+<button id="save-supplemental" class="secondary" disabled>Save account facts</button>
 </section>
 <section class="panel">
 <h2>Import research evidence</h2>
@@ -585,10 +549,9 @@
 </label>
 <button id="import-csv" class="secondary" disabled>Validate &amp; import</button>
 </div>
-<p class="muted">Inputs are validated before a new review uses them. Company evidence can also be entered in Research.</p>
 </section>
 <section class="panel">
-<h2>Source records &amp; data issues</h2>
+<h2>Sources &amp; data issues</h2>
 <div id="source-manifest">
 </div>
 <div id="all-issues">
@@ -599,58 +562,61 @@
 </div>
 </details>
 </section>
-</section>
-<section id="page-settings" class="page" aria-label="Settings" hidden>
-<div class="page-intro">
-<h2>Mandate &amp; review settings</h2>
-<p class="muted">Unknown preferences stay unknown. Confirm only the mandate you intend to use.</p>
-</div>
+<details id="settings-advanced" class="advanced">
+<summary>Advanced</summary>
 <section class="panel">
-<h2>Mandate</h2>
-<div id="mandate-form">
-</div>
-</section>
-<section class="panel">
-<h2>Accounts, permissions &amp; systematic sleeve</h2>
-<div id="permissions-form">
-</div>
-<h3>Candidate comparison &amp; watchlist</h3>
-<div id="candidate-policy-form">
-</div>
-<details>
-<summary>Flows, dealing rules and sleeve membership</summary>
-<div id="account-settings-json">
-</div>
-</details>
-</section>
-<section class="panel">
-<h2>Costs &amp; conditional taxes</h2>
-<div id="cost-tax-form">
-</div>
-<p class="muted">Tax estimates require applicable rates, complete lots and wash-sale verification. They are conditional reserves, not final tax liability.</p>
-</section>
-<section class="panel">
-<h2>Method settings &amp; resolved changes</h2>
-<div id="method-form">
-</div>
-<details>
-<summary>Advanced configuration</summary>
-<div id="settings-json">
-</div>
-</details>
-<div id="resolved-diff">
+<h2>Historical month-end review</h2>
+<div class="form-grid">
+<label>Review date<input id="review-date" type="date">
+</label>
 </div>
 <div class="actions">
-<button id="save-settings" disabled>Save settings for future reviews</button>
-<span class="muted">Recalculate previews changes on the current frozen run.</span>
+<button id="monthly-review" class="secondary" disabled>Run month-end review</button>
+<button id="refresh-research" class="secondary" disabled>Refresh inputs &amp; run review</button>
 </div>
 </section>
+<section class="panel">
+<h2>Optimizer settings</h2>
+<div id="optimizer-form">
+</div>
 </section>
-<footer>Portfolio Review · Stored locally · Conditional research with source and assumption records.</footer>
+<section class="panel">
+<div class="section-heading">
+<h2>Saved runs</h2>
+</div>
+<div id="run-history">
+</div>
+<div class="form-grid">
+<label>Compare run<select id="compare-left">
+</select>
+</label>
+<label>With run<select id="compare-right">
+</select>
+</label>
+<button id="compare-runs" class="secondary">Compare runs</button>
+</div>
+<div id="run-comparison">
+</div>
+</section>
+<section class="panel">
+<h2>Prospective evaluation</h2>
+<div class="form-grid">
+<label>Evaluation date<input id="evaluation-date" type="date">
+</label>
+<label>Observed prices CSV<input id="evaluation-file" type="file" accept=".csv,text/csv">
+</label>
+</div>
+<button id="evaluate-run" class="secondary" disabled>Evaluate saved forecasts</button>
+<div id="evaluation-results">
+</div>
+</section>
+</details>
+</section>
+<footer>Portfolio Review · stored locally · nothing here places orders.</footer>
 </main>
 <dialog id="draft-dialog" aria-labelledby="draft-dialog-title">
 <h2 id="draft-dialog-title">Keep your current edits?</h2>
-<p id="draft-dialog-message">This run has an unsaved draft. Choose what to do before continuing.</p>
+<p id="draft-dialog-message">This run has an unsaved draft.</p>
 <div class="actions">
 <button data-draft-choice="retain">Retain draft &amp; continue</button>
 <button data-draft-choice="discard" class="secondary">Discard draft &amp; continue</button>
@@ -688,8 +654,9 @@
 </p>
 <div class="form-grid">
 <label>Decision<select id="decision-action">
-<option value="no_action">No discretionary change</option>
-<option value="review_candidate">Review selected candidate</option>
+<option value="follow_recommendations">Follow the recommendations</option>
+<option value="no_action">No change</option>
+<option value="review_candidate">Review an optimizer alternative</option>
 <option value="override">Record an override</option>
 </select>
 </label>
@@ -697,7 +664,7 @@
 <option value="">No alternative chosen</option>
 </select>
 </label>
-<label class="wide">Rationale (required)<textarea id="decision-rationale" rows="3">
+<label class="wide">Rationale<textarea id="decision-rationale" rows="3">
 </textarea>
 </label>
 </div>

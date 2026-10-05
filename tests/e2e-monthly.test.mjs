@@ -240,7 +240,7 @@ test('the owner completes the six monthly steps with no developer intervention',
   // 5. A stated market view is the owner's, not the engine's: it changes the result and
   // reset puts the saved assumptions back.
   await t.test('step 5 · a shared-state knob recalculates and reset restores the run', async () => {
-    window.document.querySelector('[data-page="scenarios"]').click();
+    window.document.querySelector('[data-page="research"]').click();window.document.querySelector('[data-research-tab="scenarios"]').click();
     const central = namedInput(window, 'Central market return (%)');
     const savedCentral = central.value, savedCash = cashReturn(window).value;
     const savedResults = $('scenario-results').textContent;
@@ -305,7 +305,8 @@ test('the owner completes the six monthly steps with no developer intervention',
     assert.match($('decision-compared').textContent, /no_change|No Change/i,
       'the alternatives the choice is weighed against are shown');
     assert.equal($('decision-alternative').disabled, true,
-      'a no-change decision records no alternative');
+      'following the recommendations records no optimizer alternative');
+    setInput(window, $('decision-rationale'), '');
     $('confirm-decision').click();
     await until(() => !$('decision-error').hidden, 'the refusal stated inside the dialog');
     assert.match($('decision-error').textContent, /rationale/i);
@@ -324,7 +325,7 @@ test('the owner completes the six monthly steps with no developer intervention',
       return operation($, origin);
     })();
     assert.notEqual(third, second);
-    window.document.querySelector('[data-page="overview"]').click();
+    window.document.querySelector('[data-page="review"]').click();
     await until(() => /simple_equal_issuer_sleeve/.test($('what-changed').textContent),
       'the previous decision restated by the next review');
     assert.match($('what-changed').textContent, /sleeve alternative is evidenced/);
@@ -353,11 +354,11 @@ test('a preview in one tab leaves the other tab’s saved run alone', {timeout: 
   const two = await open(t, origin);
   const runId = one.$('research-run').value;
   assert.equal(two.$('research-run').value, runId, 'both tabs opened the same saved run');
-  two.window.document.querySelector('[data-page="scenarios"]').click();
+  two.window.document.querySelector('[data-page="research"]').click();two.window.document.querySelector('[data-research-tab="scenarios"]').click();
   const undisturbed = two.$('scenario-results').textContent;
   const stored = await read(origin, `/api/research/runs/${encodeURIComponent(runId)}`);
 
-  one.window.document.querySelector('[data-page="scenarios"]').click();
+  one.window.document.querySelector('[data-page="research"]').click();one.window.document.querySelector('[data-research-tab="scenarios"]').click();
   setInput(one.window, cashReturn(one.window), 4);
   await until(() => one.$('draft-state').textContent === 'Dirty', 'the first tab’s edited draft');
   assert.equal(two.$('draft-state').textContent, 'Saved', 'the second tab is still on saved inputs');
@@ -390,7 +391,7 @@ test('saving a recalculation writes a child run and never rewrites its parent',
   const {window, $, runtimeErrors} = await open(t, origin);
   const parent = $('research-run').value;
   const stored = await read(origin, `/api/research/runs/${encodeURIComponent(parent)}`);
-  window.document.querySelector('[data-page="scenarios"]').click();
+  window.document.querySelector('[data-page="research"]').click();window.document.querySelector('[data-research-tab="scenarios"]').click();
   const parentResults = $('scenario-results').textContent;
 
   setInput(window, cashReturn(window), 5);
@@ -545,7 +546,7 @@ test('a recalculation of a published review reaches no provider', {timeout: 9000
   // From here every provider raises. Nothing else about the application changes.
   await writeFile(server.info.offline_flag, 'Every provider refuses while this file exists.\n');
 
-  window.document.querySelector('[data-page="scenarios"]').click();
+  window.document.querySelector('[data-page="research"]').click();window.document.querySelector('[data-research-tab="scenarios"]').click();
   const publishedResults = $('scenario-results').textContent;
   setInput(window, cashReturn(window), 6);
   await until(() => $('draft-state').textContent === 'Dirty', 'the edited draft');
@@ -701,7 +702,7 @@ test('a stated market view saved for future reviews reaches the next review',
   await until(() => !$('update-analyze').disabled, 'the page to finish its first load');
   $('update-analyze').click();
   const first = await operation($, server.origin);
-  window.document.querySelector('[data-page="scenarios"]').click();
+  window.document.querySelector('[data-page="research"]').click();window.document.querySelector('[data-research-tab="scenarios"]').click();
   const stateReturns = async runId => (await read(server.origin,
     `/api/research/runs/${encodeURIComponent(runId)}`)).config.allocation.shared_state.market_returns;
   const returns = await stateReturns(first);
@@ -737,7 +738,7 @@ test('a stated market view saved for future reviews reaches the next review',
   // witness here: this fixture supplies a per-security joint forecast for every holding,
   // and an explicit per-security forecast overrides the market state it would otherwise
   // be expanded from (scenarios.py), so the stated view moves the inputs, not the total.
-  window.document.querySelector('[data-page="scenarios"]').click();
+  window.document.querySelector('[data-page="research"]').click();window.document.querySelector('[data-research-tab="scenarios"]').click();
   assert.equal(Math.round(namedInput(window, 'Central market return (%)').value), stated,
     'the new review carries the stated market view as its own saved assumptions');
   assert.equal($('research-error').hidden, true, $('research-error').textContent);
@@ -790,4 +791,63 @@ test('a page whose load failed says so rather than claiming it is still loading'
   assert.ok(!/loading/i.test(title), `the tooltip still claims a load in progress: ${title}`);
   assert.match(title, /reload/i, 'the tooltip says what to do about it');
   assert.match($('research-error').textContent, /could not load/i);
+});
+
+// The point of the month: every position gets buy, sell or hold, buy shares split all
+// available cash, a parameter change recalculates through the saved run, and following
+// the recommendations is recorded position by position.
+test('the owner reads, adjusts, saves and follows the monthly recommendations',
+  {timeout: 900000}, async t => {
+  const server = await boot(t, serverScript);
+  const {window, $, runtimeErrors} = await open(t, server.origin, {ready: collected});
+  await until(() => !$('update-analyze').disabled, 'the page to finish its first load');
+  $('update-analyze').click();
+  const parent = await operation($, server.origin);
+  window.document.querySelector('[data-page="review"]').click();
+
+  const rows = () => [...$('recommendations-table').querySelectorAll('tbody tr')];
+  const actions = () => rows().map(row => row.querySelector('.badge.action')?.textContent);
+  await until(() => rows().length > 0, 'the recommendations table');
+  for (const symbol of ['SIM01', 'SIM03']) {
+    assert.ok(rows().some(row => row.textContent.includes(symbol)), `${symbol} is recommended`);
+  }
+  assert.ok(actions().every(action => ['Buy', 'Sell', 'Hold'].includes(action)), actions().join());
+  const {result} = await read(server.origin, `/api/research/runs/${encodeURIComponent(parent)}`);
+  const buys = result.recommendations.rows.filter(row => row.action === 'buy');
+  if (buys.length) {
+    assert.equal(result.recommendations.buy_share_sum, 1, 'buy shares split all available cash');
+    // The illustrative cash only shows what a share is worth; it changes nothing saved.
+    setInput(window, $('illustrative-cash'), 1000);
+    assert.match($('recommendations-table').textContent, /1,000|1000/);
+    assert.equal($('draft-state').textContent, 'Saved');
+  }
+
+  // Nothing clears a 500% threshold, so every buy turns into a hold.
+  setInput(window, namedInput(window, 'Buy when expected return is at least (%)'), 500);
+  await until(() => $('draft-state').textContent === 'Dirty', 'the edited parameters');
+  $('recalculate-review').click();
+  await until(() => $('draft-state').textContent === 'Preview', 'the recalculated preview', 600000);
+  assert.ok(!actions().includes('Buy'), `no buy clears the raised threshold: ${actions().join()}`);
+  $('save-run').click();
+  await until(() => $('draft-state').textContent === 'Saved' && $('research-run').value !== parent,
+    'the recalculation saved as a child run');
+  const child = $('research-run').value;
+  const saved = await read(server.origin, `/api/research/runs/${encodeURIComponent(child)}`);
+  assert.equal(saved.config.review.buy_min_return, 5);
+  assert.equal(saved.result.metadata.parent_run_id, parent);
+
+  $('save-decision').click();
+  await until(() => $('decision-dialog').hasAttribute('open'), 'the decision dialog');
+  assert.equal($('decision-action').value, 'follow_recommendations');
+  assert.match($('decision-compared').textContent, /\d+ buy · \d+ sell · \d+ hold/);
+  $('confirm-decision').click();
+  await until(() => !$('decision-dialog').hasAttribute('open'), 'the recorded decision');
+  await until(() => /Follow Recommendations/.test($('decision-history').textContent),
+    'the decision in the history');
+  assert.match($('decision-history').textContent, /\d+ buy · \d+ sell · \d+ hold/);
+  const status = await read(server.origin, '/api/research');
+  assert.equal(status.last_decision.action, 'follow_recommendations');
+  assert.equal(status.last_decision.recommendations.overrides, 0);
+  assert.equal($('research-error').hidden, true, $('research-error').textContent);
+  assert.deepEqual(runtimeErrors, []);
 });

@@ -32,6 +32,13 @@ BASIS_CONFIDENCE = {
     "proposed_dcf": "medium",
     "none": "low",
 }
+BASIS_LABELS = {
+    "adopted_eps_central": "your EPS model",
+    "adopted_dcf": "your DCF",
+    "proposed_eps_central": "proposed EPS model",
+    "proposed_dcf": "proposed DCF",
+    "none": "no valuation",
+}
 RULES = (
     {
         "rule": "expected_return_below_floor",
@@ -266,7 +273,7 @@ def review_recommendations(result: dict, bundle: dict, config: dict) -> dict:
     def buy_reason(row: dict) -> dict:
         score = row["score"]
         detail = (
-            f"expected return {_pct(row['expected_return'])} ({row['expected_return_basis']}) "
+            f"expected return {_pct(row['expected_return'])} ({BASIS_LABELS[row['expected_return_basis']]}) "
             f"clears the {_pct(buy_return)} buy threshold"
         )
         if score is not None:
@@ -302,7 +309,7 @@ def review_recommendations(result: dict, bundle: dict, config: dict) -> dict:
                 0,
                 _reason(
                     "expected_return_below_floor",
-                    f"expected return {_pct(er)} ({row['expected_return_basis']}) is below the "
+                    f"expected return {_pct(er)} ({BASIS_LABELS[row['expected_return_basis']]}) is below the "
                     f"{_pct(floor)} floor; sell {fraction:.0%}",
                     row["_sources"],
                 ),
