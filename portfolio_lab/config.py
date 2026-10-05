@@ -156,10 +156,29 @@ DEFAULTS = {
         "lot_method": "min_tax",
         "wash_sale_window_verified": False,
     },
+    # The monthly recommendation: per security, buy a share of whatever cash is available,
+    # sell a fraction of the position, or hold. Returns are over allocation.horizon_months.
+    "review": {
+        # An expected return below this floor recommends selling part of the position.
+        "sell_return_floor": 0.0,
+        # At or below this return the whole position is recommended for sale.
+        "sell_full_return": -0.20,
+        # An expected return at or above this qualifies a security for buying.
+        "buy_min_return": 0.08,
+        # Composite quality/value/momentum percentile a buy must reach, where one exists.
+        "buy_min_score": 0.5,
+        # How available cash is split across buys: by return above the buy threshold, or equally.
+        "buy_weighting": "excess_return",
+        # No buy for a position already at this share of the portfolio; null uses the
+        # mandate's issuer cap, else 10%.
+        "max_position_weight": None,
+        "include_new_candidates": True,
+        "max_new_positions": 3,
+    },
 }
 
 # Only these non-secret groups can be adjusted through the loopback dashboard.
-EDITABLE_GROUPS = {"signals", "risk", "allocation", "mandate", "tax"}
+EDITABLE_GROUPS = {"signals", "risk", "allocation", "mandate", "tax", "review"}
 REPLACE_MAPS = {
     "probability_overrides",
     "return_overrides",
@@ -253,6 +272,7 @@ def validate_config(config: dict) -> dict:
         "signals": ["require_consistent_issuer_cap"],
         "allocation": ["optimize", "use_probabilities"],
         "tax": ["enabled", "wash_sale_window_verified"],
+        "review": ["include_new_candidates"],
     }.items():
         for key in keys:
             if not isinstance(c[group][key], bool):
@@ -475,9 +495,29 @@ def validate_config(config: dict) -> dict:
             raise ValueError(
                 "Flows must have source evidence and already be included in snapshot NAV/cash"
             )
+    _validate_review(c["review"])
     if Path(c["source"]["path"]).resolve() == Path(c["research"]["path"]).resolve():
         raise ValueError("Source holdings database and research database must be different files")
     return c
+
+
+REVIEW_WEIGHTINGS = ("excess_return", "equal")
+
+
+def _validate_review(review: dict):
+    for key in ("sell_full_return", "sell_return_floor", "buy_min_return"):
+        _number(review[key], f"review.{key}", -1, 10)
+    if not review["sell_full_return"] <= review["sell_return_floor"] < review["buy_min_return"]:
+        raise ValueError(
+            "review thresholds must satisfy sell_full_return <= sell_return_floor < buy_min_return"
+        )
+    _number(review["buy_min_score"], "review.buy_min_score", 0, 1)
+    _number(review["max_position_weight"], "review.max_position_weight", 0, 1, nullable=True)
+    _number(review["max_new_positions"], "review.max_new_positions", 0, 50)
+    if int(review["max_new_positions"]) != review["max_new_positions"]:
+        raise ValueError("review.max_new_positions must be an integer")
+    if review["buy_weighting"] not in REVIEW_WEIGHTINGS:
+        raise ValueError("review.buy_weighting must be " + " or ".join(REVIEW_WEIGHTINGS))
 
 
 def load_config(path: str | Path) -> dict:
@@ -508,7 +548,7 @@ def load_config(path: str | Path) -> dict:
 def dashboard_patch(config: dict, patch: dict) -> dict:
     if not isinstance(patch, dict) or set(patch) - EDITABLE_GROUPS:
         raise ValueError(
-            "Only mandate, signals, risk, allocation, and tax can be edited in the dashboard"
+            "Only mandate, signals, risk, allocation, tax and review can be edited in the dashboard"
         )
     merged = merge_config(config, patch)
     if merged["allocation"]["horizon_months"] != config["allocation"]["horizon_months"]:

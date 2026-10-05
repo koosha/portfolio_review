@@ -32,7 +32,7 @@ export function validateConfigurationPatch(value) {
   const maps = ['account_permissions','dealing_rules','family_weights','stress_sector_shocks',
     'probability_overrides','return_overrides','prior_returns','sleeve_membership','new_flows'];
   for (const [group, fields] of Object.entries(value)) {
-    if (!['mandate','signals','risk','allocation','tax'].includes(group)) throw new Error(`Unsupported editable group: ${group}.`);
+    if (!['mandate','signals','risk','allocation','tax','review'].includes(group)) throw new Error(`Unsupported editable group: ${group}.`);
     object(fields, group);
     for (const name of maps) if (name in fields) object(fields[name], name);
   }
