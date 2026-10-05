@@ -170,6 +170,21 @@ test('a saved decision names the alternative, the basket it was compared against
   assert.throws(() => decisionRecord(newDraft(null), result, {action:'no_action',rationale:'No saved run.'}));
   assert.throws(() => decisionRecord(editDraft(draft, {patch:{mandate:{issuer_cap:.2}}}), result, {action:'no_action',rationale:'Unsaved edits.'}));
 });
+test('following the recommendations sends only the rows the owner changed', () => {
+  const draft = newDraft('run-10');
+  const result = {metadata:{review_kind:'current',as_of:'2026-09-30'},allocation:{candidates:[{candidate:'no_change'}]},
+    recommendations:{rows:[{security_id:'A',action:'buy',buy_share:1},{security_id:'B',action:'sell',sell_fraction:.4}]}};
+  const record = decisionRecord(draft, result, {rationale:'Followed the recommendations.'});
+  assert.equal(record.action, 'follow_recommendations');
+  assert.equal(record.candidate_id, null);
+  assert.deepEqual(record.recommendations, {rows:[]});
+  const changed = decisionRecord(draft, result, {rationale:'Kept B.',overrides:[{security_id:'B',action:'hold'}]});
+  assert.deepEqual(changed.recommendations.rows, [{security_id:'B',action:'hold'}]);
+  assert.throws(() => decisionRecord(draft, result, {rationale:'x',overrides:[{security_id:'Z',action:'hold'}]}), /recommended/);
+  assert.throws(() => decisionRecord(draft, {}, {rationale:'Nothing to follow.'}), /no recommendations/);
+  assert.equal('recommendations' in decisionRecord(draft, result, {action:'no_action',rationale:'No change.'}), false);
+  assert.doesNotThrow(() => validateConfigurationPatch({review:{buy_min_return:.1}}));
+});
 test('the run selector separates current holdings from one saved analysis', () => {
   const runs = [{run_id:'r-new',as_of:'2026-09-18'},{run_id:'r-old',as_of:'2026-08-18'}];
   assert.equal(CURRENT_VIEW, 'current');

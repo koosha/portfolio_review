@@ -84,6 +84,11 @@ class DecisionRecordTests(unittest.TestCase):
             self.service.save_decision("a decision is an object")
         self.assertEqual(self.service.store.records("decision"), [])
 
+    def test_a_no_change_decision_naming_an_alternative_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "names no alternative"):
+            self.save(action="no_action", candidate_id="balanced")
+        self.assertEqual(self.service.store.records("decision"), [])
+
     def test_the_client_payload_takes_unstated_kind_and_date_from_the_run(self):
         """The dashboard states every documented field; an unstated one is not a refusal.
 
@@ -129,3 +134,85 @@ class DecisionRecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RecommendationDecisionTests(unittest.TestCase):
+    """Following the recommendations records each position's decision beside the advice."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        Store(self.temp.name)
+        self.service = ResearchService(default_config(self.temp.name))
+        self.addCleanup(self.service.close)
+        result = {
+            "metadata": {"as_of": "2026-09-30", "review_kind": "current"},
+            "summary": {"complete": True},
+            "allocation": {"candidates": []},
+            "recommendations": {
+                "parameters": {"buy_min_return": 0.08},
+                "rows": [
+                    {"security_id": "A", "action": "buy", "buy_share": 0.6},
+                    {"security_id": "B", "action": "sell", "sell_fraction": 0.4},
+                    {"security_id": "C", "action": "hold"},
+                    {"security_id": "N1", "action": "buy", "buy_share": 0.4},
+                ],
+            },
+        }
+        self.run_id = self.service.store.save_run(
+            result, self.service.config, {"as_of": "2026-09-30", "workspace": {}}
+        )
+
+    def save(self, rows=None, **fields):
+        payload = {
+            "run_id": self.run_id,
+            "action": "follow_recommendations",
+            "rationale": "Followed the recommendations.",
+            "recommendations": {"rows": rows or []},
+            **fields,
+        }
+        return self.service.save_decision(payload)
+
+    def last(self):
+        return self.service.status()["last_decision"]["recommendations"]
+
+    def test_accepting_every_recommendation_stores_the_whole_table(self):
+        self.save()
+        stored = self.last()
+        self.assertEqual(stored["overrides"], 0)
+        self.assertEqual(stored["buy_share_sum"], 1.0)
+        self.assertEqual(stored["parameters"], {"buy_min_return": 0.08})
+        rows = {row["security_id"]: row for row in stored["rows"]}
+        self.assertEqual(rows["B"]["sell_fraction"], 0.4)
+        self.assertEqual(rows["C"]["action"], "hold")
+        self.assertIsNone(rows["C"]["buy_share"])
+
+    def test_an_override_is_stored_beside_the_recommendation(self):
+        self.save(
+            [
+                {"security_id": "B", "action": "hold", "note": "Waiting for results."},
+                {"security_id": "A", "action": "buy", "buy_share": 1.0},
+                {"security_id": "N1", "action": "hold"},
+            ]
+        )
+        rows = {row["security_id"]: row for row in self.last()["rows"]}
+        self.assertTrue(rows["B"]["overridden"])
+        self.assertEqual(rows["B"]["recommended_action"], "sell")
+        self.assertEqual(rows["B"]["note"], "Waiting for results.")
+        self.assertFalse(rows["C"]["overridden"])
+        self.assertEqual(self.last()["overrides"], 3)
+
+    def test_decisions_the_run_cannot_support_are_refused(self):
+        for rows in (
+            [{"security_id": "UNLISTED", "action": "hold"}],
+            [{"security_id": "A", "action": "buy", "buy_share": 0.9}],
+            [{"security_id": "B", "action": "sell", "sell_fraction": 1.5}],
+            [{"security_id": "C", "action": "short"}],
+            [{"security_id": "C", "action": "hold", "execution": "now"}],
+            [{"security_id": "C", "action": "hold"}, {"security_id": "C", "action": "hold"}],
+        ):
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                self.save(rows)
+        with self.assertRaisesRegex(ValueError, "only with a follow_recommendations"):
+            self.save(action="no_action")
+        self.assertEqual(self.service.store.records("decision"), [])

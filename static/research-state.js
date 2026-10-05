@@ -157,26 +157,32 @@ export function keepValuationEdit(draft, securityId, kind, model, fallback = {})
   workspace.valuations[securityId] = values;
   return editDraft(draft, {workspace});
 }
-const DECISION_ACTIONS = ['no_action', 'review_candidate', 'override'];
+const DECISION_ACTIONS = ['follow_recommendations', 'no_action', 'review_candidate', 'override'];
 // What was decided this month, against which alternatives, on which retained run.
-export function decisionRecord(draft, result, {action = 'no_action', candidate_id = null, rationale = ''} = {}) {
+// Following the recommendations sends only the rows the owner changed; the service
+// fills every other row from the run's own table and marks what was overridden.
+export function decisionRecord(draft, result, {action = 'follow_recommendations', candidate_id = null, rationale = '', overrides = []} = {}) {
   if (!draft?.baseRunId) throw new Error('Choose a saved run before recording a decision.');
   if (draft.dirty) throw new Error('Save or reset the current draft so this decision refers to a retained run.');
   if (!DECISION_ACTIONS.includes(action)) throw new Error('Choose a recorded review action.');
   const text = typeof rationale === 'string' ? rationale.trim() : '';
   if (!text) throw new Error('Record a decision or no-action rationale.');
   const compared = (result?.allocation?.candidates || []).map(row => row?.candidate).filter(id => typeof id === 'string' && id);
-  const candidate = candidate_id || null;
+  const candidate = action === 'follow_recommendations' ? null : candidate_id || null;
   if (candidate && !compared.includes(candidate)) throw new Error('Choose an alternative compared in this saved run.');
   // The recorded action and the recorded alternative are one statement. A no-change
   // decision that names an alternative is refused rather than stored with the
   // alternative silently dropped.
   if (candidate && action === 'no_action') throw new Error('Choose “Review selected candidate” or clear the alternative.');
+  const rows = (result?.recommendations?.rows || []).map(row => row?.security_id);
+  if (action === 'follow_recommendations' && !rows.length) throw new Error('This saved run has no recommendations to follow.');
+  if (overrides.some(row => !rows.includes(row?.security_id))) throw new Error('Override only securities this run recommended.');
   const metadata = result?.metadata || {};
   return {run_id: draft.baseRunId, action, candidate_id: candidate,
     selected_alternative: candidate, rationale: text,
     review_kind: metadata.review_kind ?? null, workflow_id: metadata.workflow_id ?? null, compared_candidates: compared,
-    as_of: metadata.as_of ?? result?.as_of ?? result?.timeline?.decision_date ?? null};
+    as_of: metadata.as_of ?? result?.as_of ?? result?.timeline?.decision_date ?? null,
+    ...(action === 'follow_recommendations' ? {recommendations: {rows: clone(overrides)}} : {})};
 }
 // A draft edited before any review existed is keyed to no run at all. When the first
 // review publishes, its retained edits move onto the run that was produced rather than
