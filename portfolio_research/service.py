@@ -369,44 +369,9 @@ class ResearchService:
         }
 
     def _previous_run_id(self, run_id, metadata):
-        """The previous review of the same kind by review date, or ``None``.
+        from .workflow import previous_run_id
 
-        What changed since the last review compares like with like: a current review
-        against the previous current review, never against a historical month-end saved
-        in between. The previous review is the one dated before this one, not the one
-        saved before it, so a month backfilled out of order still compares against the
-        review that actually preceded it. Only each candidate's metadata is read, never
-        its whole archive.
-        """
-        review_kind = metadata.get("review_kind", SUBMITTED_REVIEW_KIND)
-        as_of = metadata.get("as_of")
-        rows = {row["run_id"]: row for row in self.store.list_runs()}
-        if run_id not in rows:
-            return None
-        this = rows[run_id]
-        earlier = [
-            row
-            for identifier, row in rows.items()
-            if identifier != run_id and self._is_earlier(row, this, as_of)
-        ]
-        # Same-dated reviews are separated by when they were saved; an undated review can
-        # only be ordered by that.
-        earlier.sort(
-            key=lambda row: (row.get("as_of") or "", row.get("created_at") or ""), reverse=True
-        )
-        for row in earlier:
-            saved = self.store.load_run_part(row["run_id"], "metadata") or {}
-            if saved.get("review_kind", SUBMITTED_REVIEW_KIND) == review_kind:
-                return row["run_id"]
-        return None
-
-    @staticmethod
-    def _is_earlier(row, this, as_of):
-        """Whether ``row`` names a review preceding ``this`` one."""
-        theirs, mine = row.get("as_of"), as_of or this.get("as_of")
-        if theirs and mine and theirs != mine:
-            return theirs < mine
-        return (row.get("created_at") or "") < (this.get("created_at") or "")
+        return previous_run_id(self.store, run_id, metadata, SUBMITTED_REVIEW_KIND)
 
     def submit(self, payload):
         if not isinstance(payload, dict):

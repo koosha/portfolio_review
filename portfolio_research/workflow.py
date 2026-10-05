@@ -222,6 +222,53 @@ def _previous_review(store):
         return None
 
 
+def previous_run_id(store, run_id, metadata, default_kind="historical"):
+    """The previous review of the same kind by review date, or ``None``.
+
+    What changed since the last review compares like with like: a current review against
+    the previous current review, never against a historical month-end saved in between.
+    The previous review is the one dated before this one, not the one saved before it, so
+    a month backfilled out of order still compares against the review that preceded it.
+    Same-dated reviews are ordered by when they were saved. Only metadata is read.
+    """
+    review_kind = metadata.get("review_kind", default_kind)
+    as_of = metadata.get("as_of")
+    rows = {row["run_id"]: row for row in store.list_runs()}
+    if run_id not in rows:
+        return None
+    this = rows[run_id]
+    mine = as_of or this.get("as_of")
+
+    def earlier(row):
+        theirs = row.get("as_of")
+        if theirs and mine and theirs != mine:
+            return theirs < mine
+        return (row.get("created_at") or "") < (this.get("created_at") or "")
+
+    candidates = sorted(
+        (row for identifier, row in rows.items() if identifier != run_id and earlier(row)),
+        key=lambda row: (row.get("as_of") or "", row.get("created_at") or ""),
+        reverse=True,
+    )
+    for row in candidates:
+        saved = store.load_run_part(row["run_id"], "metadata") or {}
+        if saved.get("review_kind", default_kind) == review_kind:
+            return row["run_id"]
+    return None
+
+
+def previous_research(store, run_id, metadata):
+    """The research of the review preceding ``run_id``, in the shape priorities reads."""
+    try:
+        previous = previous_run_id(store, run_id, metadata)
+        if previous is None:
+            return None
+        research = store.load_run_part(previous, "research")
+        return {"research": research if isinstance(research, dict) else {}}
+    except Exception:
+        return None
+
+
 def _priced_config(config, bundle, review_kind):
     """``(config for this review, accepted quantity×price difference)``.
 
@@ -649,6 +696,9 @@ class ReviewWorkflow:
 
         self._begin("analyzing")
         config, tolerance = _priced_config(self.config, self.bundle, self.review_kind)
+        # The archive keeps the configuration the analysis used, so a recalculation of
+        # these frozen inputs applies the same accepted price difference.
+        self.analyzed_config = config
         result = analyze_review(
             self.bundle, config, previous=_previous_review(getattr(self, "store", None))
         )
@@ -670,7 +720,9 @@ class ReviewWorkflow:
         from portfolio_lab.pipeline import save_analysis
 
         self._begin("publishing")
-        saved = save_analysis(self.result, self.config, self.bundle)
+        saved = save_analysis(
+            self.result, getattr(self, "analyzed_config", self.config), self.bundle
+        )
         # The archive write is the commit point. Binding the run to the operation here
         # means everything after it is a degradation of a published review, never a
         # failure of one: research runs are immutable and this one now exists.

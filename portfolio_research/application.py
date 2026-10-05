@@ -155,5 +155,8 @@ def analyze_review(bundle, config, *, previous=None):
         from .priorities import review_priorities
 
         result["priorities"] = review_priorities(result, bundle, config, previous=previous)
+    from .recommendations import review_recommendations
+
+    result["recommendations"] = review_recommendations(result, bundle, config)
     result["readiness"] = readiness(result, bundle, config)
     return json_safe(result)

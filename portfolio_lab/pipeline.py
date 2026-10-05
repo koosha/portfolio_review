@@ -365,7 +365,10 @@ def replay_analysis(config, run_id, patch=None, save=False, *, workspace=None):
     timeline["generated_at"] = decision_context(frozen["as_of"])["generated_at"]
     timeline["frozen_input_replay"] = True
     frozen["timeline"] = timeline
-    result = analyze_review(frozen, used)
+    from portfolio_research.workflow import previous_research
+
+    previous = previous_research(store, run_id, archived.get("metadata") or {})
+    result = analyze_review(frozen, used, previous=previous)
     result["metadata"].update(parent_run_id=run_id, preview=not save)
     if save:
         result = save_analysis(result, used, frozen)
@@ -405,6 +408,31 @@ def report_html(result):
     )
     parts.append(
         "<p class='muted'>Read-only saved research. Recalculation and editing are available in the local application. Historical illustrations and subjective scenarios do not establish actual portfolio performance.</p>"
+    )
+
+    def percent(value):
+        return None if value is None else f"{value * 100:.1f}%"
+
+    recommendations = safe.get("recommendations") or {}
+    parts.append(
+        "<h2>Recommendations</h2>"
+        + table(
+            [
+                {
+                    "security": row.get("symbol") or row.get("security_id"),
+                    "name": row.get("name"),
+                    "held": row.get("held"),
+                    "action": str(row.get("action", "")).upper(),
+                    "buy % of available cash": percent(row.get("buy_share")),
+                    "sell % of position": percent(row.get("sell_fraction")),
+                    "expected return": percent(row.get("expected_return")),
+                    "basis": row.get("expected_return_basis"),
+                    "confidence": row.get("confidence"),
+                    "reasons": "; ".join(r.get("detail", "") for r in row.get("reasons") or []),
+                }
+                for row in recommendations.get("rows") or []
+            ]
+        )
     )
     for title, rows in [
         ("Account reconciliation", safe.get("summary", {}).get("accounts", [])),

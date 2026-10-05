@@ -21,6 +21,7 @@ OUTPUTS = (
     "company_valuation",
     "candidates",
     "baskets",
+    "recommendations",
 )
 FUND_TYPES = {"etf", "mutual_fund", "plan_fund", "fund"}
 NON_COMPANY = FUND_TYPES | {"currency", "cash"}
@@ -461,6 +462,34 @@ def _baskets(result: dict, summary: dict) -> dict:
     )
 
 
+def _recommendations(result: dict, summary: dict) -> dict:
+    rows = [
+        row
+        for row in ((result.get("recommendations") or {}).get("rows") or [])
+        if isinstance(row, dict)
+    ]
+    valued = [row for row in rows if row.get("expected_return") is not None]
+    return _row(
+        "recommendations",
+        [
+            _requirement(
+                "nav_reconciled",
+                summary.get("complete") is True,
+                "Weights use reconciled account NAV"
+                if summary.get("complete") is True
+                else "Weights use the known position value; account NAV is not reconciled",
+            ),
+            _requirement(
+                "expected_return_evidence",
+                rows and len(valued) == len(rows),
+                f"{len(valued)} of {len(rows)} recommendations carry a valuation-based return",
+            ),
+        ],
+        scope="Buy shares split available cash; sell fractions are shares of each position",
+        blocked=not rows,
+    )
+
+
 def readiness(result: dict, bundle: dict, config: dict) -> list[dict]:
     """What every output of this run needs, what it has, and what is missing."""
     result = result if isinstance(result, dict) else {}
@@ -479,4 +508,5 @@ def readiness(result: dict, bundle: dict, config: dict) -> list[dict]:
         _company_valuation(bundle, holdings),
         _candidates(result, holdings),
         _baskets(result, summary),
+        _recommendations(result, summary),
     ]

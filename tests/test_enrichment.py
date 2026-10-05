@@ -585,6 +585,7 @@ class EnrichmentGateTests(unittest.TestCase):
                     "captured_holdings",
                     "company_valuation",
                     "exposure",
+                    "recommendations",
                     "risk",
                     "stress",
                     "usd_value",
@@ -620,6 +621,9 @@ class EnrichmentGateTests(unittest.TestCase):
         ReviewWorkflow._analyzing(stage)
         self.assertEqual(stage.result["metadata"]["valuation_tolerance"], 0.02)
         self.assertEqual(self.config["allocation"]["valuation_tolerance"], 0.001)
+        # The archive keeps the tolerance the analysis used, so a recalculation of these
+        # frozen inputs repeats the same check instead of newly failing it.
+        self.assertEqual(stage.analyzed_config["allocation"]["valuation_tolerance"], 0.02)
 
 
 class WorkspaceAllowlistTests(unittest.TestCase):

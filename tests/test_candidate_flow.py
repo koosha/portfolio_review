@@ -448,6 +448,32 @@ class CandidateFlowGateTests(unittest.TestCase):
         self.assertEqual(sorted(watched["scenario_range"]), ["Adverse", "Central", "Favorable"])
         self.assertIn(self.account, watched["account_eligibility"])
 
+    # Recommendations --------------------------------------------------------
+
+    def test_every_holding_and_the_watchlist_get_one_recommendation(self):
+        recommendations = self.result["recommendations"]
+        rows = {row["security_id"]: row for row in recommendations["rows"]}
+        self.assertEqual(len(rows), len(recommendations["rows"]))
+        self.assertTrue(rows[HELD]["held"])
+        self.assertIn(WATCHED, rows)
+        self.assertIn("watchlist", {reason["rule"] for reason in rows[WATCHED]["reasons"]})
+        for row in recommendations["rows"]:
+            with self.subTest(security=row["security_id"]):
+                self.assertIn(row["action"], {"buy", "sell", "hold"})
+                self.assertTrue(row["reasons"])
+                if not row["held"]:
+                    self.assertIn(row["security_id"], CANDIDATES)
+
+    def test_buy_shares_split_all_available_cash(self):
+        recommendations = self.result["recommendations"]
+        shares = [row["buy_share"] for row in recommendations["rows"] if row["action"] == "buy"]
+        self.assertIn(recommendations["buy_share_sum"], {0, 1.0})
+        self.assertAlmostEqual(sum(shares), recommendations["buy_share_sum"], places=9)
+        new = [row for row in recommendations["rows"] if not row["held"] and row["action"] == "buy"]
+        self.assertLessEqual(len(new), self.config["review"]["max_new_positions"])
+        readiness = {row["output"]: row for row in self.result["readiness"]}
+        self.assertNotEqual(readiness["recommendations"]["status"], "blocked")
+
     # Comparison -------------------------------------------------------------
 
     def sleeve(self):

@@ -123,6 +123,28 @@ class WorkflowTestCase(unittest.TestCase):
         return self.service.store.save_run({"metadata": {}, "summary": {}}, self.config, bundle)
 
 
+class PreviousReviewTests(WorkflowTestCase):
+    def test_a_recalculation_compares_against_the_review_before_its_base(self):
+        from portfolio_research.workflow import previous_research
+
+        def save(as_of, marker):
+            bundle = {"as_of": as_of, "mode": "offline", "timeline": decision_context(as_of)}
+            result = {
+                "metadata": {"as_of": as_of, "review_kind": "current"},
+                "summary": {},
+                "research": {"SIM01": {"marker": marker}},
+            }
+            return self.service.store.save_run(result, self.config, bundle)
+
+        save("2026-07-31", "july")
+        august = save("2026-08-31", "august")
+        save("2026-09-30", "september")
+        metadata = {"as_of": "2026-08-31", "review_kind": "current"}
+        previous = previous_research(self.service.store, august, metadata)
+        self.assertEqual(previous, {"research": {"SIM01": {"marker": "july"}}})
+        self.assertIsNone(previous_research(self.service.store, "missing", metadata))
+
+
 class OneOperationTests(WorkflowTestCase):
     def test_one_operation_collects_and_publishes_a_usable_review(self):
         chrome = self.start_chrome()
