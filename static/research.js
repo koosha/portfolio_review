@@ -16,6 +16,7 @@ let view = CURRENT_VIEW, previousRun = null;
 let supplemental = null, supplementalSupported = false, decisionRecords = [], latestEvaluation = null;
 let fieldCounter = 0;
 let current = null, currentRequest = 0;
+let accountDirectory = null;
 let exceptionState = null, exceptionRequest = 0;
 const columnVisibility = new Set(['security_id','account_id','quantity','price','market_value','calculated_weight','currency']);
 const text = value => value === null || value === undefined || value === '' ? '—' : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -24,6 +25,27 @@ const numeric = value => { try { return numberOrNull(value); } catch { return nu
 const num = (value, digits=2) => numeric(value) === null ? '—' : numeric(value).toLocaleString(undefined,{maximumFractionDigits:typeof digits==='number'?digits:2});
 const pct = value => numeric(value) === null ? '—' : `${num(numeric(value)*100,1)}%`;
 const money = (value, currency=result?.summary?.currency) => numeric(value) === null ? '—' : `${num(value)}${currency ? ` ${currency}` : ''}`;
+function accountLabel(id, row={}) {
+  const directory=accountDirectory?.accounts || [];
+  const known=directory.find(item=>item.account_id===id);
+  const label=known?.display_name || row.account_name || row.display_name || result?.account_labels?.[id]
+    || (result?.accounts || []).find(item=>item.account_id===id)?.display_name || row.name;
+  if(label && !/^account_[0-9a-f]{8,}$/i.test(label) && label!==id)return label;
+  const accounts=[...(result?.accounts || result?.summary?.accounts || []),...objectRows(current?.current?.accounts)];
+  const ids=[...new Set(accounts.map(item=>item.account_id).filter(Boolean))];
+  return `Account ${Math.max(1,ids.indexOf(id)+1)}`;
+}
+function securityLabel(id) { const row=securityRow(id);return holdingAnalysis(id)?.ticker || row.ticker || row.symbol || id || 'Unresolved'; }
+function shortDate(value) {
+  if(!value)return 'Date unavailable';
+  const date=new Date(String(value).slice(0,10)+'T12:00:00');
+  return Number.isNaN(date.getTime())?String(value):date.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+}
+function holdingAnalysis(id) { return (result?.holding_analysis || []).find(row=>row.security_id===id); }
+function actionBadge(row) {
+  const action=row?.action || 'Review', node=el('span',action,`action-badge ${action.toLowerCase()}`);
+  node.title=row?.reason || 'More evidence is needed.';return node;
+}
 function when(value) {
   if (!value) return 'Never';
   const date = new Date(value);
@@ -46,7 +68,7 @@ function persist() {
   try { sessionStorage.setItem(draftKey(draft.baseRunId),JSON.stringify(draft)); }
   catch { error('This browser could not retain the draft. Keep this tab open until you save a run.'); }
 }
-function dirty(changes={}) { draft=editDraft(draft,changes); persist(); renderState(true); renderDiff(); }
+function dirty(changes={}) { draft=editDraft(draft,changes); persist(); renderState(true); renderDiff(); renderAnalysisFreshness(); }
 function patch(values) { validateConfigurationPatch(values);dirty({patch:merge(draft.patch,values)}); }
 function workspaceEdit(mutator) { const next=clone(draft.workspace); mutator(next); dirty({workspace:next}); }
 const resolved = () => merge(draft.baseConfig,draft.patch);
@@ -111,7 +133,7 @@ function readinessNote(output) {
 function insight({metric,comparison,source_run,rationale}) {
   const node=el('div',null,'insight');
   node.append(el('strong',text(metric),'insight-metric'),el('span',text(comparison),'insight-comparison'),
-    el('small',[source_run,rationale].filter(Boolean).join(' · '),'insight-source'));
+    disclosure('Basis',el('small',[source_run,rationale].filter(Boolean).join(' · '),'insight-source')));
   return node;
 }
 // Current holdings and a saved analysis are dated separately and are never read as one
@@ -124,10 +146,13 @@ function applyView() {
     ?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}${analysisOperationNote()}`
     :result?'No completed analysis shown · current holdings above are the newest collection. Choose a saved run to see its analysis.'
     :'No completed analysis yet · Current holdings above are shown from the newest collection.';
-  $('analysis-caption').textContent=caption;
+  $('analysis-caption').textContent=analysed?`Last completed analysis · ${shortDate(result.metadata?.as_of)}`:'No completed analysis shown';
+  $('analysis-caption').hidden=true;
+  $('technical-context').replaceChildren(kv({review_date:result?.metadata?.as_of,valuation_date:result?.metadata?.valuation_date,generated:result?.metadata?.computed_at,run_id:result?.run_id,source:service.dataset,operation:operationBehindRun()?.status || null}));
+  $('research-empty').hidden=analysed;
   // Every analysed page repeats the same statement, so no page can display a month-old
   // run while the one selector above them says no analysis is shown.
-  for(const node of document.querySelectorAll('[data-analysis-note]'))node.textContent=caption;
+  for(const node of document.querySelectorAll('[data-analysis-note]')){node.textContent='';node.hidden=true;}
 }
 // The selector, the view and the sections on screen are one statement. A load that did
 // not happen restores all three together rather than leaving them disagreeing.
@@ -150,7 +175,7 @@ function field(label,value,onChange,{type='text',options=null,percent=false,help
     if(type==='number') input.step='any'; }
   input.id=id;
   if (type==='checkbox') wrapper.append(input,el('span',label)); else wrapper.append(el('span',label),input);
-  if(help) wrapper.append(el('small',help,'field-help'));
+  if(help) input.title=help;
   input.addEventListener(options || type==='checkbox' ? 'change' : 'input', () => {
     try {
       let next=type==='checkbox' ? input.checked : input.value;
@@ -163,11 +188,12 @@ function form(fields) { const node=el('div',null,'form-grid'); node.append(...fi
 function table(rows, columns, caption='') {
   if (!rows?.length) return empty('No rows are available for this scope.','No data');
   const wrap=el('div',null,'table-wrap'), grid=el('table'), body=el('tbody'), head=el('thead'), heading=el('tr');
-  let order=[...rows], sortedKey='', ascending=true;
+  let order=[...rows], sortedKey='', ascending=true, pageIndex=0;
+  const pageSize=100, pager=el('div',null,'table-pagination');
   if(caption) grid.append(el('caption',caption));
   const draw=()=>{
     body.replaceChildren();
-    for(const row of order) {
+    for(const row of order.slice(pageIndex*pageSize,(pageIndex+1)*pageSize)) {
       const tr=el('tr');
       for(const column of columns) {
         const td=el('td',null,column.wrap?'wrap':'');
@@ -177,11 +203,17 @@ function table(rows, columns, caption='') {
       } body.append(tr);
     }
     if(body.querySelector('input, select, textarea'))for(const control of heading.querySelectorAll('button'))control.disabled=true;
+    pager.replaceChildren();
+    if(order.length>pageSize){
+      const previous=button('Previous',()=>{pageIndex--;draw();},'quiet');previous.disabled=pageIndex===0;
+      const next=button('Next',()=>{pageIndex++;draw();},'quiet');next.disabled=(pageIndex+1)*pageSize>=order.length;
+      pager.append(el('span',`${pageIndex*pageSize+1}–${Math.min((pageIndex+1)*pageSize,order.length)} of ${order.length}`),previous,next);
+    }
   };
   for(const column of columns) {
     const th=el('th'); th.scope='col';
     const control=button(column.label || friendly(column.key),()=>{
-      ascending=sortedKey===column.key ? !ascending : true; sortedKey=column.key;
+      ascending=sortedKey===column.key ? !ascending : true; sortedKey=column.key;pageIndex=0;
       order.sort((a,b)=>{
         const x=a[column.key],y=b[column.key];
         if(x===null || x===undefined) return y===null || y===undefined?0:1;
@@ -193,7 +225,7 @@ function table(rows, columns, caption='') {
       th.setAttribute('aria-sort',ascending?'ascending':'descending'); draw();
     },'sort-button'); th.append(control);heading.append(th);
   }
-  head.append(heading);grid.append(head,body);wrap.append(grid);draw();return wrap;
+  head.append(heading);grid.append(head,body);wrap.append(grid,pager);draw();return wrap;
 }
 function autoTable(rows, preferred=null) {
   if(!Array.isArray(rows)) return kv(rows);
@@ -290,7 +322,10 @@ function renderState(writeStatus=false) {
   // Recording a decision needs a loaded run and a finished calculation, so it is settled
   // here with the other controls: a run loaded while busy re-enables it when busy clears.
   $('save-decision').disabled=busy || !draft.baseRunId;
-  if(!busy && writeStatus) announce(unapplied?'Advanced JSON has unapplied edits. Apply or discard them before calculating.':draft.dirty && !previewReady(draft)?'Draft changed · displayed results are out of date until recalculated.':previewReady(draft)?'Preview calculated · save a new run to retain this result.':draft.baseRunId?'Saved inputs · display filters leave the analytical scope unchanged.':'Run Update & analyze to create the first retained input set.');
+  if(!busy && writeStatus) announce(unapplied?'Apply or discard advanced edits.':draft.dirty && !previewReady(draft)?'Assumptions changed. Recalculate to update actions and returns.':previewReady(draft)?'Recalculated. Save analysis to keep this version.':draft.baseRunId?'': 'Update & analyze to start.');
+  $('save-run').hidden=!draft.dirty;
+  $('reset-draft').hidden=!draft.dirty;
+  $('recalculate').hidden=!draft.baseRunId;
 }
 function renderDiff() {
   const changes=differences(draft.baseConfig,resolved());
@@ -340,9 +375,10 @@ function valueCurrencyCell(row) {
 function valueCurrencyLine(summary,className='account-meta') {
   const label=typeof summary?.label==='string'?summary.label:'';
   if(!label)return null;
-  const node=el('div',label,`${className}${summary?.basis==='presentation'?' assumed':''}`.trim());
-  node.title='How this value currency was established. Amounts converted at a dated FX observation name their pair and date separately.';
-  return node;
+  const currency=summary.currency || summary.presentation_currency || label.match(/\b[A-Z]{3}\b/)?.[0] || 'USD';
+  const basis=summary.basis==='presentation'?'assumed':summary.basis==='mixed'?'mixed basis':summary.basis==='attested'?'confirmed':'source';
+  const node=disclosure(`Currency: ${currency}${basis==='source'?'':` · ${basis}`}`,el('p',label,'muted'));
+  node.className=`${className} currency-details`;return node;
 }
 function subtotalLine(line) {
   const missing=numeric(line?.missing_value_count) || 0;
@@ -382,21 +418,23 @@ function identityLine(row,held,records) {
 }
 function accountCard(row, context={}) {
   const node=el('article',null,'account-card'), heading=el('div',null,'account-card-heading');
-  heading.append(el('strong',row?.name || row?.account_id || 'Account'),completenessBadge(row?.completeness));
+  heading.append(el('strong',accountLabel(row?.account_id,row)),completenessBadge(row?.completeness));
   const positions=numeric(row?.position_count);
-  const captured=`Captured ${when(row?.captured_at)}${positions===null?'':` · ${positions} ${positions===1?'position':'positions'}`}`;
-  node.append(heading,el('div',captured,'account-meta'));
+  const captured=positions===null?'':`${positions} ${positions===1?'holding':'holdings'}`;
+  const meta=el('div',captured,'account-meta');meta.title=`Collected ${when(row?.captured_at)}`;node.append(heading,meta);
   const subtotals=el('div',null,'account-subtotals'), lines=listOf(row?.subtotals);
-  for(const line of lines)subtotals.append(subtotalLine(line));
-  if(!lines.length)subtotals.append(el('div','No captured subtotal','muted'));
   const held=objectRows(context.positions).filter(position=>position.account_id===row?.account_id);
-  const usdLine=accountUsdLine(row,held);if(usdLine)subtotals.append(usdLine);
+  const usdLine=accountUsdLine(row,held);
+  if(usdLine && !usdLine.classList.contains('muted')) {
+    subtotals.append(usdLine);
+    if(lines.length)subtotals.append(disclosure('Captured amounts',...lines.map(subtotalLine)));
+  } else {for(const line of lines)subtotals.append(subtotalLine(line));if(!lines.length)subtotals.append(el('div','Value unavailable','muted'));}
   node.append(subtotals);
   const valueLine=valueCurrencyLine(row?.value_currency);if(valueLine)node.append(valueLine);
-  if(context.identity)node.append(identityLine(row,held,objectRows(context.exceptions)));
+  if(context.identity && (numeric(row?.identity?.open) || 0)>0)node.append(identityLine(row,held,objectRows(context.exceptions)));
   if(row?.value_basis==='attested')node.append(el('div',`Attested valuation ${row.valuation_date || 'date unavailable'}`,'account-meta'));
   const exceptions=listOf(row?.exceptions).length;
-  node.append(el('div',exceptions?`${exceptions} ${exceptions===1?'exception':'exceptions'}`:'No exceptions',`account-meta${exceptions?' has-exceptions':''}`));
+  if(exceptions)node.append(el('div',`${exceptions} ${exceptions===1?'item needs':'items need'} attention`,'account-meta has-exceptions'));
   return node;
 }
 function renderAccountCards() {
@@ -409,27 +447,30 @@ function renderAccountCards() {
 function renderCurrent() {
   const containers=['current-value-currency','current-totals','current-accounts','current-positions','current-exceptions'];
   if(!current){collectionBadge('Loading…');$('current-dates').textContent='Loading the newest collection…';for(const id of containers)replace(id);return;}
-  $('exception-panel').hidden=!current.supported;
+  $('exception-panel').hidden=!current.supported || !objectRows(exceptionState?.exceptions).some(resolvable);
   if(!current.supported){collectionBadge('Unavailable');$('current-dates').textContent=current.reason || 'Current holdings are unavailable for this source.';for(const id of containers)replace(id);return;}
   const snapshot=current.current || {}, dates=snapshot.dates || {}, collection=snapshot.collection || {};
   const accounts=objectRows(snapshot.accounts), positions=objectRows(snapshot.positions);
   const status=collection.status || 'none';
   collectionBadge(collectionLabels[status] || friendly(status),collectionClasses[status] ?? '');
-  $('current-dates').textContent=`Collected ${when(dates.collection_received_at)} · Source valuation time ${dates.source_valuation_time || 'unknown — captured values shown as observed'} · Market observation date ${dates.market_observation_date || 'unavailable'} · Generated ${when(dates.generated_at)}`;
+  $('current-dates').textContent=`Collected ${when(dates.collection_received_at)}`;
+  $('current-dates').title=`Source valuation: ${dates.source_valuation_time || 'unknown'} · Market date: ${dates.market_observation_date || 'unavailable'} · Generated: ${when(dates.generated_at)}`;
   const totals=objectRows(snapshot.totals?.by_currency), usd=snapshot.totals?.usd && typeof snapshot.totals.usd==='object'?snapshot.totals.usd:null;
-  const covered=usd?metric('Covered value (USD)',num(usd.covered_total),`${numeric(usd.covered_position_count) ?? 0} positions · ${numeric(usd.unconverted_position_count) ?? 0} unconverted · not reconciled NAV`):null;
+  const covered=usd?metric('Covered value (USD)',num(usd.covered_total),`${numeric(usd.covered_position_count) ?? 0} holdings${numeric(usd.unconverted_position_count)?` · ${numeric(usd.unconverted_position_count)} unconverted`:''}`):null;
   if(covered)covered.title=typeof usd.label==='string'?usd.label:'USD presentation of covered amounts using dated FX observations; not reconciled NAV';
   replace('current-value-currency',valueCurrencyLine(usd?.value_currency,'muted value-currency-basis'));
-  replace('current-totals',covered,...(totals.length?totals.map(row=>metric(`Captured subtotal (${row?.currency || 'unlabeled'})`,num(row?.total),`${row?.account_count ?? 0} ${row?.account_count===1?'account':'accounts'} · not reconciled NAV`)):[el('p','No captured subtotals in the newest collection.','muted')]));
+  const capturedTotals=totals.map(row=>metric(`Captured subtotal (${row?.currency || 'unlabeled'})`,num(row?.total),`${row?.account_count ?? 0} ${row?.account_count===1?'account':'accounts'}`));
+  replace('current-totals',covered,metric('Accounts',String(accounts.length)),metric('Holdings',String(positions.filter(row=>row.symbol!=='CASH').length)),covered?disclosure('Captured subtotals',...capturedTotals):capturedTotals.length?el('div'):el('p','No captured values.','muted'));
+  if(!covered && capturedTotals.length)$('current-totals').append(...capturedTotals);
   renderAccountCards();
-  const names=new Map(accounts.map(row=>[row?.account_id,row?.name || row?.account_id]));
+  const names=new Map(accounts.map(row=>[row?.account_id,accountLabel(row?.account_id,row)]));
   replace('current-positions',table(positions,[
     {key:'symbol'},{key:'name',wrap:true},{key:'quantity',render:value=>num(value,4)},{key:'price',render:value=>num(value)},
     {key:'market_value',label:'Market value',render:value=>num(value)},{key:'currency'},
     {key:'quote_currency',label:'Quote currency'},{key:'reported_currency',label:'Value currency',render:(_value,row)=>valueCurrencyCell(row)},
     {key:'market_value_usd',label:'USD value',render:value=>num(value)},
     {key:'fx_pair',label:'FX (pair · date)',render:(value,row)=>value?`${value} · ${row?.fx_observation_date || 'undated'}`:'—'},
-    {key:'account_id',label:'Account',render:value=>names.get(value) || text(value)},{key:'observed_at',label:'Observed',render:value=>when(value)},
+    {key:'account_id',label:'Account',render:value=>names.get(value) || accountLabel(value)},{key:'observed_at',label:'Observed',render:value=>when(value)},
   ],`${positions.length} captured positions · values as observed at capture · USD only with a dated FX observation`));
   const issues=listOf(snapshot.exceptions).filter(issue=>['error','warning'].includes(issue?.severity) && !resolvable(issue));
   const qualifying=issues.filter(issue=>currencyBasisCodes.has(issue?.code));
@@ -439,7 +480,8 @@ function renderCurrent() {
   replace('current-exceptions',
     collection.newer_collection_in_progress?el('p','A newer collection is still in progress; the newest complete collection is shown until it publishes.','current-progress'):null,
     collection.newer_collection_failed?el('p','A newer collection did not complete; the newest complete collection is shown.','current-alert'):null,
-    listIssues(shown,'No collection warnings or errors.'),
+    qualifying.length?listIssues(qualifying):null,
+    rest.slice(0,CURRENT_ISSUE_LIMIT).length?disclosure('Collection details',listIssues(rest.slice(0,CURRENT_ISSUE_LIMIT))):null,
     overflow.length?disclosure(`+${overflow.length} more`,listIssues(overflow)):null);
 }
 async function loadCurrent() {
@@ -549,9 +591,10 @@ function renderExceptionForms() {
   const count=$('exception-count');
   const status=(label,className='')=>{count.textContent=label;count.className=`badge ${className}`.trim();};
   if(!exceptionState){status('Loading…');replace('current-exception-forms',el('p','Loading open exceptions…','muted'));return;}
-  if(exceptionState.unavailable){status('Unavailable','warning');replace('current-exception-forms',el('p',exceptionState.unavailable,'muted'));return;}
+  if(exceptionState.unavailable){$('exception-panel').hidden=false;status('Unavailable','warning');replace('current-exception-forms',el('p',exceptionState.unavailable,'muted'));return;}
   const records=objectRows(exceptionState.exceptions).filter(resolvable);
   status(records.length?`${records.length} open`:'None open',records.length?'warning':'complete');
+  $('exception-panel').hidden=!records.length;
   replace('current-exception-forms',...(records.length?records.map(exceptionCard):[el('p',noOpenExceptions,'exception-empty')]));
 }
 async function loadExceptions() {
@@ -594,7 +637,8 @@ function renderOverview() {
       chartCaption({units:'Rebased weekly benchmark index (hypothetical)',date:observationDate(),
         scope:`${resolved().mandate?.benchmark_id || 'Approved benchmark'} · constant-weight weekly replay`,
         coverage:readinessNote('risk')})));
-  replace('review-priorities',result?listIssues(result.issues?.slice(0,8),'No blocking data issues reported. Review the assumptions before considering changes.'):empty());
+  const issues=result?.issues || [];
+  replace('review-priorities',result?listIssues(issues.slice(0,3),'No blocking data issues.'):empty(),issues.length>3?disclosure(`All ${issues.length} data issues`,listIssues(issues.slice(3))):null);
   const macros=(result?.macro || []).map(row=>{
     const node=el('article',null,'macro-card');node.append(metric(row.series_id,num(row.latest_value),`${row.units || 'Units unavailable'} · ${row.observation_date || 'Undated'}`),lineChart(row.history,`${row.series_id} observed history`),
       chartCaption({units:row.units || 'Units unavailable',date:row.observation_date || observationDate(),scope:`Vintage ${row.vintage_date || 'unknown'} · context only`,coverage:`coverage ${(row.history || []).length} observations`}));return node;
@@ -635,14 +679,11 @@ function briefChanges() {
 }
 function renderWhatChanged() {
   const rows=result?[...decisionInsight(),...summaryComparison(),...briefChanges()]:[];
-  const shown=rows.slice(0,12);
-  $('what-changed-state').textContent=rows.length?`${rows.length} stated`:'Nothing stated';
+  const shown=rows.slice(0,3);
+  $('what-changed-state').textContent=rows.length?`${rows.length} updates`:'No changes';
   replace('what-changed',
-    ...(shown.length?shown.map(insight):[result?empty('No recorded decision, comparable earlier review or dated brief change.','Nothing this review can evidence'):empty()]),
-    rows.length>shown.length?el('p',`+${rows.length-shown.length} more`,'muted'):null,
-    result?el('p',previousRun
-      ?`Compared with the previous ${friendly(result.metadata?.review_kind || 'review').toLowerCase()} review, run ${String(previousRun.run_id).slice(0,12)}.`
-      :'No earlier review of this kind is retained; only this review’s own dated changes are listed.','muted'):null);
+    ...(shown.length?shown.map(insight):[result?el('p','No comparable earlier review.','muted'):empty()]),
+    rows.length>shown.length?disclosure(`All ${rows.length} updates`,...rows.slice(shown.length).map(insight)):null);
 }
 // Concentration is stated against the cap the owner confirmed, never against a default.
 function concentrationRows() {
@@ -680,9 +721,9 @@ function renderPriorityLists() {
   const priorities=result?.priorities || {};
   for(const [id,key,fallback] of [['holdings-review','holdings_to_review','No holding collected a stated reason this review.'],
     ['new-candidates','new_candidates','No unowned company collected a stated reason this review.']]) {
-    const rows=(priorities[key] || []).slice(0,10);
+    const all=priorities[key] || [],rows=all.slice(0,3);
     replace(id,...(rows.length?rows.map(priorityRow):[result?empty(fallback,'Nothing to review here'):empty()]),
-      result?el('p',priorities.rules?`${(priorities[key] || []).length} listed · ordered by how many independent reasons each collected`:'Automatic research did not run for this review; this list is empty rather than guessed.','muted'):null);
+      all.length>rows.length?disclosure(`All ${all.length} ${key==='holdings_to_review'?'holdings':'candidates'}`,...all.slice(rows.length).map(priorityRow)):null);
   }
 }
 // Where the same issuer is held twice: directly and inside a fund. The residual a fund
@@ -708,11 +749,12 @@ function fundSectorBars() {
 }
 function renderOverlap() {
   const unclassified=numeric(result?.summary?.unclassified_value);
-  const overlap=table(overlapRows(),[{key:'issuer_id',label:'Issuer'},{key:'sector'},
+  const rows=overlapRows();
+  const overlap=rows.length?table(rows,[{key:'issuer_id',label:'Issuer'},{key:'sector'},
       {key:'direct_value',label:'Held directly',render:value=>money(value)},
       {key:'indirect_value',label:'Held through funds',render:value=>money(value)},
       {key:'funds',label:'Contributing funds',wrap:true}],
-      'Issuers reached twice: directly and through a fund’s disclosed holdings.');
+      'Issuers reached twice: directly and through a fund’s disclosed holdings.'):el('p','No overlap in available fund disclosures.','compact-note');
   overlap.classList?.add('overlap-table');
   replace('overlap-view',overlap,
     ...fundSectorBars(),
@@ -721,7 +763,7 @@ function renderOverlap() {
       scope:'Direct holdings and disclosed fund holdings',coverage:coverageSummary('fund_disclosures','prices')}));
 }
 function securityRow(id) { return (result?.holdings || []).find(row=>row.security_id===id) || (result?.signals || []).find(row=>row.security_id===id) || {}; }
-function securityButton(id) { return button(id || 'Unresolved',()=>showSecurity(id),'text-button'); }
+function securityButton(id) { const node=button(securityLabel(id),()=>showSecurity(id),'text-button');node.title=id || 'Unresolved';return node; }
 // A published locator is data, not markup: only an https address the service already
 // vetted becomes a link, and everything else stays readable text.
 function sourceLink(source) {
@@ -810,13 +852,65 @@ function renderHoldings() {
   const search=$('holdings-search').value.toLowerCase(), rows=(result?.holdings || []).filter(row=>(!account || row.account_id===account) && JSON.stringify(row).toLowerCase().includes(search));
   const fields=[['security_id','Security'],['account_id','Account'],['quantity','Quantity'],['price','Price'],['market_value','Market value'],['calculated_weight','Account weight'],['currency','Currency'],['issuer_id','Issuer'],['valuation_date','Valuation date'],['reported_weight','Reported weight']];
   replace('holdings-columns',...fields.map(([key,label])=>field(label,columnVisibility.has(key),checked=>{if(checked)columnVisibility.add(key);else columnVisibility.delete(key);renderHoldings();},{type:'checkbox'})));
-  replace('research-holdings',table(rows,fields.filter(([key])=>columnVisibility.has(key)).map(([key,label])=>({key,label,render:key==='security_id'?value=>securityButton(value):key.includes('weight')?pct:['quantity','price','market_value'].includes(key)?value=>num(value):undefined})),`${rows.length} visible positions · account display filter only`));
+  replace('research-holdings',table(rows,fields.filter(([key])=>columnVisibility.has(key)).map(([key,label])=>({key,label,render:key==='security_id'?value=>securityButton(value):key==='account_id'?(value,row)=>accountLabel(value,row):key.includes('weight')?pct:['quantity','price','market_value'].includes(key)?value=>num(value):undefined})),`${rows.length} visible positions · account display filter only`));
   replace('account-reconciliation',table((result?.summary?.accounts || []).filter(row=>!account || row.account_id===account),[
-    {key:'account_id',label:'Account'},{key:'total_value',label:'NAV',render:num},{key:'cash',label:'Explicit cash',render:num},
+    {key:'account_id',label:'Account',render:(value,row)=>accountLabel(value,row)},{key:'total_value',label:'NAV',render:num},{key:'cash',label:'Explicit cash',render:num},
     {key:'unclassified_value',label:'Unclassified',render:num},{key:'coverage',render:pct},{key:'currency'},
     {key:'complete',render:value=>badge(value?'complete':'incomplete')},
   ]));
 }
+function renderAnalysisFreshness() {
+  const stale=draft.dirty && !previewReady(draft);
+  $('holding-analysis-state').textContent=stale?'Recalculate to update':`${horizon()}-month scenarios`;
+  $('holding-analysis-state').className=`badge ${stale?'dirty':''}`;
+  $('holding-analysis').classList.toggle('stale-result',stale);
+  $('company-status').title=stale?'Assumptions changed; the action is from the previous calculation.':'Based on the displayed scenario inputs.';
+}
+function renderHoldingAnalysis() {
+  const search=$('analysis-search').value.toLowerCase().trim();
+  const held=new Map();
+  for(const row of result?.holdings || []) {
+    if(account && row.account_id!==account)continue;
+    if(row.security_id && row.security_id!=='CASH')held.set(row.security_id,row);
+  }
+  const analysis=result?.holding_analysis || [];
+  const rows=[...held].map(([id,holding])=>{
+    const row=analysis.find(item=>item.security_id===id) || {security_id:id,ticker:holding.ticker || id,name:holding.name,action:'Review',reason:'Scenario inputs are unavailable.',status:'unavailable',scenarios:[]};
+    return {...row,starting_price:row.inputs?.starting_price ?? holding.price,
+      ...Object.fromEntries(labels.map(label=>[label,row.scenarios?.find(item=>item.label===label)?.return_value ?? null]))};
+  }).filter(row=>`${row.ticker || ''} ${row.name || ''} ${row.security_id}`.toLowerCase().includes(search));
+  const openHolding=id=>{securityId=id;renderCompany();$('research-security').focus();$('company-heading').scrollIntoView({behavior:'smooth',block:'start'});};
+  replace('holding-analysis',table(rows,[
+    {key:'action',label:'Action',render:(_value,row)=>actionBadge(row)},
+    {key:'ticker',label:'Holding',render:(_value,row)=>{const cell=el('div',null,'holding-name');cell.append(button(row.ticker || securityLabel(row.security_id),()=>openHolding(row.security_id),'text-button'),el('small',row.name || ''));return cell;}},
+    {key:'starting_price',label:'Price',render:num},
+    ...labels.map(label=>({key:label,label:friendly(label),render:(value,row)=>{const scenario=row.scenarios?.find(item=>item.label===label);if(numeric(value)===null && numeric(scenario?.value_per_share)!==null){const span=el('span',money(scenario.value_per_share,row.inputs?.currency));span.title='Conditional intrinsic value per share; no horizon return is assumed.';return span;}const span=el('span',pct(value),numeric(value)<0?'negative':numeric(value)>0?'positive':'');return span;}})),
+    {key:'excess_return',label:'Vs benchmark',render:pct},
+    {key:'evidence',label:'Inputs',render:(value,row)=>{const node=el('span',row.model==='eps_multiple'?'EPS × P/E':row.model==='fcff_dcf'?'DCF value':row.model==='shared_state'?'Market scenarios':'Needs data','input-basis');node.title=[value?.statements?.used?'Statements used':null,value?.estimates?.used?'Estimates used':null,value?.macro?.used?'Economic data used':'Economic data: context only',row.reason].filter(Boolean).join(' · ');return node;}},
+  ]));
+  $('research-horizon').value=horizon();renderAnalysisFreshness();
+}
+async function loadAccountDirectory() {
+  try {accountDirectory=await api('/api/research/accounts');document.dispatchEvent(new CustomEvent('portfolio:account-names',{detail:accountDirectory.accounts || []}));renderContext();renderAccountCards();renderAccountNames();}
+  catch { /* Older services still show source names from the current collection. */ }
+}
+function renderAccountNames() {
+  const rows=accountDirectory?.accounts || result?.accounts || [];
+  if(!rows.length){replace('account-name-editor',el('p','Pull holdings to see your accounts.','muted'));return;}
+  replace('account-name-editor',...rows.map(row=>{
+    const block=el('div',null,'account-name-row');
+    const label=field('Display name',accountLabel(row.account_id,row),()=>{});
+    const input=label.querySelector('input');
+    block.append(label,button('Save name',async()=>{
+      const display_name=input.value.trim();if(!display_name)throw new Error('Enter an account name.');
+      await api('/api/research/accounts',{account_id:row.account_id,display_name});
+      await loadAccountDirectory();renderAll();announce('Account name saved.');
+    }));
+    if(row.source_name)block.append(el('small',`Yahoo: ${row.source_name}`,'muted'));
+    return block;
+  }));
+}
+
 function renderScreen() {
   const search=$('screen-search').value.toLowerCase(), rows=(result?.signals || []).filter(row=>JSON.stringify(row).toLowerCase().includes(search));
   $('screen-scope').textContent=`${result?.signals?.length || 0} supplied securities · not a market-wide claim`;
@@ -828,12 +922,12 @@ function renderScreen() {
 // A proposal is this review's reviewable starting point, never an adopted assumption:
 // keeping one copies it into the workspace as a prefill that still has to be
 // recalculated, reviewed and saved.
-const proposalFor = kind => result?.research?.[securityId]?.proposals?.[kind] || null;
+const proposalFor = kind => result?.research?.[securityId]?.proposals?.[kind] || (kind==='eps'?holdingAnalysis(securityId)?.valuation_input:null) || null;
 function keepProposal(kind) {
   const proposal=proposalFor(kind);
   if(!proposal)throw new Error(`This review proposed no ${kind.toUpperCase()} model for ${securityId || 'this security'}.`);
   if(!draft.baseRunId)throw new Error('Load a saved run before keeping a proposal.');
-  draft=applyProposal(draft,securityId,kind,proposal,horizon());persist();renderAll();
+  draft=applyProposal(draft,securityId,kind,proposal,horizon());draft.workspace.valuations[securityId].active_model=kind;persist();renderAll();
   announce(`Proposed ${kind.toUpperCase()} assumptions copied for review. Recalculate to value them, then save to retain them.`);
 }
 function assumptionTags(kind,proposal) {
@@ -847,16 +941,19 @@ function renderProposals() {
   const actions=[], tags=[];
   for(const kind of ['eps','dcf']) {
     const proposal=proposalFor(kind);
-    const action=button(`Use proposed ${kind.toUpperCase()} assumptions`,()=>keepProposal(kind),proposal?'secondary':'quiet');
+    const action=button(`Reset ${kind.toUpperCase()} defaults`,()=>keepProposal(kind),proposal?'secondary':'quiet');
     action.disabled=!proposal || !draft.baseRunId;
     action.title=proposal?`Copy this review's proposed ${kind.toUpperCase()} inputs into the workspace for review.`
       :`This review proposed no ${kind.toUpperCase()} model for ${securityId || 'this security'}.`;
-    actions.push(action);tags.push(...assumptionTags(kind,proposal));
+    if(proposal)actions.push(action);if(proposal)tags.push(...assumptionTags(kind,proposal));
   }
-  replace('proposal-actions',...actions);
-  replace('assumption-strip',...tags,el('p','A proposal is evidence-backed input, not an established assumption. Review each value before recalculating.','muted'));
+  replace('proposal-actions',...actions);$('proposal-actions').closest('.proposal-strip').hidden=!actions.length;
+  const meta=(holdingAnalysis(securityId)?.valuation_input || proposalFor('eps'))?.proposal_meta || {};
+  replace('assumption-strip',disclosure('Assumption sources',...tags,kv(meta.inputs || {}),kv(meta.assumptions || {})));
 }
 function epsDefaults() {
+  const proposed=holdingAnalysis(securityId)?.valuation_input || proposalFor('eps');
+  if(proposed && proposed.horizon_months===horizon()) {const model=clone(proposed);delete model.proposal_meta;return model;}
   const security=securityRow(securityId);
   return {starting_price:numeric(security.price),currency:security.currency || resolved().mandate?.base_currency || null,
     horizon_months:horizon(),eps_convention:'forward',pe_convention:'forward',scenarios:labels.map(label=>({label,eps:null,pe:null,distributions_per_starting_share:null}))};
@@ -867,7 +964,8 @@ function updateValuation(kind, mutate) {
   mutate(model);
   draft=keepValuationEdit(draft,securityId,kind,model,
     {origin:'manual',source:'User scenario input',version:1,horizon_months:horizon()});
-  persist();renderState(true);renderDiff();
+  draft.workspace.valuations[securityId].active_model=kind;
+  persist();renderState(true);renderDiff();renderAnalysisFreshness();
 }
 // The grid is shaded by where each cell sits between the grid's own lowest and highest
 // value, so the eye finds the drivers; the number and its contrast stay unchanged, and a
@@ -899,6 +997,18 @@ function sensitivity(id,grid,type) {
       coverage:readinessNote('company_valuation')}));
 }
 function renderEPS() {
+  const analysis=holdingAnalysis(securityId);
+  if(analysis?.model==='shared_state' && !valuationValue('eps')) {
+    const rows=labels.map(label=>({label,return_value:resolved().allocation?.return_overrides?.[securityId]?.[label] ?? analysis.scenarios?.find(row=>row.label===label)?.return_value ?? null}));
+    replace('eps-form',table(rows,[{key:'label',label:'Outcome'},{key:'return_value',label:`${horizon()}-month return (%)`,render:(value,row)=>field(`${friendly(row.label)} return (%)`,value,next=>{
+      const overrides=clone(resolved().allocation?.return_overrides || {});
+      overrides[securityId] ||= Object.fromEntries(rows.filter(item=>item.return_value!==null).map(item=>[item.label,item.return_value]));
+      if(next===null)delete overrides[securityId][row.label];else overrides[securityId][row.label]=next;
+      patch({allocation:{return_overrides:overrides}});
+    },{type:'number',percent:true})}]),disclosure('Scenario basis',el('p','These outcomes use the shared market, sector and currency assumptions. An individual return override replaces that outcome for this holding. Recalculate to update the portfolio and review signal.','muted'),button('Edit market assumptions',()=>navigate('scenarios'),'text-button')));
+    replace('eps-output',table(analysis.scenarios || [],[{key:'label',label:'Outcome'},{key:'return_value',label:'Total return',render:pct}]));
+    replace('eps-grid');replace('valuation-link');return;
+  }
   const data=valuationValue('eps') || epsDefaults();
   const fields=form([
     field('Starting price / share',data.starting_price,value=>updateValuation('eps',model=>model.starting_price=value),{type:'number'}),
@@ -909,10 +1019,11 @@ function renderEPS() {
   const rows=table(labels.map(label=>data.scenarios.find(row=>row.label===label) || {label}),[{key:'label',label:'Outcome'},...['eps','pe','distributions_per_starting_share'].map(key=>({key,label:{eps:'Horizon EPS',pe:'Matching P/E',distributions_per_starting_share:'Cash / starting share'}[key],render:(value,row)=>field(`${row.label} ${friendly(key)}`,value,next=>updateValuation('eps',model=>{
     let item=model.scenarios.find(item=>item.label===row.label);if(!item){item={label:row.label};model.scenarios.push(item);}item[key]=next;
   }),{type:'number'})}))]);
-  replace('eps-form',fields,rows,el('p','Cash distributions exclude buybacks. Buybacks and dilution enter EPS/share assumptions only. Returns are over the declared horizon, without reinvestment.','muted'));
+  replace('eps-form',fields,rows,disclosure('Calculation & conventions',el('p','Horizon price = EPS × P/E. Total return = (horizon price + cash distributions) / starting price − 1. Buybacks and dilution enter EPS only; distributions are held as cash.','muted')));
   const output=result?.company_research?.[securityId]?.eps;
   replace('eps-output',output?table(output.scenarios,[{key:'label',label:'Outcome'},{key:'horizon_price',label:'Horizon price',render:value=>money(value,output.currency)},{key:'total_return',label:'Total return',render:pct},{key:'status',render:badge},{key:'issues',wrap:true}]):empty('Enter assumptions and recalculate.','No EPS valuation yet'));
   sensitivity('eps-grid',result?.company_research?.[securityId]?.eps_sensitivity,'eps');
+  if($('eps-grid').parentElement.tagName!=='DETAILS'){const details=disclosure('Price sensitivity');$('eps-grid').before(details);details.append($('eps-grid'));}
   const rationale=field('Rationale for linking reviewed EPS scenarios','',()=>{}, {type:'textarea'});
   const action=button('Use reviewed EPS scenarios',async()=>{
     const value=rationale.querySelector('textarea').value.trim();if(!value)throw new Error('Explain why these reviewed scenarios should feed portfolio comparison.');
@@ -922,6 +1033,7 @@ function renderEPS() {
   action.disabled=!draft.baseRunId;replace('valuation-link',rationale,action,el('p','Linking is an explicit review action. It does not create a calibrated forecast.','muted'));
 }
 function dcfDefaults() {
+  const proposed=proposalFor('dcf');if(proposed){const model=clone(proposed);delete model.proposal_meta;return model;}
   return {currency:securityRow(securityId).currency || resolved().mandate?.base_currency || null,monetary_unit:'units',
     company_type:null,sbc_treatment:null,discount_rate:null,terminal_growth_rate:null,terminal_roic:null,
     debt:null,preferred:null,nci:null,excess_cash:null,nonoperating_assets:null,diluted_shares:null,
@@ -944,6 +1056,7 @@ function renderDCF() {
   const amount=value=>numeric(value)===null?'—':`${num(value)} ${output.monetary_unit} ${output.currency}`;
   replace('dcf-output',output?kv({status:output.status,enterprise_value:amount(output.enterprise_value),common_equity_value:amount(output.common_equity_value),intrinsic_value_per_share:money(output.value_per_share,output.currency),explicit_cash_flow_present_value:amount(output.explicit_present_value),terminal_value:amount(output.terminal_value),terminal_present_value:amount(output.terminal_present_value),terminal_reinvestment_rate:pct(output.terminal_reinvestment_rate),horizon_return:output.return_reason}):empty('Enter explicit projections and bridge inputs, then recalculate.','No DCF valuation yet'),output?autoTable(output.projections,['year','nopat','reinvestment','roic','fcff','present_value']):null,output?listIssues(output.issues):null);
   sensitivity('dcf-grid',result?.company_research?.[securityId]?.dcf_sensitivity,'dcf');
+  if($('dcf-grid').parentElement.tagName!=='DETAILS'){const details=disclosure('DCF sensitivity');$('dcf-grid').before(details);details.append($('dcf-grid'));}
 }
 function assessmentDefaults() {
   return {version:1,security_id:securityId,author:'',horizon_months:horizon(),decision_cutoff:result?.timeline?.decision_cutoff || null,
@@ -986,14 +1099,30 @@ function renderCompany() {
   const ids=[...new Set([...(result?.holdings || []).map(row=>row.security_id),...(result?.signals || []).map(row=>row.security_id),...Object.keys(draft.workspace.valuations || {}),...Object.keys(draft.workspace.assessments || {})].filter(Boolean))].sort();
   if(securityId && !ids.includes(securityId))ids.unshift(securityId);
   if(!securityId)securityId=ids[0] || '';
-  $('research-security').replaceChildren(...(ids.length?ids:['']).map(id=>{const item=el('option',id || 'Enter an exact security ID');item.value=id;return item;}));$('research-security').value=securityId;
+  $('research-security').replaceChildren(...(ids.length?ids:['']).map(id=>{const held=holdingAnalysis(id);const item=el('option',held?.name?`${securityLabel(id)} · ${held.name}`:securityLabel(id) || 'Choose a holding');item.value=id;return item;}));$('research-security').value=securityId;
   if(!securityId){for(const id of ['eps-form','dcf-form','evidence-form'])replace(id,empty('Choose a retained security or enter its exact identifier.','Select a company'));return;}
   const security=securityRow(securityId);
   const kept=draft.workspace.valuations?.[securityId];
-  replace('security-summary',kv({security_id:securityId,issuer:security.issuer_id,currency:security.currency,horizon:`${horizon()} months`,
-    valuation_origin:kept?.origin || 'none kept',valuation_source:kept?.source || 'not stated',
-    basis:'Subjective assumptions; prices may be unavailable'}),
-    disclosure('Retained financial statements and source observations',autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),el('p',result?.observations?.fundamentals?.scope || 'Only facts eligible at the saved cutoff are displayed.','muted')));
+  const analysis=holdingAnalysis(securityId);
+  document.querySelector('[data-company-tab=eps]').textContent=analysis?.model==='shared_state'&&!kept?.eps?'Scenario returns':'EPS & multiple';
+  $('company-heading').textContent=`${securityLabel(securityId)} · Assumptions`;
+  $('company-status').replaceChildren(actionBadge(analysis));
+  const summary=el('div',null,'security-readout');
+  summary.append(el('strong',analysis?.name || security.name || securityLabel(securityId)),
+    el('span',money(analysis?.inputs?.starting_price ?? security.price,security.currency)),el('span',`${horizon()} months`),
+    el('span',kept?.origin || (analysis?.valuation_input?'Source defaults':'Scenario assumptions'),'badge'));
+  replace('security-summary',summary);
+  const evidence=analysis?.evidence || {};
+  const cards=el('div',null,'evidence-summary');
+  for(const [key,label] of [['statements','Statements'],['estimates','Estimates'],['macro','Economic data']]) {
+    const input=evidence[key] || {}, state=input.used?'Used':key==='macro' && (result?.macro || []).length?'Context only':['available','ok','ready','complete'].includes(input.status)?'Available · unused':input.status==='unavailable' || !input.status?'Unavailable':friendly(input.status);
+    const chip=el('span',`${label}: ${state}`,`evidence-chip ${input.used?'used':'context'}`);chip.title=input.note || (input.source_ids || []).join(', ') || `${label} ${state.toLowerCase()}`;cards.append(chip);
+  }
+  replace('company-data-basis',cards,analysis?.reason?el('p',analysis.reason,'compact-note'):null,
+    disclosure('Inputs & source details',kv(analysis?.inputs || {}),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,trade_readiness:analysis?.trade_readiness?.status}),
+      listIssues(analysis?.trade_readiness?.reasons || [],'No additional trade readiness information.'),
+      autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),
+      evidence.macro?.note?el('p',evidence.macro.note,'muted'):null));
   renderProposals();renderEPS();renderDCF();renderEvidence();
   jsonEditor('company-json','Company assessment and valuation inputs',{
     assessment:draft.workspace.assessments[securityId] || assessmentDefaults(),
@@ -1080,10 +1209,9 @@ function renderSharedState() {
   const probabilities=form(labels.map(label=>field(`${friendly(label)} state probability (%)`,state.probabilities?.[label] ?? null,
     value=>stateProbability(labels,label,value),{type:'number',percent:true,
     help:'Optional. State every probability or leave every one blank; a partial distribution is refused.'})));
-  replace('shared-state-editor',el('h3','Stated market view'),
-    el('p','These states are expanded into per-security joint scenarios by the next full review (Update & analyze). Recalculating replays the joint scenarios this saved run already froze.','muted'),
-    markets,el('h3','Sector multipliers'),sectors,el('h3','Currency states'),fx,
-    el('h3','State probabilities (optional)'),probabilities,
+  replace('shared-state-editor',el('h3','Market assumptions'),
+    el('p','Recalculate applies these assumptions to the retained inputs.','muted'),
+    markets,probabilities,disclosure('Sector & currency assumptions',el('h3','Sector multipliers'),sectors,el('h3','Currency states'),fx),
     button('Reset to this run’s saved market view',()=>{
       patchSharedState(clone(draft.baseConfig.allocation?.shared_state || {}));renderScenarios();
       announce('The stated market view was restored to this saved run’s assumptions.');
@@ -1164,7 +1292,7 @@ function renderReview() {
   renderAllocationChange(candidate);
   // The exact decimal amounts, beside the weights the chart above shows.
   replace('trade-basket',table(candidate.proposals || [],[
-    {key:'security_id',label:'Security',render:securityButton},{key:'account_id',label:'Account'},{key:'action'},
+    {key:'security_id',label:'Security',render:securityButton},{key:'account_id',label:'Account',render:(value,row)=>accountLabel(value,row)},{key:'action'},
     {key:'current_weight',label:'Current weight',render:pct},{key:'target_weight',label:'Target weight',render:pct},
     {key:'decimal_amounts',label:'Exact trade value',render:(value,row)=>`${value?.trade_value ?? num(row.trade_value)} ${row.currency || ''}`.trim()},
     {key:'fractional_quantity_change',label:'Exact quantity change',render:(value,row)=>text(row.decimal_amounts?.quantity_change ?? num(value,8))},
@@ -1181,17 +1309,17 @@ function renderReview() {
       autoTable((candidate.proposals || []).flatMap(leg=>(leg?.lot_plan || [])
         .map(lot=>({security_id:leg.security_id,account_id:leg.account_id,...lot})))),
       el('p','Lots the conditional tax reserve was estimated from. An estimate flagged for review is named in the basket table above.','muted')));
-  replace('basket-funding',autoTable(candidate.accounts || []));
-  replace('basket-reasons',listIssues([...(allocation.issues || []),...(candidate.issues || []),...(candidate.decisions || []).map(row=>({message:`${row.security_id || row.account_id || ''}: ${row.reason || row.action}`}))]),candidate.validation?kv(candidate.validation):null,
+  replace('basket-funding',table(candidate.accounts || [],[{key:'account_id',label:'Account',render:(value,row)=>accountLabel(value,row)},{key:'starting_cash',render:num},{key:'sales',render:num},{key:'purchases',render:num},{key:'costs',render:num},{key:'tax_reserve',render:num},{key:'ending_cash',render:num},{key:'status',render:badge}]));
+  replace('basket-reasons',listIssues([...(allocation.issues || []),...(candidate.issues || []),...(candidate.decisions || []).map(row=>({message:`${row.security_id?securityLabel(row.security_id):row.account_id?accountLabel(row.account_id,row):''}: ${row.reason || row.action}`}))]),candidate.validation?kv(candidate.validation):null,
     disclosure('Candidate joint outcomes after costs and tax reserve',table(Object.entries(candidate.scenarios || {}).map(([scenario,value])=>({scenario,return:value})),[{key:'scenario'},{key:'return',render:pct}],'Conditional horizon returns for the complete funded basket.')),
     disclosure('Trading-cost sensitivities',autoTable(candidate.cost_sensitivities || [])),
     disclosure('Substitution-hurdle sensitivities',autoTable(candidate.hurdle_sensitivities || [])),
     disclosure('Candidate method and solver diagnostics',kv(allocation.solver || {})));
   renderDecisionHistory();
   const runs=service.runs || [];
-  replace('run-history',table(runs,[{key:'run_id',label:'Saved run',render:id=>button(String(id).slice(0,16),()=>loadRun(id),'text-button')},{key:'as_of',label:'Decision date'},{key:'created_at'},{key:'parent_run_id'}]));
+  replace('run-history',table(runs,[{key:'as_of',label:'Review',render:(value,row)=>button(shortDate(value || row.created_at),()=>loadRun(row.run_id),'text-button')},{key:'created_at',label:'Saved',render:when}]));
   for(const id of ['compare-left','compare-right']){
-    const previous=$(id).value;$(id).replaceChildren(...runs.map(run=>{const item=el('option',`${run.as_of || run.created_at || 'Run'} · ${run.run_id.slice(0,12)}`);item.value=run.run_id;return item;}));
+    const previous=$(id).value;$(id).replaceChildren(...runs.map(run=>{const item=el('option',`${shortDate(run.as_of || run.created_at)} · Review ${runs.length-runs.indexOf(run)}`);item.value=run.run_id;return item;}));
     $(id).value=previous && runs.some(run=>run.run_id===previous)?previous:(id==='compare-right'?runs[1]?.run_id:runs[0]?.run_id) || '';
   }
   const savedId=draft.baseRunId;
@@ -1209,7 +1337,7 @@ function renderAllocationChange(candidate) {
   // A basket with many legs is read leg by leg in the table below; the chart shows the
   // largest few so its stated values stay readable rather than overflowing the panel.
   const shown=legs.slice(0,10);
-  const groups=shown.map(row=>({label:`${row.security_id}${row.account_id?` · ${row.account_id}`:''}`,
+  const groups=shown.map(row=>({label:`${securityLabel(row.security_id)}${row.account_id?` · ${accountLabel(row.account_id,row)}`:''}`,
     values:[row.current_weight,row.target_weight]}));
   replace('allocation-before-after',
     groupedBarChart(groups,['Current weight','Target weight'],'Household weight before and after the selected basket'),
@@ -1290,7 +1418,7 @@ function renderSettings() {
   ]));
   const accountNodes=[];
   for(const row of result?.summary?.accounts || []) {
-    const id=row.account_id, block=el('section',null,'section-block');block.append(el('h3',id));
+    const id=row.account_id, block=el('section',null,'section-block');block.append(el('h3',accountLabel(id,row)));
     block.append(field('Permitted security IDs (comma separated)',(config.mandate?.account_permissions?.[id] || []).join(', '),value=>{
       const map=clone(resolved().mandate?.account_permissions || {});map[id]=value.split(',').map(item=>item.trim()).filter(Boolean);patch({mandate:{account_permissions:map}});
     },{help:'Blank does not grant trading permission. Include approved residual and benchmark instruments explicitly.'}));
@@ -1342,7 +1470,7 @@ function renderSettings() {
   jsonEditor('settings-json','Resolved editable configuration',config,value=>patch(value));renderDiff();
 }
 function renderData() {
-  renderProviderHealth();
+  renderProviderHealth();renderAccountNames();
   const status=service.providers || {};
   const providerDraft={...status};
   const providerFields=form([
@@ -1400,22 +1528,22 @@ function renderLedgerEvaluation() {
 function renderContext() {
   const runs=service.runs || [];
   // One selector over two dated views: the newest collection, or one saved analysis.
-  const options=[[CURRENT_VIEW,'Current holdings (no analysis)'],
-    ...runs.map(run=>[run.run_id,`${run.as_of || run.created_at || 'Saved run'} · ${run.run_id.slice(0,12)}`])];
+  const options=[[CURRENT_VIEW,'Current holdings'],
+    ...runs.map((run,index)=>[run.run_id,`${shortDate(run.as_of || run.created_at)}${index===0?' · Latest':` · Review ${runs.length-index}`}`])];
   $('research-run').replaceChildren(...options.map(([value,label])=>{const option=el('option',label);option.value=value;return option;}));
   $('research-run').value=view==='saved' && draft.baseRunId?draft.baseRunId:CURRENT_VIEW;
-  const accounts=result?.summary?.accounts || [];
+  const accounts=accountDirectory?.accounts || result?.accounts || result?.summary?.accounts || objectRows(current?.current?.accounts);
   if(account && !accounts.some(row=>row.account_id===account))account='';
-  $('account-scope').replaceChildren(...[{account_id:'',name:'All accounts'},...accounts].map(row=>{const option=el('option',row.name || row.account_id);option.value=row.account_id;return option;}));$('account-scope').value=account;
-  $('valuation-context').textContent=`Valuation ${result?.metadata?.valuation_date || 'date unavailable'}`;
+  $('account-scope').replaceChildren(...[{account_id:'',name:'All accounts'},...accounts].map(row=>{const option=el('option',row.account_id?accountLabel(row.account_id,row):'All accounts');option.value=row.account_id;return option;}));$('account-scope').value=account;
+  $('valuation-context').textContent=view==='saved'?`As of ${shortDate(result?.metadata?.as_of)}`:`${objectRows(current?.current?.positions).length} holdings`;
   $('cutoff-context').textContent=`Decision cutoff ${result?.timeline?.decision_cutoff || 'unavailable'}`;
   const mode=result?.metadata?.mode || service.mode;
-  $('research-mode').textContent=mode==='demo'?'SYNTHETIC DEMO · example data':`${friendly(mode || 'unavailable')} · ${service.dataset || 'source unavailable'}`;$('research-mode').className=`badge ${mode==='demo'?'demo':''}`;
+  $('research-mode').textContent=mode==='demo'?'SYNTHETIC DEMO':mode==='live'?'Connected':mode==='offline'?'Saved data':'Loading…';$('research-mode').className=`badge ${mode==='demo'?'demo':''}`;
   if(!$('review-date').value)$('review-date').value=service.default_as_of || '';
   if(!$('evaluation-date').value)$('evaluation-date').value=new Date().toISOString().slice(0,10);
 }
 function renderAll() {
-  renderContext();renderOverview();renderHoldings();renderScreen();renderCompany();renderScenarios();renderReview();renderSettings();renderData();renderState(true);
+  renderContext();renderOverview();renderHoldings();renderScreen();renderHoldingAnalysis();renderCompany();renderScenarios();renderReview();renderSettings();renderData();renderState(true);
 }
 function draftChoice(message) {
   return new Promise(resolve=>{
@@ -1572,8 +1700,8 @@ function renderWorkflow(workflow) {
     const chips=el('div',null,'stage-chips');chips.append(...stageOrder.map(name=>stageChip(name,stages[name])));
     const actions=stageOrder.map(name=>stages[name]?.action_needed).filter(Boolean)
       .filter((message,index,all)=>all.indexOf(message)===index).map(message=>el('p',message,'notice'));
-    replace('workflow-progress',el('p',workflowHeadline(workflowRecord),'stage-headline'),chips,...actions,
-      workflowRecord.error?el('p',workflowRecord.error,'notice'):null);
+    if(liveWorkflow(workflowRecord.status))replace('workflow-progress',el('p',workflowHeadline(workflowRecord),'stage-headline'),chips,...actions,workflowRecord.error?el('p',workflowRecord.error,'notice'):null);
+    else replace('workflow-progress',disclosure(workflowRecord.status==='complete'?'Last update · Complete':workflowHeadline(workflowRecord),chips,...actions,workflowRecord.error?el('p',workflowRecord.error,'notice'):null));
   }
   strip.hidden=false;$('cancel-workflow').hidden=!liveWorkflow(workflowRecord.status);
   renderState();
@@ -1614,7 +1742,7 @@ async function finishWorkflow(workflow) {
   renderWorkflow(workflow);
   const summary=workflowSummary(workflow);
   announce(workflow.status==='complete' && workflow.run_id
-    ?`Review saved · run ${String(workflow.run_id).slice(0,12)}${summary?` · ${summary}`:''}`
+    ?'Review saved.'
     :workflowHeadline(workflow));
 }
 async function startWorkflow() {
@@ -1753,12 +1881,14 @@ $('research-run').addEventListener('change',()=>{
   if(choice.runId===draft.baseRunId){view='saved';applyView();announce('Showing the analysis of the loaded saved run.');return;}
   loadRun(choice.runId).catch(failure=>{error(failure.message);restoreRunSelection();});
 });
-$('account-scope').addEventListener('change',()=>{account=$('account-scope').value;renderHoldings();announce('Account display changed. Portfolio calculations and constraints retain their saved scope.');});
+$('account-scope').addEventListener('change',()=>{account=$('account-scope').value;renderHoldings();renderHoldingAnalysis();announce('');});
+$('analysis-search').addEventListener('input',renderHoldingAnalysis);
 $('holdings-search').addEventListener('input',renderHoldings);$('screen-search').addEventListener('input',renderScreen);
 $('research-security').addEventListener('change',()=>{securityId=$('research-security').value;renderCompany();});
 wire('open-security',()=>{const value=$('manual-security').value.trim();if(!value || ['__proto__','constructor','prototype'].includes(value))throw new Error('Enter a valid exact security identifier.');securityId=value;renderCompany();});
 wire('close-security-dialog',()=>$('security-dialog').close());
 wire('research-from-detail',()=>{$('security-dialog').close();securityId=detailId;renderCompany();navigate('research');});
+$('research-horizon').addEventListener('change',()=>{$('scenario-horizon').value=$('research-horizon').value;$('scenario-horizon').dispatchEvent(new Event('change'));});
 $('scenario-horizon').addEventListener('change',async()=>{
   const months=Number($('scenario-horizon').value);if(months===horizon())return;
   const choice=await draftChoice('Changing the horizon clears incompatible return overrides, priors, probabilities, cash returns and EPS outcomes. Retain keeps your other draft edits; discard restores saved assumptions first. Cancel keeps the current horizon.');
@@ -1799,7 +1929,7 @@ async function initialize() {
   try {
     const [local,status]=await Promise.all([api('/api/state'),api('/api/research'),loadCurrent().then(loadExceptions)]);token=local.token;service=status;bootstrap='ready';
     try{const response=await api('/api/research/supplemental');supplementalSupported=response.supported;supplemental=clone(response.saved || response.template || null);}catch(failure){error(`Supplemental input is unavailable: ${failure.message}`);}
-    resumeWorkflow();loadProviderHealth();
+    resumeWorkflow();loadProviderHealth();loadAccountDirectory();
     if(service.latest_run_id)await loadRun(service.latest_run_id,false);
     else{draft=restoreDraft(sessionStorage,null,service.config,{});renderAll();}
   } catch(failure){bootstrap='failed';error(`Research could not load: ${failure.message} Reload this page to try again. Yahoo collection remains available in Data and Holdings.`);renderAll();}

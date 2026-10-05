@@ -232,6 +232,8 @@ def make_handler(store, browser, port, research=None):
                 self.reply(200, research.supplemental())
             elif path == "/api/research/current":
                 self.reply(200, research.current())
+            elif path == "/api/research/accounts":
+                self.reply(200, research.accounts())
             elif path == "/api/research/exceptions":
                 self.reply(200, research.exceptions())
             elif path == "/api/research/workflows":
@@ -249,11 +251,7 @@ def make_handler(store, browser, port, research=None):
                 kind = query.get("kind", ["decision"])[0]
                 if kind not in {"decision", "evaluation", "assessment", "comparator"}:
                     raise ValueError("Choose a review record type.")
-                from portfolio_research.public import _clean
-
-                self.reply(
-                    200, _clean(research.store.records(kind, query.get("run_id", [None])[0]))
-                )
+                self.reply(200, research.records(kind, query.get("run_id", [None])[0]))
             elif path == "/api/research/compare":
                 query = parse_qs(urlsplit(self.path).query)
                 self.reply(
@@ -294,6 +292,8 @@ def make_handler(store, browser, port, research=None):
                 self.reply(201, research.save_decision(body))
             elif path == "/api/research/resolutions":
                 self.reply(201, research.save_resolution(body))
+            elif path == "/api/research/accounts":
+                self.reply(200, research.save_account_name(body))
             elif path == "/api/research/valuation-link":
                 self.reply(200, research.valuation_link(body))
             elif path == "/api/research/providers":

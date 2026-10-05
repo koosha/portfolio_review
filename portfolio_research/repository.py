@@ -20,6 +20,7 @@ RECORD_KINDS = {
     "comparator",
     "override",
     "resolution",
+    "account_aliases",
 }
 
 

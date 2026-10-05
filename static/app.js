@@ -1,6 +1,9 @@
 const $ = id => document.getElementById(id);
 let state = {sources: [], browser: {}}, sourceSignature = '', activeSource = null, savingSelection = false;
 let stateRequest = 0, sourceViewRequest = 0;
+let accountNames = new Map();
+const sourceName = source => accountNames.get(source.id) || source.display_name || source.name;
+if(document.addEventListener)document.addEventListener('portfolio:account-names',event=>{accountNames=new Map((event.detail || []).filter(row=>row.source_id!=null).map(row=>[row.source_id,row.display_name]));sourceSignature='';renderSources();});
 
 function node(tag, text, className) {
   const el = document.createElement(tag);
@@ -62,7 +65,7 @@ function renderSources() {
     const checkbox=node('input'); checkbox.type='checkbox'; checkbox.checked=!!source.selected;
     checkbox.className='portfolio-checkbox'; checkbox.id=`portfolio-${source.id}`;
     checkbox.disabled=!!state.browser.busy; checkbox.dataset.selection='true';
-    checkbox.setAttribute('aria-label',`Include ${source.name} in data pull`);
+    checkbox.setAttribute('aria-label',`Include ${sourceName(source)} in data pull`);
     checkbox.onchange=async()=>{
       savingSelection=true; renderBrowser();
       try { await api(`/api/sources/${source.id}/selection`,{selected:checkbox.checked}); message(''); await reload(); }
@@ -70,7 +73,7 @@ function renderSources() {
       finally { savingSelection=false; renderBrowser(); }
     };
     const body=node('div',undefined,'source-body');
-    const label=node('label',source.name,'source-name'); label.htmlFor=checkbox.id;
+    const label=node('label',sourceName(source),'source-name'); label.htmlFor=checkbox.id;
     body.append(label,renderHoldingTotal(source.holding_summary));
     const running=state.browser.progress?.running_source_id===source.id;
     body.append(node('div',`Last pull: ${when(source.last_checked)}`,'source-meta'));
@@ -79,7 +82,7 @@ function renderSources() {
     if(source.snapshot_id) actions.append(button('View holdings',()=>showSource(source)));
     if(source.selected) {
       const retry=button(source.last_error ? 'Retry' : 'Pull',()=>browserAction('refresh',[source.id]));
-      retry.setAttribute('aria-label',`${source.last_error ? 'Retry' : 'Pull'} ${source.name}`);
+      retry.setAttribute('aria-label',`${source.last_error ? 'Retry' : 'Pull'} ${sourceName(source)}`);
       retry.dataset.pullOne='true'; retry.disabled=!!state.browser.busy || savingSelection;
       actions.append(retry);
     }
@@ -145,7 +148,7 @@ async function showSource(source) {
   activeSource = source;
   const snapshots = await api(`/api/sources/${source.id}/snapshots`);
   if (request !== sourceViewRequest) return;
-  $('snapshot-title').textContent = source.name;
+  $('snapshot-title').textContent = sourceName(source);
   const select = $('snapshot-select'); select.replaceChildren();
   for (const snapshot of snapshots) {
     const option = node('option', when(snapshot.captured_at)); option.value = snapshot.id; select.append(option);

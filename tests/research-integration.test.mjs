@@ -105,7 +105,8 @@ test('research event handlers integrate with a disposable synthetic HTTP applica
     await until(() => analysed.every(node => !node.hidden), 'the loaded run shown again');
     assert.equal($('research-run').value, initialRunId, 'the selector names the run on screen');
     assert.match($('analysis-caption').textContent, /Last completed analysis/);
-    assert.match($('analysis-caption').textContent, new RegExp(initialRunId.slice(0, 8)));
+    assert.match($('technical-context').textContent, new RegExp(initialRunId.slice(0, 8)));
+    assert.doesNotMatch($('research-run').selectedOptions[0].textContent,new RegExp(initialRunId.slice(0,8)),'routine navigation uses a date, not a run hash');
     assert.equal($('draft-state').textContent, 'Dirty', 'cancelling keeps the draft it asked about');
     $('reset-draft').click();
     await until(() => $('draft-dialog').hasAttribute('open'), 'the explicit reset choice');
@@ -408,8 +409,8 @@ test('one researched review drives the dashboard, its controls and a recorded de
     setInput(window, central, 12);
     assert.equal($('draft-state').textContent, 'Dirty');
     assert.match($('resolved-diff').textContent, /shared_state/, 'the stated market view is a retained change');
-    assert.match($('shared-state-editor').textContent, /next .*review/i,
-      'the panel says when a stated market view is expanded into scenarios');
+    assert.match($('shared-state-editor').textContent, /Recalculate applies/i,
+      'the panel explains how assumptions update outcomes');
     // The grouped readout is the only non-colour encoding of those bars, so it wraps
     // rather than sharing the single-line axis row written for three short spans.
     assert.ok($('scenario-comparison').querySelector('.chart-readout'),

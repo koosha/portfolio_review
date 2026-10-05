@@ -20,6 +20,7 @@ VALUATION_KEYS = {
     "source",
     "version",
     "horizon_months",
+    "active_model",
 }
 
 
@@ -40,6 +41,8 @@ def validate_workspace(payload):
                 raise ValueError(
                     "A company valuation origin must be " + ", ".join(sorted(VALUATION_ORIGINS))
                 )
+            if key == "valuations" and value.get("active_model") not in {None, "eps", "dcf"}:
+                raise ValueError("The active company model must be EPS or DCF.")
     return deepcopy(payload)
 
 
@@ -62,10 +65,15 @@ def analyze_review(bundle, config, *, previous=None):
     ``previous`` is the last published run's result when there is one. It is read only
     to explain what changed since then; nothing in this run depends on it existing.
     """
+    from .enrichment import _apply_shared_state
     from .evidence import validate_assessment
+    from .holding_analysis import build_holding_analysis
     from .readiness import readiness
     from .valuation import calculate_dcf, calculate_eps, dcf_sensitivity, eps_sensitivity
 
+    # Scenario expansion is a pure calculation, so replay must use the current
+    # controls rather than previously expanded generated rows. Imports remain frozen.
+    _apply_shared_state(bundle, config, bundle["as_of"])
     workspace = validate_workspace(bundle.get("workspace", {}))
     result = analyze(bundle, config)
     result["observations"] = {}
@@ -155,5 +163,8 @@ def analyze_review(bundle, config, *, previous=None):
         from .priorities import review_priorities
 
         result["priorities"] = review_priorities(result, bundle, config, previous=previous)
+    result["holding_analysis"] = build_holding_analysis(result, bundle, config, workspace)
     result["readiness"] = readiness(result, bundle, config)
-    return json_safe(result)
+    from .account_labels import with_account_labels
+
+    return json_safe(with_account_labels(result, bundle))

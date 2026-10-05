@@ -38,14 +38,12 @@
 <button data-page="settings">
 <span aria-hidden="true">07</span>Settings</button>
 </nav>
-<div class="sidebar-foot">● Local workspace<br>
-<small>Research, review, record.</small>
-</div>
+
 </aside>
 <main id="workspace-main" tabindex="-1">
 <header class="workspace-header">
 <div>
-<p class="eyebrow">MONTHLY WORKSPACE</p>
+<p class="eyebrow">PORTFOLIO REVIEW</p>
 <h1 id="page-title">Overview</h1>
 </div>
 <div class="header-actions">
@@ -56,26 +54,24 @@
 </header>
 <div id="workflow-progress" class="stage-strip" role="status" aria-live="off" hidden>
 </div>
-<div class="context-bar" aria-label="Shared research context">
-<label>Account display<select id="account-scope">
+<div class="context-bar" aria-label="Portfolio and analysis context">
+<label>Account<select id="account-scope" title="Display filter; portfolio calculations keep their full scope.">
 <option value="">All accounts</option>
 </select>
 </label>
-<label>Showing<select id="research-run">
-<option value="current">Current holdings (no analysis)</option>
+<label>Review<select id="research-run">
+<option value="current">Current holdings</option>
 </select>
 </label>
-<div class="context-dates">
-<span id="valuation-context">Valuation date unavailable</span>
-<small id="cutoff-context">Decision cutoff unavailable</small>
-</div>
+<div class="context-dates"><span id="valuation-context">Loading…</span></div>
 <span id="draft-state" class="badge" role="status">Loading</span>
+<details class="context-details"><summary aria-label="Show analysis details">Details</summary><div id="technical-context"></div><small id="cutoff-context">Decision cutoff unavailable</small></details>
 </div>
 <div class="draft-actions">
-<p id="research-status" role="status" aria-live="polite">Loading research workspace…</p>
+<p id="research-status" role="status" aria-live="polite">Loading…</p>
 <div>
 <button id="recalculate" class="secondary" disabled>Recalculate</button>
-<button id="save-run" class="secondary" disabled>Save run</button>
+<button id="save-run" class="secondary" disabled>Save analysis</button>
 <button id="reset-draft" class="quiet">Reset</button>
 </div>
 </div>
@@ -85,23 +81,21 @@
 </div>
 <section id="page-overview" class="page" aria-label="Overview">
 <div class="page-intro">
-<h2>Your portfolio, in context</h2>
-<p id="overview-caption" class="muted">Coverage and risks come before proposed changes.</p>
+<p id="overview-caption" class="muted"></p>
 </div>
 <section class="panel current-panel" aria-labelledby="current-holdings-heading">
 <div class="section-heading">
-<h2 id="current-holdings-heading">Current holdings</h2>
+<h2 id="current-holdings-heading">Portfolio</h2>
 <span id="current-collection-state" class="badge">Loading…</span>
 </div>
 <p id="current-dates" class="muted">Loading the newest collection…</p>
-<div id="current-value-currency">
-</div>
+<div id="current-value-currency"></div>
 <div id="current-totals" class="mini-metrics">
 </div>
 <div id="current-accounts" class="account-grid">
 </div>
 <details>
-<summary>Captured positions</summary>
+<summary>Positions &amp; source details</summary>
 <div id="current-positions">
 </div>
 </details>
@@ -110,10 +104,10 @@
 </section>
 <section id="exception-panel" class="panel exception-panel" aria-labelledby="exception-forms-heading">
 <div class="section-heading">
-<h2 id="exception-forms-heading">Exceptions</h2>
+<h2 id="exception-forms-heading">Needs attention</h2>
 <span id="exception-count" class="badge">Loading…</span>
 </div>
-<p class="muted">Only questions the source, its exchange and provider metadata could not answer are listed; what currency a holding is quoted in is never one of them. Each answer is saved as dated supplemental evidence.</p>
+
 <div id="current-exception-forms" aria-live="polite">
 </div>
 </section>
@@ -138,12 +132,8 @@
 </div>
 <div id="risk-contribution-chart">
 </div>
-<h3>Stress outcomes</h3>
-<div id="stress-table">
-</div>
-<h3>Concentration against the confirmed caps</h3>
-<div id="concentration-table">
-</div>
+<details><summary>Stress outcomes</summary><div id="stress-table"></div></details>
+<details><summary>Concentration limits</summary><div id="concentration-table"></div></details>
 </section>
 <div class="two-column">
 <section class="panel" data-analysis aria-labelledby="holdings-review-heading">
@@ -209,7 +199,6 @@
 <section id="page-holdings" class="page" aria-label="Holdings" hidden>
 <div class="page-intro">
 <h2>Holdings &amp; accounts</h2>
-<p class="muted">Display filters do not change funding or portfolio-wide limits.</p>
 <p class="eyebrow" data-analysis-note>
 </p>
 </div>
@@ -293,38 +282,27 @@
 </section>
 </section>
 <section id="page-research" class="page" aria-label="Research" hidden>
-<div class="page-intro">
-<h2>Company research</h2>
-<p class="muted">Relative scores, conditional valuations and reviewed evidence remain distinct.</p>
-<p class="eyebrow" data-analysis-note>
-</p>
-</div>
-<section class="panel" data-analysis>
-<div class="section-heading">
-<h2>Quality · Value · Momentum</h2>
-<span id="screen-scope" class="badge">
-</span>
-</div>
-<label>Search supplied universe<input id="screen-search" type="search">
-</label>
-<div id="company-screen">
-</div>
+<div class="page-intro"><p class="muted">Review each holding. Adjust assumptions, then recalculate.</p></div>
+<div id="research-empty" class="empty-state" hidden><strong>Start your analysis</strong><span>Update &amp; analyze adds scenarios and a review signal for each holding.</span></div>
+<section class="panel research-priority-panel" data-analysis aria-labelledby="holding-analysis-heading">
+<div class="section-heading"><h2 id="holding-analysis-heading">Holdings outlook</h2><span id="holding-analysis-state" class="badge"></span></div>
+<div class="table-tools"><label class="grow">Find a holding<input id="analysis-search" type="search" placeholder="Symbol or company"></label><label>Horizon<select id="research-horizon"><option value="6">6 months</option><option value="12">12 months</option><option value="18">18 months</option></select></label></div>
+<div id="holding-analysis"></div>
+<p class="compact-note">Actions reflect the displayed scenario assumptions. Open a holding to inspect its inputs.</p>
 </section>
 <section class="panel" data-analysis>
 <div class="section-heading">
-<h2>Valuation workspace</h2>
-<span id="company-status" class="badge">Subjective assumptions</span>
+<h2 id="company-heading">Holding assumptions</h2>
+<span id="company-status" class="badge">Scenario model</span>
 </div>
 <div class="form-grid security-picker">
 <label>Security<select id="research-security">
 </select>
 </label>
-<label>Or exact security ID<input id="manual-security">
-</label>
-<button id="open-security" class="secondary">Open security</button>
+<details class="identifier-picker"><summary>Other security</summary><label>Exact security ID<input id="manual-security"></label><button id="open-security" class="secondary">Open</button></details>
 </div>
-<div id="security-summary">
-</div>
+<div id="security-summary"></div>
+<div id="company-data-basis" class="data-basis"></div>
 <div class="proposal-strip">
 <div id="proposal-actions" class="actions">
 </div>
@@ -366,11 +344,13 @@
 </div>
 </details>
 </section>
+<details class="panel research-screen" data-analysis><summary>Compare quality, value &amp; momentum</summary>
+<div class="section-heading"><h2>Research scores</h2><span id="screen-scope" class="badge"></span></div>
+<label>Find a security<input id="screen-search" type="search"></label><div id="company-screen"></div></details>
 </section>
 <section id="page-scenarios" class="page" aria-label="Scenarios" hidden>
 <div class="page-intro">
-<h2>Explore joint outcomes</h2>
-<p class="muted">Common states span assets and benchmark. Probabilities are optional; weighted results require a complete distribution.</p>
+<p class="muted">Compare adverse, central and favorable outcomes.</p>
 <p class="eyebrow" data-analysis-note>
 </p>
 </div>
@@ -387,10 +367,7 @@
 </div>
 <div id="shared-state-editor">
 </div>
-<div id="probability-editor">
-</div>
-<div id="return-editor">
-</div>
+<details><summary>Individual returns &amp; probability overrides</summary><div id="probability-editor"></div><div id="return-editor"></div></details>
 <details>
 <summary>Stress assumptions and advanced scenarios</summary>
 <div id="stress-editor">
@@ -419,8 +396,7 @@
 </section>
 <section id="page-review" class="page" aria-label="Review" hidden>
 <div class="page-intro">
-<h2>Compare, decide, retain</h2>
-<p class="muted">Candidates are for review. Nothing places brokerage orders.</p>
+<p class="muted">Compare funded alternatives and record your decision.</p>
 <p class="eyebrow" data-analysis-note>
 </p>
 </div>
@@ -499,8 +475,7 @@
 </section>
 <section id="page-data" class="page" aria-label="Data" hidden>
 <div class="page-intro">
-<h2>Inputs &amp; provenance</h2>
-<p class="muted">Collection, research refresh and frozen-input recalculation are separate operations.</p>
+<p class="muted">Manage connections, account names and missing inputs.</p>
 </div>
 <section class="connect panel">
 <div class="section-heading">
@@ -537,7 +512,7 @@
 <div class="section-heading">
 <h2>Provider health</h2>
 </div>
-<p class="muted">What each source has answered and the next step when it cannot. Credentials are never displayed here; only whether one is configured.</p>
+
 <div id="provider-health" class="provider-grid">
 </div>
 <div id="provider-status">
@@ -557,9 +532,10 @@
 <button id="refresh-research" class="secondary" disabled>Refresh inputs &amp; run review</button>
 </div>
 </section>
+<section class="panel"><h2>Account names</h2><div id="account-name-editor"></div></section>
 <section class="panel">
-<h2>Supplement account facts</h2>
-<p class="muted">Record verified NAV, cash, currency and snapshot date. An unresolved NAV residual is not cash.</p>
+<h2>Account facts</h2>
+
 <div id="supplemental-forms">
 </div>
 <details>
@@ -646,7 +622,7 @@
 </div>
 </section>
 </section>
-<footer>Portfolio Review · Stored locally · Conditional research with source and assumption records.</footer>
+
 </main>
 <dialog id="draft-dialog" aria-labelledby="draft-dialog-title">
 <h2 id="draft-dialog-title">Keep your current edits?</h2>

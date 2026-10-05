@@ -90,8 +90,8 @@ test('a fresh Sunday collection appears on Overview without a saved review', {ti
     assert.equal($('draft-state').textContent, 'Empty');
     assert.equal(accountCards($), 2);
     assert.match($('current-dates').textContent, /Collected/);
-    assert.match($('current-dates').textContent, /unknown/);
-    assert.match($('current-dates').textContent, /2026-09-11/);
+    assert.match($('current-dates').title, /unknown/);
+    assert.match($('current-dates').title, /2026-09-11/);
     assert.match($('current-totals').textContent, /USD/);
     assert.match($('current-totals').textContent, /unlabeled/);
     assert.match($('analysis-caption').textContent, /No completed analysis/);
@@ -187,7 +187,7 @@ test('a holding on a known exchange raises no currency question', {timeout: 1200
   await until(() => coveredMetric($)?.querySelector('.metric-value')?.textContent === '48.5',
     'both accounts rolled up to USD without an attestation');
   assert.match(unlabeledCard($).textContent, /USD 24.25/);
-  assert.match(coveredMetric($).querySelector('.metric-note').textContent, /not reconciled NAV/);
+  assert.match(coveredMetric($).title, /not reconciled NAV/,'the valuation basis is accessible without repeating it on every metric');
   assert.equal($('research-error').hidden, true, $('research-error').textContent);
   assert.deepEqual(runtimeErrors, []);
 });
@@ -229,11 +229,12 @@ test('the currency warning behind the presented total survives the issue cap',
   const listed = [...panel.querySelectorAll(':scope > .issue-list > li')].map(node => node.textContent);
   assert.ok(listed.includes(MISMATCH_MESSAGE),
     `The currency warning is not listed on the panel: ${listed.join(' | ')}`);
-  assert.equal(listed.length, 9, 'the cap still holds for the collector issues themselves');
+  assert.equal(listed.length, 1, 'only the warning qualifying the displayed value stays expanded');
+  assert.equal(panel.querySelector('details .issue-list').children.length,8,'routine diagnostics are available without crowding the portfolio');
 
   // The two issues past the cap stay on the page and can be opened, rather than being
   // counted and thrown away.
-  const overflow = panel.querySelector('details');
+  const overflow = [...panel.querySelectorAll('details')].find(node=>node.querySelector('summary')?.textContent==='+2 more');
   assert.ok(overflow, 'The issues past the cap are dropped instead of being made reachable');
   assert.equal(overflow.querySelector('summary').textContent, '+2 more');
   assert.match(overflow.textContent, /Synthetic collector error 9\./);
@@ -403,7 +404,7 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
     assert.equal($('cancel-workflow').hidden, true);
     assert.doesNotMatch($('analysis-caption').textContent, /No completed analysis/);
     assert.match($('analysis-caption').textContent, /Last completed analysis/);
-    assert.match($('analysis-caption').textContent, /operation complete/,
+    assert.match($('technical-context').textContent, /complete/,
       'the caption names the operation behind the loaded run');
     assert.equal((await workflows()).length, 1, 'exactly one operation was created');
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
@@ -420,7 +421,7 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
     const [first] = $('research-run').options;
     assert.equal(first.value, 'current');
     assert.match(first.textContent, /Current holdings/);
-    assert.match(first.textContent, /no analysis/i);
+    assert.equal(first.textContent,'Current holdings','the concise selector still represents the unanalyzed collection');
     const analysed = [...window.document.querySelectorAll('#page-overview [data-analysis]')];
     assert.ok(analysed.length >= 4, `Overview needs analysed sections: ${analysed.length}`);
     for (const node of analysed) assert.equal(node.hidden, false, 'a loaded run shows its analysis');
@@ -440,8 +441,8 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
       for (const node of sections) {
         assert.equal(node.hidden, true, `${name} still shows a run the selector withdrew`);
       }
-      assert.match($(`page-${name}`).querySelector('[data-analysis-note]').textContent,
-        /No completed analysis/, `${name} states which of the two dated views is on screen`);
+      assert.equal($('research-run').value,'current',`${name} follows the shared current-holdings selector`);
+      assert.equal($(`page-${name}`).querySelector('[data-analysis-note]')?.hidden ?? true,true,`${name} does not repeat context prose`);
     }
     window.document.querySelector('[data-page="overview"]').click();
 
@@ -450,8 +451,8 @@ test('one Update & analyze operation collects, analyzes and publishes a usable r
     assert.equal($('research-run').value, published);
     assert.match($('analysis-caption').textContent, /Last completed analysis/);
     for (const name of ['holdings', 'research', 'scenarios', 'review']) {
-      assert.match($(`page-${name}`).querySelector('[data-analysis-note]').textContent,
-        new RegExp(published.slice(0, 8)), `${name} names the run its numbers came from`);
+      assert.match($('technical-context').textContent,new RegExp(published.slice(0,8)),`${name} shares the loaded review context`);
+      assert.equal($(`page-${name}`).querySelector('[data-analysis-note]')?.hidden ?? true,true,`${name} keeps identifiers in shared Details`);
     }
     assert.equal($('draft-state').textContent, 'Saved', 'switching views retains the saved draft');
     assert.equal($('research-error').hidden, true, $('research-error').textContent);

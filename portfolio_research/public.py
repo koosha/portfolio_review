@@ -38,6 +38,9 @@ RESULT_FIELDS = {
     "universe",
     "exclusions",
     "priorities",
+    "accounts",
+    "account_labels",
+    "holding_analysis",
 }
 SOURCE_FIELDS = {"source_id", "provider", "received_at", "available_at", "sha256", "rows", "status"}
 # The only hosts a published locator may point at. A provider-supplied URL is data: an
@@ -153,7 +156,10 @@ def public_sources(sources):
     return records
 
 
-def public_result(result):
+def public_result(result, bundle=None, *, aliases=None):
+    from .account_labels import with_account_labels
+
+    result = with_account_labels(result, bundle, aliases=aliases)
     selected = {key: deepcopy(result[key]) for key in RESULT_FIELDS if key in result}
     selected["sources"] = public_sources(result.get("sources", []))
     selected["schema_version"] = 1
