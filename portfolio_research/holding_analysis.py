@@ -23,6 +23,68 @@ METHOD_VERSION = "holding-scenarios-1"
 MAX_GROWTH = 0.30
 EARNINGS_SENSITIVITY = 0.5
 MULTIPLE_SENSITIVITY = 0.5
+GAP_STEPS = {
+    "A dated price with a verified quote currency is required.": (
+        "price_missing",
+        "Refresh price data",
+        "data",
+    ),
+    "Refresh the stale price before comparing scenarios.": (
+        "price_stale",
+        "Refresh price data",
+        "data",
+    ),
+    "Refresh the stale financial statements before valuing earnings.": (
+        "statements_stale",
+        "Refresh company data",
+        "data",
+    ),
+    "Statement EPS and the quoted price use different currencies.": (
+        "currency_mismatch",
+        "Check currencies",
+        "data",
+    ),
+    "No comparable statement EPS or currency-matched consensus is available.": (
+        "earnings_missing",
+        "Refresh company data",
+        "data",
+    ),
+    "Positive, comparable earnings are required for a P/E scenario.": (
+        "earnings_not_applicable",
+        "Choose another model",
+        "research",
+    ),
+    "Retained earnings and price sources are required.": (
+        "sources_missing",
+        "Refresh company data",
+        "data",
+    ),
+    "Resolve this holding's listing and issuer identity before valuing it.": (
+        "identity_unresolved",
+        "Resolve holding",
+        "data",
+    ),
+    "A company earnings model does not apply to this instrument.": (
+        "instrument_not_applicable",
+        "Set instrument scenarios",
+        "scenarios",
+    ),
+    "Company models support 6, 12, or 18 month horizons.": (
+        "horizon_unsupported",
+        "Change the horizon",
+        "settings",
+    ),
+    "Company defaults require Adverse, Central, and Favorable shared states.": (
+        "states_missing",
+        "Set shared states",
+        "scenarios",
+    ),
+    "Update this company model to the selected analysis horizon.": (
+        "horizon_mismatch",
+        "Update model horizon",
+        "research",
+    ),
+}
 
 
 def _number(value):
@@ -574,6 +636,22 @@ def _dcf_cases(payload):
     return rows
 
 
+def _next_step(action, reason, model, payload):
+    if action != "Review":
+        code, label, section = "adjust_assumptions", "Edit assumptions", "research"
+    elif model == "fcff_dcf":
+        code, label, section = "horizon_scenarios_missing", "Set horizon scenarios", "research"
+    elif reason == "Select a benchmark with matching scenarios to compare this holding.":
+        code, label, section = "benchmark_missing", "Choose a benchmark", "settings"
+    elif reason in GAP_STEPS:
+        code, label, section = GAP_STEPS[reason]
+    elif payload:
+        code, label, section = "model_inputs_missing", "Complete assumptions", "research"
+    else:
+        code, label, section = "inputs_incomplete", "Check inputs", "data"
+    return {"code": code, "label": label, "section": section}
+
+
 def build_holding_analysis(result, bundle, config, workspace):
     """One calculation/action record per holding; no side effects or provider calls."""
     securities = _frame(bundle, "securities")
@@ -774,6 +852,7 @@ def build_holding_analysis(result, bundle, config, workspace):
             "market_value": sum(_number(p.get("market_value")) or 0 for p in positions),
             "action": action,
             "reason": reason,
+            "next_step": _next_step(action, reason, model, payload),
             "status": "ready" if value is not None and not gap else "unavailable",
             "model": model,
             "source_type": source_type,

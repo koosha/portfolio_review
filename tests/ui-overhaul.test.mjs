@@ -21,7 +21,7 @@ async function fixture(t) {
   const dom=new JSDOM(html,{url:'http://localhost',runScripts:'outside-only',pretendToBeVisual:true});t.after(()=>dom.window.close());
   dom.window.__stateFunctions=stateFunctions;dom.window.scrollTo=()=>{};dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
   const code=source.replace(/import\s*\{([\s\S]*?)\}\s*from\s*['"]\.\/research-state\.js['"];?/,'const {$1}=window.__stateFunctions;').replace(/initialize\(\);\s*$/,'');
-  dom.window.eval(`(()=>{${code}\nwindow.uiTest={load(value){result=value;view='saved';service={config:${JSON.stringify(config)},runs:[{run_id:value.run_id,as_of:value.metadata.as_of}],mode:'offline'};draft=newDraft(value.run_id,service.config,{});saved={result:value,config:service.config};renderAll();},draft(){return clone(draft);},table,renderCurrent(value){current=value;renderCurrent();},renderExceptionForms(value){exceptionState=value;renderExceptionForms();}};})();`);
+  dom.window.eval(`(()=>{${code}\nwindow.uiTest={load(value,context={}){result=value;view='saved';service={capabilities:{holding_analysis:1},config:${JSON.stringify(config)},runs:[{run_id:value.run_id,as_of:value.metadata.as_of}],mode:'offline',...context};draft=newDraft(value.run_id,service.config,{});saved={result:value,config:service.config};renderAll();},draft(){return clone(draft);},table,renderCurrent(value){current=value;renderCurrent();},renderExceptionForms(value){exceptionState=value;renderExceptionForms();}};})();`);
   return {window:dom.window,$:id=>dom.window.document.getElementById(id),ui:dom.window.uiTest};
 }
 test('research opens with three populated scenario inputs and per-holding action',async t=>{
@@ -68,4 +68,49 @@ test('empty attention cards withdraw and currency assumptions stay concise',asyn
   assert.equal($('current-value-currency').querySelector('details').open,false);
   assert.match($('current-value-currency').textContent,/no currency supplied/,'the full basis remains accessible');
   assert.doesNotMatch($('current-dates').textContent,/Generated|Source valuation/);
+});
+test('a legacy saved review missing the analysis contract requests an update, never a placeholder action',async t=>{
+  const {$,ui}=await fixture(t);const legacy=sample();delete legacy.holding_analysis;
+  ui.load(legacy);
+  assert.equal($('holding-analysis').querySelector('.action-badge').textContent,'Update analysis');
+  assert.match($('holding-analysis-message').textContent,/saved review has no holding analysis/);
+  assert.match($('holding-analysis').textContent,/Why \/ next step/);
+  assert.match($('holding-analysis').textContent,/Update & analyze/);
+  assert.match($('company-data-basis').textContent,/saved review has no holding analysis/);
+  assert.equal($('company-data-basis').querySelectorAll('.evidence-chip').length,0,'an absent contract does not claim evidence is missing');
+  assert.doesNotMatch($('holding-analysis').textContent,/Review|Needs data/);
+});
+test('new static assets on an old running app explicitly require restart',async t=>{
+  const {$,ui}=await fixture(t);const legacy=sample();delete legacy.holding_analysis;
+  ui.load(legacy,{capabilities:{},backend_version:'old'});
+  assert.equal($('holding-analysis').querySelector('.action-badge').textContent,'Restart app');
+  assert.match($('holding-analysis-message').textContent,/running app does not support holding analysis/);
+  assert.match($('company-data-basis').textContent,/Restart Portfolio Review, then reload/);
+  assert.doesNotMatch($('holding-analysis').textContent,/Needs data|Update & analyze/);
+});
+test('real input gaps show the concrete reason and a visible next step',async t=>{
+  const {window,$,ui}=await fixture(t);const missing=sample();
+  Object.assign(missing.holding_analysis[0],{action:'Review',model:'unavailable',status:'unavailable',reason:'No comparable statement EPS or currency-matched consensus is available.',valuation_input:null,scenarios:[],next_step:{label:'Check data',section:'data'}});
+  ui.load(missing);
+  assert.equal($('holding-analysis').querySelector('.action-badge').textContent,'Review');
+  assert.ok($('holding-analysis-message').hidden,'an input gap does not become an engine compatibility error');
+  assert.match($('holding-analysis').querySelector('.analysis-reason').textContent,/No comparable statement EPS/);
+  assert.match($('company-data-basis').textContent,/No comparable statement EPS/);
+  $('holding-analysis').querySelector('.analysis-reason button').click();
+  assert.equal(window.document.querySelector('[aria-current="page"]').dataset.page,'data');
+  assert.doesNotMatch($('holding-analysis').textContent,/Restart app/);
+});
+test('read-only analysis computed from legacy saved inputs is identified with model details',async t=>{
+  const {$,ui}=await fixture(t);const derived=sample();
+  derived.metadata.computed_views={holding_analysis:{version:1,method_version:'holding-scenarios-1',status:'computed',source:'frozen_saved_inputs',base_run_id:derived.run_id,archive_unchanged:true}};
+  ui.load(derived);
+  assert.equal($('holding-analysis').querySelector('.action-badge').textContent,'Buy');
+  assert.match($('holding-analysis-message').textContent,/Research calculated from saved inputs/);
+  assert.equal($('holding-analysis-message').querySelector('details').open,false);
+  assert.match($('company-data-basis').textContent,/holding-scenarios-1/);
+  assert.match($('company-data-basis').textContent,/frozen_saved_inputs/);
+  derived.metadata.computed_views.holding_analysis={...derived.metadata.computed_views.holding_analysis,status:'unavailable',reason:'The saved review has no retained source bundle; run Update & analyze.'};
+  ui.load(derived);
+  assert.equal($('holding-analysis').querySelector('.action-badge').textContent,'Update analysis','an incompatible archive does not retain a misleading action');
+  assert.match($('holding-analysis-message').textContent,/no retained source bundle/);
 });

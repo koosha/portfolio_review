@@ -1917,3 +1917,12 @@ td input {font-size:12px!important;padding:7px 9px!important;min-height:34px;max
 .account-subtotals>details {font-size:10px;margin:4px 0 0}
 .account-subtotals>details>summary {font-size:10px;padding:2px 0}
 .sort-button:disabled {opacity:1;color:#53685a;cursor:default}
+.analysis-notice {display:flex;gap:9px 13px;flex-wrap:wrap;align-items:center;padding:11px 13px;margin-top:13px;background:#faf5e8;border:1px solid #e9dbbc;border-radius:7px;font-size:12px;color:#735725}
+.analysis-notice[hidden] {display:none}
+.analysis-notice>strong {font-weight:600}
+.analysis-notice>span {flex:1 1 300px}
+.analysis-notice .text-button {font-size:11px;min-height:28px}
+.analysis-reason {display:flex;flex-direction:column;gap:3px;max-width:310px;min-width:160px;font-size:11px;line-height:1.5;color:#5b6e60}
+.analysis-reason .text-button {font-size:10px;min-height:24px;padding:0;align-self:flex-start}
+.data-basis>.analysis-reason {max-width:900px;margin-top:10px}
+.action-badge.restart-app,.action-badge.update-analysis,.action-badge.not-analyzed {background:#f3eee1;color:#785b29;white-space:normal;text-align:center;max-width:105px}

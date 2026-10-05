@@ -42,9 +42,53 @@ function shortDate(value) {
   return Number.isNaN(date.getTime())?String(value):date.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
 }
 function holdingAnalysis(id) { return (result?.holding_analysis || []).find(row=>row.security_id===id); }
+function holdingAnalysisAvailability() {
+  const computed=result?.metadata?.computed_views?.holding_analysis;
+  if(computed?.status==='unavailable')return {status:'legacy_inputs_unavailable',label:'Update analysis',reason:computed.reason || 'This saved review lacks the retained inputs needed for holding analysis. Update & analyze creates a complete review.',next_step:{label:'Update & analyze',operation:'update'}};
+  if(Array.isArray(result?.holding_analysis))return {status:'available'};
+  if(!result)return {status:'no_review',label:'Not analyzed',reason:'Run Update & analyze to create your first review.',next_step:{label:'Update & analyze',operation:'update'}};
+  if(Number(service.capabilities?.holding_analysis)>=1)return {status:'missing_run_analysis',label:'Update analysis',reason:'This saved review has no holding analysis. Update & analyze builds the scenarios and actions.',next_step:{label:'Update & analyze',operation:'update'}};
+  return {status:'backend_update_required',label:'Restart app',reason:'The running app does not support holding analysis. Restart Portfolio Review, then reload this page.',next_step:{label:'Reload page',operation:'reload'}};
+}
+function holdingDisplay(id,holding=securityRow(id)) {
+  const row=holdingAnalysis(id),availability=holdingAnalysisAvailability();if(row && availability.status==='available')return row;
+  const held=(result?.holdings || []).some(item=>item.security_id===id);
+  const issue=availability.status==='available'
+    ?held?{status:'missing_holding_analysis',label:'Update analysis',reason:'No analysis was computed for this holding in the saved review.',next_step:{label:'Update & analyze',operation:'update'}}
+      :{status:'candidate',label:'Candidate',reason:'This security is outside the current holdings; no holding action was computed.'}
+    :availability;
+  return {security_id:id,ticker:holding.ticker || holding.symbol || id,name:holding.name,action:null,display_action:issue.label,
+    status:issue.status,reason:issue.reason,next_step:issue.next_step,analysis_missing:true,model:null,scenarios:[]};
+}
+function analysisNextStep(row) {
+  if(row?.next_step)return row.next_step;
+  if(row?.status==='ready' || row?.status==='candidate' || !row)return null;
+  if(row.model==='fcff_dcf')return {label:'Review horizon scenarios',section:'scenarios'};
+  if(row.model==='eps_multiple')return {label:'Review assumptions',section:'research'};
+  if(row.model==='shared_state')return {label:'Review company evidence',section:'research',tab:'evidence'};
+  return {label:'Check data',section:'data'};
+}
+function nextStepButton(row) {
+  const step=analysisNextStep(row);if(!step)return null;
+  return button(step.label || 'View details',async()=>{
+    if(step.operation==='update'){await startWorkflow();return;}
+    if(step.operation==='reload'){location.reload();return;}
+    if(step.section==='research'){securityId=row.security_id;renderCompany();navigate('research');if(step.tab)document.querySelector(`[data-company-tab="${step.tab}"]`)?.click();$('company-heading').scrollIntoView({behavior:'smooth',block:'start'});return;}
+    navigate(pages.includes(step.section)?step.section:'data');
+  },'text-button');
+}
+function analysisReason(row,{compact=false}={}) {
+  const node=el('div',null,'analysis-reason');
+  if(compact && row.status==='ready' && ['Buy','Sell','Hold'].includes(row.action)){
+    const brief=row.action==='Buy'?'Above hurdle':row.action==='Sell'?'Below hurdle':row.model==='shared_state'?'Market scenarios':'Within hurdle';
+    node.append(el('span',brief));node.title=row.reason || brief;return node;
+  }
+  node.append(el('span',row.reason || 'No reason was supplied by the analysis engine.'));
+  const next=nextStepButton(row);if(next)node.append(next);return node;
+}
 function actionBadge(row) {
-  const action=row?.action || 'Review', node=el('span',action,`action-badge ${action.toLowerCase()}`);
-  node.title=row?.reason || 'More evidence is needed.';return node;
+  const action=row?.action || row?.display_action || 'Not analyzed', node=el('span',action,`action-badge ${action.toLowerCase().replaceAll(' ','-')}`);
+  node.title=row?.reason || 'No holding action was computed.';return node;
 }
 function when(value) {
   if (!value) return 'Never';
@@ -861,7 +905,8 @@ function renderHoldings() {
 }
 function renderAnalysisFreshness() {
   const stale=draft.dirty && !previewReady(draft);
-  $('holding-analysis-state').textContent=stale?'Recalculate to update':`${horizon()}-month scenarios`;
+  const availability=holdingAnalysisAvailability();
+  $('holding-analysis-state').textContent=availability.status!=='available'?availability.label:stale?'Recalculate to update':`${horizon()}-month scenarios`;
   $('holding-analysis-state').className=`badge ${stale?'dirty':''}`;
   $('holding-analysis').classList.toggle('stale-result',stale);
   $('company-status').title=stale?'Assumptions changed; the action is from the previous calculation.':'Based on the displayed scenario inputs.';
@@ -873,20 +918,27 @@ function renderHoldingAnalysis() {
     if(account && row.account_id!==account)continue;
     if(row.security_id && row.security_id!=='CASH')held.set(row.security_id,row);
   }
-  const analysis=result?.holding_analysis || [];
   const rows=[...held].map(([id,holding])=>{
-    const row=analysis.find(item=>item.security_id===id) || {security_id:id,ticker:holding.ticker || id,name:holding.name,action:'Review',reason:'Scenario inputs are unavailable.',status:'unavailable',scenarios:[]};
+    const row=holdingDisplay(id,holding);
     return {...row,starting_price:row.inputs?.starting_price ?? holding.price,
       ...Object.fromEntries(labels.map(label=>[label,row.scenarios?.find(item=>item.label===label)?.return_value ?? null]))};
   }).filter(row=>`${row.ticker || ''} ${row.name || ''} ${row.security_id}`.toLowerCase().includes(search));
   const openHolding=id=>{securityId=id;renderCompany();$('research-security').focus();$('company-heading').scrollIntoView({behavior:'smooth',block:'start'});};
+  const availability=holdingAnalysisAvailability(),computed=result?.metadata?.computed_views?.holding_analysis,message=$('holding-analysis-message');
+  message.hidden=availability.status==='available' && computed?.status!=='computed';
+  message.replaceChildren();
+  if(!message.hidden){
+    if(availability.status==='available')message.append(el('span','Research calculated from saved inputs.'),disclosure('Calculation details',kv(computed)));
+    else {message.append(el('strong',availability.label),el('span',availability.reason));const next=nextStepButton(availability);if(next)message.append(next);}
+  }
   replace('holding-analysis',table(rows,[
     {key:'action',label:'Action',render:(_value,row)=>actionBadge(row)},
     {key:'ticker',label:'Holding',render:(_value,row)=>{const cell=el('div',null,'holding-name');cell.append(button(row.ticker || securityLabel(row.security_id),()=>openHolding(row.security_id),'text-button'),el('small',row.name || ''));return cell;}},
     {key:'starting_price',label:'Price',render:num},
     ...labels.map(label=>({key:label,label:friendly(label),render:(value,row)=>{const scenario=row.scenarios?.find(item=>item.label===label);if(numeric(value)===null && numeric(scenario?.value_per_share)!==null){const span=el('span',money(scenario.value_per_share,row.inputs?.currency));span.title='Conditional intrinsic value per share; no horizon return is assumed.';return span;}const span=el('span',pct(value),numeric(value)<0?'negative':numeric(value)>0?'positive':'');return span;}})),
     {key:'excess_return',label:'Vs benchmark',render:pct},
-    {key:'evidence',label:'Inputs',render:(value,row)=>{const node=el('span',row.model==='eps_multiple'?'EPS × P/E':row.model==='fcff_dcf'?'DCF value':row.model==='shared_state'?'Market scenarios':'Needs data','input-basis');node.title=[value?.statements?.used?'Statements used':null,value?.estimates?.used?'Estimates used':null,value?.macro?.used?'Economic data used':'Economic data: context only',row.reason].filter(Boolean).join(' · ');return node;}},
+    {key:'evidence',label:'Inputs',render:(value,row)=>{const node=el('span',row.model==='eps_multiple'?'EPS × P/E':row.model==='fcff_dcf'?'DCF value':row.model==='shared_state'?'Market scenarios':row.analysis_missing?'Not computed':'Unavailable','input-basis');node.title=[value?.statements?.used?'Statements used':null,value?.estimates?.used?'Estimates used':null,value?.macro?.used?'Economic data used':'Economic data: context only',row.reason].filter(Boolean).join(' · ');return node;}},
+    {key:'reason',label:'Why / next step',wrap:true,render:(_value,row)=>analysisReason(row,{compact:true})},
   ]));
   $('research-horizon').value=horizon();renderAnalysisFreshness();
 }
@@ -1103,7 +1155,7 @@ function renderCompany() {
   if(!securityId){for(const id of ['eps-form','dcf-form','evidence-form'])replace(id,empty('Choose a retained security or enter its exact identifier.','Select a company'));return;}
   const security=securityRow(securityId);
   const kept=draft.workspace.valuations?.[securityId];
-  const analysis=holdingAnalysis(securityId);
+  const analysis=holdingDisplay(securityId);
   document.querySelector('[data-company-tab=eps]').textContent=analysis?.model==='shared_state'&&!kept?.eps?'Scenario returns':'EPS & multiple';
   $('company-heading').textContent=`${securityLabel(securityId)} · Assumptions`;
   $('company-status').replaceChildren(actionBadge(analysis));
@@ -1114,12 +1166,12 @@ function renderCompany() {
   replace('security-summary',summary);
   const evidence=analysis?.evidence || {};
   const cards=el('div',null,'evidence-summary');
-  for(const [key,label] of [['statements','Statements'],['estimates','Estimates'],['macro','Economic data']]) {
+  for(const [key,label] of analysis.analysis_missing?[]:[['statements','Statements'],['estimates','Estimates'],['macro','Economic data']]) {
     const input=evidence[key] || {}, state=input.used?'Used':key==='macro' && (result?.macro || []).length?'Context only':['available','ok','ready','complete'].includes(input.status)?'Available · unused':input.status==='unavailable' || !input.status?'Unavailable':friendly(input.status);
     const chip=el('span',`${label}: ${state}`,`evidence-chip ${input.used?'used':'context'}`);chip.title=input.note || (input.source_ids || []).join(', ') || `${label} ${state.toLowerCase()}`;cards.append(chip);
   }
-  replace('company-data-basis',cards,analysis?.reason?el('p',analysis.reason,'compact-note'):null,
-    disclosure('Inputs & source details',kv(analysis?.inputs || {}),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,trade_readiness:analysis?.trade_readiness?.status}),
+  replace('company-data-basis',cards,analysisReason(analysis),
+    disclosure('Inputs & source details',kv(analysis?.inputs || {}),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,method_version:analysis?.method_version || result?.metadata?.computed_views?.holding_analysis?.method_version,calculation_source:result?.metadata?.computed_views?.holding_analysis?.source || 'saved_review',trade_readiness:analysis?.trade_readiness?.status}),
       listIssues(analysis?.trade_readiness?.reasons || [],'No additional trade readiness information.'),
       autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),
       evidence.macro?.note?el('p',evidence.macro.note,'muted'):null));

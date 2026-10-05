@@ -25,6 +25,7 @@ from .calendar import REVIEW_KINDS, decision_context, review_context
 from .decisions import decision_fields, last_decision
 from .public import _clean, _safe_text, public_config, public_result, public_workspace
 from .repository import ResearchRepository
+from .saved_view import BACKEND_VERSION, CAPABILITIES, saved_holding_view
 
 _LATEST = object()  # "the stored supplemental", distinct from an explicit None.
 INPUT_KINDS = {"prices", "fundamentals", "macro", "fund_holdings", "forecasts", "universe"}
@@ -176,6 +177,8 @@ class ResearchService:
         runs = self.store.list_runs()
         return {
             "product": "Portfolio Review",
+            "backend_version": BACKEND_VERSION,
+            "capabilities": deepcopy(CAPABILITIES),
             "mode": config["data"]["mode"],
             "dataset": "Yahoo holdings"
             if self.collector
@@ -425,8 +428,9 @@ class ResearchService:
     def run(self, run_id):
         saved = self.store.load_run(run_id)
         bundle = self.store.load_bundle(run_id)
+        displayed = saved_holding_view(saved, bundle, saved["saved_config"])
         return {
-            "result": public_result(saved, bundle, aliases=self._account_aliases()),
+            "result": public_result(displayed, bundle, aliases=self._account_aliases()),
             "config": public_config(saved["saved_config"]),
             "workspace": public_workspace(bundle.get("workspace", {})),
             "previous_run_id": self._previous_run_id(saved["run_id"], saved.get("metadata", {})),
@@ -659,8 +663,9 @@ class ResearchService:
         if output and "result" in output:
             bundle = _unpack_bundle(output["bundle"])
             workspace = bundle.get("workspace", {})
+            displayed = saved_holding_view(output["result"], bundle, output["config"])
             result["output"] = {
-                "result": public_result(output["result"], bundle, aliases=self._account_aliases()),
+                "result": public_result(displayed, bundle, aliases=self._account_aliases()),
                 "config": public_config(output["config"]),
                 "workspace": public_workspace(workspace),
             }

@@ -69,6 +69,8 @@ Each holding shows whether statements and estimates actually contributed to its 
 
 Editing a company model selects it for the holding outlook. EPS models calculate horizon returns. DCF models show three intrinsic-value sensitivities and **Review**: intrinsic value alone supplies no convergence date or Buy/Sell return forecast. Switch back to EPS assumptions to compare horizon returns. Historical company defaults require receipts available at the cutoff, or explicitly identified original-filing provenance; today's normalized statements cannot become old forecasts.
 
+Older saved reviews receive a read-only holding outlook calculated from their retained inputs; the original archive stays intact, and Research identifies the derived view. A missing view is an upgrade issue, distinct from a holding with missing evidence. Restart the server after pulling Python changes. Research names the next step when it needs a restart, compatible analysis, refreshed provider data, or a completed model.
+
 Consensus is an external estimate, and news is third-party opinion. Input and calculation details remain available in expandable sections. DCF and thesis proposals require review before linking them into portfolio comparisons. Statement publication dates are assumed when no filing date exists; adjusted prices can be revised after receipt; fund snapshots may be partial and undated. No model provider is configured by default (`data.model_provider` is null), and arithmetic runs in Python. To check live public-provider coverage: `uv run python scripts/provider_smoke.py AAPL XIC.TO --fund XIC.TO`.
 
 ### New candidates
