@@ -64,6 +64,8 @@ def sample():
             {
                 "security_id": sid,
                 "period_end": "2026-06-30",
+                "period_type": "ttm",
+                "period_start": "2025-07-01",
                 "available_at": "2026-08-01",
                 "received_at": "2026-08-01",
                 "currency": "USD",

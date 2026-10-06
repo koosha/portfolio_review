@@ -236,7 +236,9 @@ def _collect(
     # quarters additionally provide diluted EPS/share units for company valuation;
     # fetching those facts does not replace the SEC fundamentals with a vendor copy.
     no_statements = fund
-    statements = None if no_statements else run("statements", market_data.statements)
+    statements = (
+        None if no_statements else run("statements", market_data.statements, timeline=timeline)
+    )
     _attempt("statements", sid, issues, _complete_trailing, statements)
     estimates = None if fund else run("estimates", market_data.estimates)
     disclosure = (
@@ -429,22 +431,18 @@ def _newest_vintage(rows, history) -> list[dict]:
 
 
 def _statement_rows(record, history) -> list[dict]:
-    """The statements the engines read: the annual periods and the trailing window.
+    """Keep quarterly history alongside distinct annual-context and TTM records.
 
-    The fundamentals frame holds one row per ``(security_id, period_end)``, so a quarter
-    would shadow the annual period that ends on the same date and a quarterly figure
-    would be read as a year. Quarterly rows build the trailing window and the brief and
-    stay out of the frame; the trailing row is the most recent annualised period.
+    Period type is part of the frame's key: a quarter cannot shadow a twelve-month
+    observation ending on the same day. Engines build or select verified TTM windows.
     """
     if record.get("sec_covered"):
         return []
     statements = record.get("statements") or {}
     annual = _newest_vintage(list(statements.get("annual") or []), history)
-    # A restated quarter's earlier vintage is still kept, even though the quarterly rows
-    # themselves never enter the frame.
-    _newest_vintage(list(statements.get("quarterly") or []), history)
+    quarterly = _newest_vintage(list(statements.get("quarterly") or []), history)
     trailing = statements.get("ttm")
-    return [*annual, *([trailing] if isinstance(trailing, dict) else [])]
+    return [*annual, *quarterly, *([trailing] if isinstance(trailing, dict) else [])]
 
 
 def _frames(records, bundle) -> dict:

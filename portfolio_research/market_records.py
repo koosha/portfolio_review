@@ -165,6 +165,8 @@ def _statement_row(sid, period_end, statements_set, *, context):
         "security_id": sid,
         "period_end": period_end,
         "period_type": context["period_type"],
+        "period_start": context.get("period_starts", {}).get(period_end),
+        "ttm_quarters": None,
         "available_at": stamp,
         "availability_basis": basis,
         "received_at": context["received_at"],
@@ -175,6 +177,7 @@ def _statement_row(sid, period_end, statements_set, *, context):
         "earnings_definition": "common_shareholders" if COMMON_LINE in income else None,
         "capex": capex,
         "assets_begin": context["assets_begin"].get(period_end),
+        "assets_begin_period_end": context.get("previous_periods", {}).get(period_end),
         "data_note": "; ".join(note for note in (capex_note, working_note) if note) or None,
     }
     for field, line in INCOME_LINES.items():
@@ -201,6 +204,18 @@ def _statement_rows(sid, payload, period_type, *, received_at, source_id, lag_da
         "assets_begin": _assets_begin(statements_set.get("balance") or {}),
     }
     periods = sorted(statements_set["income"], reverse=True)
+    if period_type == "quarterly":
+        known_periods = sorted(statements_set["income"])
+        previous = {
+            current: before
+            for before, current in zip(known_periods, known_periods[1:])
+            if 60 <= (date.fromisoformat(current) - date.fromisoformat(before)).days <= 100
+        }
+        context["previous_periods"] = previous
+        context["period_starts"] = {
+            current: (date.fromisoformat(before) + timedelta(days=1)).isoformat()
+            for current, before in previous.items()
+        }
     return [_statement_row(sid, period, statements_set, context=context) for period in periods]
 
 
@@ -212,8 +227,9 @@ def _ttm_row(sid, quarterly, *, issues):
     if ttm is None:
         return None
     # The window is knowable when its latest quarter was published.
+    latest = max(quarterly, key=lambda row: str(row["period_end"]))
     return {
-        **quarterly[0],
+        **latest,
         **{key: value for key, value in ttm.items() if key not in {"quarters_used", "missing"}},
         "ttm_quarters": ",".join(ttm["quarters_used"]),
         "missing_fields": ",".join(ttm["missing"]),

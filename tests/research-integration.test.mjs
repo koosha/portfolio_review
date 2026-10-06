@@ -197,7 +197,9 @@ def estimates(sid, eps):
         'revenue': {'+1y': {'avg': 5400.0, 'low': 5100.0, 'high': 5700.0}}}
 
 def trailing(sid):
-    return {'period_end': '2026-06-30', 'currency': 'USD', 'source_id': 'statements:' + sid,
+    return {'period_type': 'ttm', 'period_start': '2025-07-01', 'period_end': '2026-06-30',
+        'ttm_quarters': '2026-06-30,2026-03-31,2025-12-31,2025-09-30',
+        'currency': 'USD', 'source_id': 'statements:' + sid,
         'revenue': 5000.0, 'operating_income': 900.0, 'net_income': 600.0,
         'operating_cash_flow': 800.0, 'capex': 200.0, 'depreciation': 150.0,
         'change_working_capital': 20.0, 'tax_provision': 200.0, 'pretax_income': 800.0,
@@ -214,12 +216,17 @@ def inject(bundle, as_of):
             'instrument_type': 'equity', 'equity_type': 'ordinary_common', 'currency': 'USD',
             'price_source_id': 'prices:' + sid}
         estimate, ttm, reasons = estimates(sid, close / 18.0), trailing(sid), []
+        financial_history = {'basis': 'quarterly', 'lookback_years': 3, 'max_quarters': 12,
+            'available_quarters': 4, 'oldest_period_end': '2025-09-30',
+            'latest_period_end': '2026-06-30', 'current_ttm_quarters': ttm['ttm_quarters'].split(','),
+            'prior_ttm_quarters': [], 'historical_growth_available': False}
         proposals = {
             'eps': propose_eps_model(security, price_major=close, quote_currency='USD',
                 estimates=estimate, ttm=ttm, dividends_ttm_per_share=1.25, horizon_months=12,
-                dividends_source_id='prices:' + sid, issues=reasons),
-            'dcf': propose_dcf_inputs(security, ttm=ttm, annual_statements=[ttm],
+                dividends_source_id='prices:' + sid, financial_history=financial_history, issues=reasons),
+            'dcf': propose_dcf_inputs(security, ttm=ttm, annual_statements=[],
                 shares_outstanding=500.0, price_major=close, currency='USD', quote_currency='USD',
+                quarterly_required=True, financial_history=financial_history,
                 estimates=estimate, defaults={'discount_rate': 0.09, 'terminal_growth_rate': 0.025,
                 'projection_years': 5}, issues=reasons),
             'reasons': reasons}
@@ -235,7 +242,8 @@ def inject(bundle, as_of):
             fx_note=None, as_of=as_of, generated_at='2026-08-31T21:00:00Z', horizon_months=12)
         coverage = {'prices': 'ok', 'statements': 'ok', 'estimates': 'ok',
             'fund_disclosures': 'not_applicable', 'events': 'ok', 'profile': 'ok'}
-        research[sid] = {'brief': brief, 'proposals': proposals, 'coverage': coverage}
+        research[sid] = {'brief': brief, 'proposals': proposals, 'coverage': coverage,
+            'financial_history': financial_history}
         inputs[sid] = {'symbol': sid, 'currency': 'USD', 'quote_currency': 'USD',
             'estimates': estimate, 'fund_overview': {}, 'coverage': coverage}
     bundle['research_inputs'] = inputs

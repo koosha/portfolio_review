@@ -14,6 +14,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(data["provider_min_interval_seconds"], 0.25)
         self.assertEqual(data["provider_refresh_hours"], 20)
         self.assertEqual(data["assumed_publication_lag_days"], 90)
+        self.assertEqual(data["financial_history_years"], 3)
         self.assertIsNone(data["model_provider"])
         self.assertEqual(data["news_limit"], 20)
         self.assertEqual(DEFAULTS["data"]["market_adapter"], ADAPTER_VERSION)
@@ -31,6 +32,10 @@ class ConfigTests(unittest.TestCase):
             {"provider_timeout_seconds": 3000},
             {"provider_min_interval_seconds": -1},
             {"provider_refresh_hours": -1},
+            {"financial_history_years": 0},
+            {"financial_history_years": 4},
+            {"financial_history_years": 2.5},
+            {"financial_history_years": True},
             {"assumed_publication_lag_days": 1.5},
             {"assumed_publication_lag_days": 400},
             {"news_limit": 0},

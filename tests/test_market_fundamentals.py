@@ -1,6 +1,7 @@
 """Adapter fundamentals: statement periods, availability, restatements and consensus estimates."""
 
 import unittest
+from unittest.mock import patch
 
 from portfolio_research.market_data import ADAPTER_VERSION, estimates, statements
 from tests.support.market_data_adapter import AdapterCase, FakeTicker
@@ -45,13 +46,24 @@ class StatementTests(AdapterCase):
         self.assertEqual(quarter["earnings_definition"], "common_shareholders")
 
     def test_available_at_falls_back_to_the_assumed_publication_lag(self):
-        result = self.call(statements, "VOD.L")
+        with patch("tests.support.market_data_adapter.AS_OF", "2026-09-29"):
+            result = self.call(statements, "VOD.L")
         quarter = [row for row in result["quarterly"] if row["period_end"] == "2026-06-30"][0]
         self.assertEqual(quarter["available_at"], "2026-09-28")
         self.assertEqual(quarter["availability_basis"], "assumed_publication_lag")
         self.assertIsNone(quarter["earnings_definition"])
         self.assertIsNone(quarter["assets"])
         self.assertEqual(quarter["currency"], "GBP")
+
+    def test_a_quarter_not_yet_public_is_not_used_before_its_assumed_date(self):
+        result = self.call(statements, "VOD.L")
+        self.assertNotIn("2026-06-30", [row["period_end"] for row in result["quarterly"]])
+
+    def test_available_history_is_reported_without_padding_to_twelve_quarters(self):
+        result = self.call(statements, "AAPL")
+        self.assertEqual(result["history_window"]["maximum_quarters"], 12)
+        self.assertEqual(result["history_window"]["available_quarters"], 5)
+        self.assertEqual(len(result["quarterly"]), 5)
 
     def test_working_capital_is_stored_in_the_investment_sign(self):
         """Yahoo signs the change in working capital as a cash effect; the engines do not."""

@@ -31,6 +31,7 @@ import pandas as pd
 FRAME_COLUMNS = {
     "prices": "date security_id close adjusted_close volume currency available_at received_at source_id".split(),
     "fundamentals": (
+        "period_type period_start ttm_quarters assets_begin_period_end "
         "security_id period_end available_at received_at revenue gross_profit operating_income "
         "net_income income_common earnings_definition operating_cash_flow capex assets assets_begin debt cash currency source_id"
     ).split(),
@@ -390,9 +391,17 @@ def extract_sec_fundamentals(
     out = {
         "security_id": security_id,
         "period_end": end.date().isoformat(),
+        "period_start": (start if annual else end - pd.DateOffset(years=1) + pd.Timedelta(days=1))
+        .date()
+        .isoformat()
+        if start is not None
+        else None,
+        "period_type": "annual" if annual else "ttm",
         "available_at": anchor["_available"].date().isoformat(),
         "received_at": received_at,
         "source_id": source_id,
+        "source_policy": "original_filing",
+        "accession": accn,
         "currency": "USD",
         "provenance": {},
         "data_warnings": [],
@@ -468,6 +477,7 @@ def extract_sec_fundamentals(
             )
             if record is not None:
                 out["assets_begin"] = record["val"]
+                out["assets_begin_period_end"] = target.date().isoformat()
                 out["provenance"]["assets_begin"] = {
                     "method": "instant_ttm_start",
                     "components": [_component(record)],
@@ -606,7 +616,7 @@ def _filter_frames(bundle: dict, as_of: str, require_received: bool = False) -> 
         ),
         "fundamentals": (
             ["period_end", "available_at"],
-            ["security_id", "period_end"],
+            ["security_id", "period_end", "period_type"],
             ["available_at", "received_at"],
         ),
         "macro": (["date", "vintage_date"], ["series_id", "date"], ["vintage_date", "received_at"]),
@@ -625,6 +635,8 @@ def _filter_frames(bundle: dict, as_of: str, require_received: bool = False) -> 
         frame = bundle.get(name, pd.DataFrame()).copy()
         if frame.empty:
             continue
+        if name == "fundamentals" and "period_type" not in frame:
+            frame["period_type"] = None
         valid = pd.Series(True, index=frame.index)
         for column in date_cols:
             dates = available_times(frame[column])
@@ -913,19 +925,47 @@ def _enrich_sec(bundle: dict, config: dict, as_of: str) -> None:
                 bundle["sources"].append(source)
                 fetched[cik_str] = payload, received_at, source
             payload, received_at, source = fetched[cik_str]
-            result = extract_sec_fundamentals(
+            from portfolio_research.sec_statements import extract_sec_quarters
+            from portfolio_research.statements import quarter_window_start, ttm_from_quarters
+
+            years = config["data"].get("financial_history_years", 3)
+            context = extract_sec_fundamentals(
                 payload, sec["security_id"], as_of, received_at, source["source_id"]
             )
-            if result is None:
+            if (
+                context is not None
+                and context["period_type"] == "annual"
+                and quarter_window_start(as_of, years) < context["period_end"]
+            ):
+                # Retain a reported annual figure as context. Quarterly consumers
+                # deliberately reject it as a substitute for four quarters.
+                rows.append(context)
+
+            quarters = extract_sec_quarters(
+                payload,
+                sec["security_id"],
+                as_of,
+                received_at,
+                source["source_id"],
+                years=years,
+            )
+            if not quarters:
                 _issue(
                     bundle,
                     "SEC_UNSUPPORTED_FACTS",
-                    f"{sec['security_id']}: no usable standard USD US-GAAP statements by {as_of}; use a reviewed statement CSV adapter.",
+                    f"{sec['security_id']}: no usable standard USD US-GAAP quarterly statements by {as_of}; use a reviewed statement CSV adapter.",
                 )
             else:
-                rows.append(result)
-                for message in result["data_warnings"]:
-                    _issue(bundle, "SEC_DATA_REVIEW", f"{sec['security_id']}: {message}")
+                rows.extend(quarters)
+                bundle.setdefault("sec_quarter_history", {})[str(sec["security_id"])] = quarters
+                trailing = ttm_from_quarters(
+                    quarters, issues=bundle["issues"], security_id=sec["security_id"]
+                )
+                if trailing is not None:
+                    rows.append(trailing)
+                for quarter in quarters:
+                    for message in quarter["data_warnings"]:
+                        _issue(bundle, "SEC_DATA_REVIEW", f"{sec['security_id']}: {message}")
         except Exception as exc:
             _issue(
                 bundle,

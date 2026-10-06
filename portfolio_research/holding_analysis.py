@@ -20,7 +20,7 @@ from .statements import share_units, split_adjust_dividends
 from .valuation import LABELS, calculate_dcf, calculate_eps
 from .valuation_basis import estimate_currency, listing_ratio, translate_per_share
 
-METHOD_VERSION = "holding-scenarios-2"
+METHOD_VERSION = "holding-scenarios-3"
 MAX_GROWTH = 0.30
 EARNINGS_SENSITIVITY = 0.5
 MULTIPLE_SENSITIVITY = 0.5
@@ -128,7 +128,87 @@ def _currency(value):
 
 
 def _sources(*records):
-    return sorted({str(row["source_id"]) for row in records if row and row.get("source_id")})
+    sources = set()
+    for row in records:
+        if not row:
+            continue
+        lineage = row.get("source_ids")
+        lineage = lineage if isinstance(lineage, (list, tuple)) else []
+        sources.update(
+            source
+            for source in [row.get("source_id"), *lineage]
+            if isinstance(source, str) and source
+        )
+    return sorted(sources)
+
+
+def _quarter_periods(row):
+    periods = (row or {}).get("quarters_used")
+    if not isinstance(periods, (list, tuple)):
+        periods = str((row or {}).get("ttm_quarters") or "").split(",")
+    return [str(period)[:10] for period in periods if period]
+
+
+def _historical_growth(quarters):
+    """Comparable quarter-derived common earnings, not an annual-report proxy."""
+    from .statements import ttm_from_quarters
+
+    quarters = quarters[:8]
+    if len(quarters) != 8 or not ttm_from_quarters(quarters) or not ttm_from_quarters(quarters[4:]):
+        return None
+    periods = [pd.Timestamp(row["period_end"]) for row in quarters]
+    currencies = {_currency(row.get("currency")) for row in quarters}
+    definitions = {row.get("earnings_definition") for row in quarters}
+    units = {row.get("monetary_unit") for row in quarters}
+    values = [_number(row.get("income_common")) for row in quarters]
+    before = _number(sum(values[4:])) if all(value is not None for value in values[4:]) else None
+    now = _number(sum(values[:4])) if all(value is not None for value in values[:4]) else None
+    if (
+        before is not None
+        and before > 0
+        and now is not None
+        and now > 0
+        and len(currencies) == 1
+        and None not in currencies
+        and len(definitions) == 1
+        and definitions <= {None, "common_shareholders"}
+        and len(units) == 1
+        and len(set(periods)) == 8
+        and all(60 <= (newer - older).days <= 100 for newer, older in zip(periods, periods[1:]))
+        and 330 <= (periods[0] - periods[4]).days <= 400
+        and all(row.get("source_id") or row.get("source_ids") for row in quarters)
+    ):
+        rate = _number(now / before - 1)
+        if rate is not None:
+            return min(MAX_GROWTH, max(-MAX_GROWTH, rate)), _sources(*quarters)
+    return None
+
+
+def _quarterly_history(quarters, years):
+    """Describe actual retained quarters; a missing prior window stays missing."""
+    from .statements import ttm_from_quarters
+
+    latest = ttm_from_quarters(quarters) if len(quarters) >= 4 else None
+    prior = ttm_from_quarters(quarters[4:]) if len(quarters) >= 8 else None
+    comparison = quarters[:8]
+    contiguous = len(comparison) == 8 and all(
+        60 <= (pd.Timestamp(newer["period_end"]) - pd.Timestamp(older["period_end"])).days <= 100
+        for newer, older in zip(comparison, comparison[1:])
+    )
+    return {
+        "basis": "quarterly",
+        "lookback_years": years,
+        "max_quarters": 4 * years,
+        "available_quarters": len(quarters),
+        "oldest_period_end": str(quarters[-1]["period_end"])[:10] if quarters else None,
+        "latest_period_end": str(quarters[0]["period_end"])[:10] if quarters else None,
+        "current_ttm_quarters": _quarter_periods(latest),
+        "prior_ttm_quarters": _quarter_periods(prior) if contiguous else [],
+        "growth_requirement": "eight_contiguous_quarters",
+        "historical_growth_available": bool(
+            latest and prior and contiguous and _historical_growth(quarters)
+        ),
+    }
 
 
 def _eligible(rows, bundle, config, date_column="period_end"):
@@ -164,7 +244,7 @@ def _eligible(rows, bundle, config, date_column="period_end"):
             axis=1,
         )
         eligible = eligible.loc[known | original]
-    return eligible.to_dict("records")
+    return json_safe(eligible.to_dict("records"))
 
 
 def _latest(rows):
@@ -206,15 +286,25 @@ def _estimate(record, bundle, config):
     return record if age <= config.get("data", {}).get("max_forecast_age_days", 45) else None
 
 
-def _model_facts(sid, security, bundle, config):
-    inputs = (bundle.get("research_inputs") or {}).get(sid) or {}
-    facts = inputs.get("valuation_facts") or {}
-    statement_record = facts.get("statements") or {}
+def _statement_facts(sid, statement_record, bundle, config):
+    """One bounded quarterly view for saved holdings and fresh research proposals."""
+    from .statements import quarter_window_start, quarterly_window, ttm_from_quarters, ttm_in_window
+
     trailing = statement_record.get("ttm") or {}
-    quarters = _eligible(statement_record.get("quarterly"), bundle, config)
+    years = config.get("data", {}).get("financial_history_years", 3)
+    quarters = quarterly_window(
+        _eligible(statement_record.get("quarterly"), bundle, config),
+        as_of=bundle["as_of"],
+        years=years,
+        security_id=sid,
+        allow_untyped=True,
+    )
+    native_quarters = quarters
     annual = _eligible(statement_record.get("annual"), bundle, config)
+    floor = quarter_window_start(bundle["as_of"], years)
+    annual = [row for row in annual if str(row.get("period_end") or "")[:10] > floor]
     retained = _eligible([trailing] if trailing else [], bundle, config)
-    frame = _observed(_frame(bundle, "fundamentals"), bundle, "period_end", config=config)
+    frame = _frame(bundle, "fundamentals")
     if not frame.empty and "security_id" in frame:
         rows = _eligible(
             frame[frame.security_id.astype(str).eq(sid)].to_dict("records"), bundle, config
@@ -222,15 +312,79 @@ def _model_facts(sid, security, bundle, config):
         # SEC/native structured observations win over a provider copy when supplied.
         retained.extend(row for row in rows if row.get("period_type") == "ttm")
         annual.extend(row for row in rows if row.get("period_type") in {"annual", None})
-    trailing = _latest(retained) or _latest(annual)
+        structured_quarters = quarterly_window(
+            [row for row in rows if row.get("period_type") in {"quarter", "quarterly"}],
+            as_of=bundle["as_of"],
+            years=years,
+            security_id=sid,
+        )
+        # Keep whole sourced observations together. Filing quarters have priority
+        # over a vendor copy of the same period; fields are not stitched across
+        # accounting definitions or currencies to manufacture a complete quarter.
+        by_period = {str(row["period_end"])[:10]: row for row in quarters}
+        by_period.update({str(row["period_end"])[:10]: row for row in structured_quarters})
+        quarters = quarterly_window(
+            list(by_period.values()),
+            as_of=bundle["as_of"],
+            years=years,
+            security_id=sid,
+            allow_untyped=True,
+        )
+    derived = ttm_from_quarters(quarters) if len(quarters) >= 4 else None
+    periods = set(_quarter_periods(derived))
+    retained = [
+        row
+        for row in retained
+        if row.get("period_type") == "ttm"
+        and len(_quarter_periods(row)) == 4
+        and set(_quarter_periods(row)) == periods
+        and ttm_in_window(row, as_of=bundle["as_of"], years=years)
+    ]
+    # A current annual report does not stand in for a quarterly-derived trailing
+    # window. Original source facts stay retained; only the analytical view narrows.
+    trailing = _latest(retained) or derived or {}
+    # EPS uses a complete native quarter panel when its periods match the selected
+    # trailing window. Reporting-income growth keeps the sourced filing panel;
+    # listing EPS/share declarations are never copied onto unrelated filing facts.
+    native_eps = [row for row in native_quarters if str(row["period_end"])[:10] in periods]
+    eps_quarters = (
+        native_eps
+        if len(native_eps) == 4
+        and all(_number(row.get("diluted_eps")) is not None for row in native_eps)
+        and ttm_from_quarters(native_eps)
+        else quarters
+    )
+    return {
+        "trailing": trailing,
+        "annual": annual,
+        "quarters": quarters,
+        "eps_quarters": eps_quarters,
+        "financial_history": _quarterly_history(quarters, years),
+    }
+
+
+def _model_facts(sid, security, bundle, config):
+    inputs = (bundle.get("research_inputs") or {}).get(sid) or {}
+    facts = inputs.get("valuation_facts") or {}
+    statement_record = facts.get("statements") or {}
+    statements = _statement_facts(sid, statement_record, bundle, config)
+    trailing = statements["trailing"]
     prices = facts.get("prices") or {}
     local = _eligible(prices.get("prices"), bundle, config, "date")
     price_row = max(local, key=lambda row: str(row.get("date") or "")) if local else {}
     if not price_row:
-        frame = _observed(_frame(bundle, "prices"), bundle, "date", config=config)
+        frame = _frame(bundle, "prices")
         if not frame.empty and "security_id" in frame:
-            rows = frame[frame.security_id.astype(str).eq(sid)].sort_values("date")
+            rows = pd.DataFrame(
+                _eligible(
+                    frame[frame.security_id.astype(str).eq(sid)].to_dict("records"),
+                    bundle,
+                    config,
+                    "date",
+                )
+            )
             if not rows.empty:
+                rows = rows.sort_values("date")
                 candidate = rows.iloc[-1].to_dict()
                 # A converted close cannot be divided by unconverted statement EPS.
                 if _currency(candidate.get("currency")) == _currency(security.get("currency")):
@@ -250,9 +404,7 @@ def _model_facts(sid, security, bundle, config):
         if pd.isna(stamp) or stamp > limit:
             profile = {}
     return {
-        "trailing": trailing,
-        "annual": annual,
-        "quarters": quarters,
+        **statements,
         "price": price_row,
         "currency": _currency(currency),
         "price_currency_issue": price_currency_issue,
@@ -278,11 +430,22 @@ def _trailing_eps(facts):
     trailing = facts["trailing"]
     if not trailing:
         return None, None, []
-    quarters = sorted(facts["quarters"], key=lambda row: str(row.get("period_end")), reverse=True)
+    quarters = sorted(
+        facts.get("eps_quarters") or facts["quarters"],
+        key=lambda row: str(row.get("period_end")),
+        reverse=True,
+    )
     window = str(trailing.get("ttm_quarters") or "").split(",")
     quarters = [row for row in quarters if row.get("period_end") in window]
     values = [_number(row.get("diluted_eps")) for row in quarters]
     if len(quarters) == 4 and all(value is not None for value in values):
+        from .statements import ttm_from_quarters
+
+        if not ttm_from_quarters(quarters):
+            facts["earnings_issue"] = (
+                "Statement EPS requires four distinct, nonoverlapping fiscal quarters."
+            )
+            return None, None, []
         periods = [pd.Timestamp(row["period_end"]) for row in quarters]
         if len(set(periods)) != 4 or any(
             not 60 <= (newer - older).days <= 100 for newer, older in zip(periods, periods[1:])
@@ -322,26 +485,6 @@ def _trailing_eps(facts):
             "four_quarter_diluted_eps",
             _sources(*quarters),
         )
-    if trailing.get("period_type") == "annual" and _number(trailing.get("diluted_eps")) is not None:
-        facts["earnings_per_share_basis"] = trailing.get("per_share_basis")
-        facts["earnings_currency"] = trailing.get("currency") or facts["statement_currency"]
-        splits = [
-            row
-            for row in facts["actions"]
-            if row.get("kind") == "split"
-            and str(row.get("date") or "") > str(trailing.get("period_end"))
-        ]
-        share_basis = trailing.get("eps_share_basis")
-        if splits and share_basis not in {"current_share_terms", "original_share_terms"}:
-            facts["earnings_issue"] = (
-                "Annual EPS precedes a split with an undeclared adjustment basis."
-            )
-            return None, None, []
-        adjusted = split_adjust_dividends(
-            [{"date": trailing["period_end"], "value": trailing["diluted_eps"]}],
-            splits if share_basis == "original_share_terms" else [],
-        )
-        return adjusted[0]["value"], "annual_diluted_eps", _sources(trailing)
     income = _number(trailing.get("income_common"))
     statement_shares = _number(trailing.get("diluted_shares"))
     profile = facts["profile"]
@@ -383,25 +526,10 @@ def _growth(facts):
             "consensus_year_to_year",
             _sources(estimates),
         )
-    annual = sorted(facts["annual"], key=lambda row: str(row.get("period_end")), reverse=True)
-    if len(annual) >= 2:
-        first, second = annual[:2]
-        dates = [pd.Timestamp(row["period_end"]) for row in (first, second)]
-        before, now = _number(second.get("income_common")), _number(first.get("income_common"))
-        if (
-            before is not None
-            and before > 0
-            and now is not None
-            and now > 0
-            and _currency(first.get("currency")) is not None
-            and _currency(first.get("currency")) == _currency(second.get("currency"))
-            and 330 <= (dates[0] - dates[1]).days <= 400
-        ):
-            return (
-                min(MAX_GROWTH, max(-MAX_GROWTH, now / before - 1)),
-                "reported_annual_common_earnings_growth",
-                _sources(first, second),
-            )
+    historical = _historical_growth(facts["quarters"])
+    if historical:
+        rate, sources = historical
+        return rate, "reported_quarterly_ttm_common_earnings_growth", sources
     return 0.0, "flat_earnings_assumption", []
 
 
@@ -572,6 +700,7 @@ def automatic_eps(sid, security, bundle, config):
                 "earnings_basis": eps_basis,
                 "earnings_bridge": earnings_bridge,
                 "growth_basis": growth_basis,
+                "financial_history": facts["financial_history"],
                 "growth_convention": (
                     "consensus_growth_applied_to_statement_eps_draft_proxy"
                     if convention == "trailing" and growth_basis.startswith("consensus")
@@ -650,6 +779,36 @@ def _frozen_proposal(sid, security, bundle, config):
     if _currency(source.get("currency")) != _currency(security.get("currency")):
         return None
     meta = source.get("proposal_meta") or {}
+    if source.get("eps_convention") == "trailing":
+        from .statements import ttm_in_window
+
+        history = (meta.get("inputs") or {}).get("financial_history") or meta.get(
+            "financial_history"
+        )
+        if not isinstance(history, dict) or history.get("basis") != "quarterly":
+            # Forward consensus remains independent evidence. Older automatic
+            # trailing/annual drafts cannot claim the new quarterly policy.
+            return None
+        years = config.get("data", {}).get("financial_history_years", 3)
+        declared = history.get("lookback_years")
+        periods = history.get("current_ttm_quarters")
+        if (
+            isinstance(declared, bool)
+            or not isinstance(declared, int)
+            or not 1 <= declared <= years
+            or not isinstance(periods, list)
+            or len(periods) != 4
+            or not ttm_in_window(
+                {
+                    "period_type": "ttm",
+                    "period_end": history.get("latest_period_end"),
+                    "quarters_used": periods,
+                },
+                as_of=bundle["as_of"],
+                years=years,
+            )
+        ):
+            return None
     if not meta.get("evidence") or not meta["evidence"].get("starting_price"):
         return None
     estimates = ((bundle.get("research_inputs") or {}).get(sid) or {}).get("estimates")
@@ -1061,6 +1220,12 @@ def build_holding_analysis(result, bundle, config, workspace):
             "dcf_valuation_input": dcf_payload,
             "intrinsic_value_gap": intrinsic_gap,
             "inputs": inputs,
+            "financial_history": inputs.get("financial_history")
+            or (
+                _model_facts(sid, security, bundle, config)["financial_history"]
+                if source_type != "user_assumption"
+                else None
+            ),
             "evidence": {
                 "statements": {
                     "used": bool(inputs.get("statements_used")),

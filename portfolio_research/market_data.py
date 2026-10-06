@@ -276,7 +276,9 @@ def price_history(config, security, *, refresh, issues, as_of, force=False) -> d
     }
 
 
-def statements(config, security, *, refresh, issues, as_of, force=False) -> dict | None:
+def statements(
+    config, security, *, refresh, issues, as_of, force=False, timeline=None
+) -> dict | None:
     """Annual, quarterly and trailing-twelve-month fundamentals for one security."""
     obtained = _obtain(
         config,
@@ -295,6 +297,18 @@ def statements(config, security, *, refresh, issues, as_of, force=False) -> dict
     shared = {"received_at": received_at, "source_id": source["source_id"], "lag_days": lag_days}
     annual = _statement_rows(sid, payload, "annual", **shared)
     quarterly = _statement_rows(sid, payload, "quarterly", **shared)
+    from .calendar import bundle_cutoff
+    from .statements import quarter_window_start, quarterly_window
+
+    years = config["data"].get("financial_history_years", 3)
+    quarterly = quarterly_window(
+        quarterly,
+        as_of=as_of,
+        years=years,
+        cutoff=bundle_cutoff({"as_of": as_of, "timeline": timeline or {}}),
+    )
+    boundary = quarter_window_start(as_of, years)
+    annual = [row for row in annual if boundary < str(row["period_end"]) <= as_of]
     ttm = _ttm_row(sid, quarterly, issues=issues)
     return {
         "security_id": sid,
@@ -307,6 +321,13 @@ def statements(config, security, *, refresh, issues, as_of, force=False) -> dict
         "received_at": received_at,
         "source_id": source["source_id"],
         "adapter_version": ADAPTER_VERSION,
+        "history_window": {
+            "years": years,
+            "maximum_quarters": 4 * years,
+            "available_quarters": len(quarterly),
+            "start_exclusive": boundary,
+            "as_of": as_of,
+        },
     }
 
 

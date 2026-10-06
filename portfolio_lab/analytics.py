@@ -118,6 +118,12 @@ def analyze(bundle: dict, config: dict) -> dict:
             if config["data"]["require_received_by_cutoff"]
             else "available-by-cutoff reconstruction; retrieval may be later",
             "purpose": "Conditional portfolio research; no trade execution",
+            "financial_history_policy": {
+                "frequency": "quarterly",
+                "max_years": config["data"].get("financial_history_years", 3),
+                "max_quarters": 4 * config["data"].get("financial_history_years", 3),
+                "baseline": "latest_four_quarters",
+            },
         },
         "sources": bundle.get("sources", []),
         "issues": issues,

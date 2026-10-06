@@ -34,7 +34,7 @@ from collections.abc import Mapping
 
 from .valuation_basis import estimate_currency, listing_ratio, translate_per_share
 
-METHOD_VERSION = "proposal-template-2"
+METHOD_VERSION = "proposal-template-3"
 EPS_PERIOD_BY_HORIZON = {6: "0y", 12: "+1y", 18: "+1y"}
 FINANCIAL_SECTORS = {"Financials", "Real Estate"}
 DEFAULT_DISCOUNT_RATE = 0.09
@@ -109,6 +109,7 @@ def propose_eps_model(
     horizon_months,
     dividends_source_id: str | None = None,
     valuation_context: Mapping | None = None,
+    financial_history: Mapping | None = None,
     issues: list | None = None,
 ) -> dict | None:
     """Propose a forward P/E payload for `valuation.calculate_eps`, or None with a reason.
@@ -225,6 +226,7 @@ def propose_eps_model(
         "model": "eps_multiple",
         "estimate_period": period,
         "estimate_label": ESTIMATE_LABEL,
+        "financial_history": dict(financial_history or {}),
         "earnings_bridge": bridge,
         "evidence": {
             key: source
@@ -341,6 +343,8 @@ def propose_dcf_inputs(
     defaults,
     quote_currency=None,
     valuation_context: Mapping | None = None,
+    financial_history: Mapping | None = None,
+    quarterly_required: bool = False,
     issues: list | None = None,
 ) -> dict | None:
     """Propose an FCFF payload for `valuation.calculate_dcf`, or None with a reason.
@@ -371,9 +375,19 @@ def propose_dcf_inputs(
     if unit_currency is None:
         return _refuse(issues, code, sid, f"statement currency {currency!r} is not a code")
     trailing = ttm if isinstance(ttm, Mapping) else {}
-    annual = _latest_annual(annual_statements)
     if not trailing:
         return _refuse(issues, code, sid, "trailing twelve-month statements are unavailable")
+    references = trailing.get("quarters_used")
+    if not isinstance(references, (list, tuple)):
+        references = [part for part in str(trailing.get("ttm_quarters") or "").split(",") if part]
+    quarterly_derived = trailing.get("period_type") == "ttm" and len(set(references)) == 4
+    if quarterly_required and not quarterly_derived:
+        return _refuse(
+            issues, code, sid, "four verified quarterly periods are required for a DCF draft"
+        )
+    # A missing line in the quarterly TTM is missing evidence. An annual line is
+    # not a replacement for that flow period; verified Q4 derivation happens upstream.
+    annual = {} if quarterly_required or quarterly_derived else _latest_annual(annual_statements)
     evidence, notes = {}, []
     revenue_now = _line("revenue", trailing, annual, evidence, notes)
     ebit_now = _line("operating_income", trailing, annual, evidence, notes)
@@ -597,9 +611,11 @@ def propose_dcf_inputs(
         ],
         "convergence": DCF_CONVERGENCE,
         "estimate_label": ESTIMATE_LABEL,
+        "financial_history": dict(financial_history or {}),
         "notes": notes,
         "inputs": {
             "trailing_period_end": trailing.get("period_end"),
+            "financial_history": dict(financial_history or {}),
             "ebit_margin": margin,
             "tax_rate": tax_rate,
             "revenue_growth_path": growth_path,

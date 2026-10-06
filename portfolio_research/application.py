@@ -59,6 +59,51 @@ def validate_workspace_revision(workspace, previous):
             raise ValueError("An edited assessment cannot reuse its previous review timestamp.")
 
 
+def _research_for_quarterly_policy(research, bundle, config):
+    """Keep frozen evidence while withholding obsolete automatic DCF defaults.
+
+    Older source-generated templates could substitute annual lines for missing
+    quarters. Recalculation must not offer those as current quarterly defaults;
+    reviewed workspace models and independent forward-consensus EPS stay separate.
+    """
+    current = deepcopy(research)
+    from .statements import ttm_in_window
+
+    configured_years = config.get("data", {}).get("financial_history_years", 3)
+    for record in current.values():
+        proposals = record.get("proposals") or {}
+        dcf = proposals.get("dcf")
+        if not isinstance(dcf, dict):
+            continue
+        meta = dcf.get("proposal_meta") or {}
+        history = meta.get("financial_history") or {}
+        years = history.get("lookback_years")
+        if (
+            history.get("basis") == "quarterly"
+            and type(years) is int
+            and 1 <= years <= configured_years
+            and ttm_in_window(
+                {
+                    "period_type": "ttm",
+                    "period_end": history.get("latest_period_end"),
+                    "ttm_quarters": history.get("current_ttm_quarters"),
+                },
+                as_of=bundle["as_of"],
+                years=configured_years,
+            )
+        ):
+            continue
+        proposals["dcf"] = None
+        proposals.setdefault("reasons", []).append(
+            {
+                "code": "dcf_quarterly_history_required",
+                "severity": "info",
+                "detail": "Refresh quarterly company data to rebuild DCF defaults.",
+            }
+        )
+    return current
+
+
 def analyze_review(bundle, config, *, previous=None):
     """The published review: engine outputs, the owner's workspace and what to look at.
 
@@ -153,7 +198,7 @@ def analyze_review(bundle, config, *, previous=None):
     # it: briefs and proposals are proposed, and the requirements table says what each
     # output of this run actually has.
     if bundle.get("research"):
-        result["research"] = deepcopy(bundle["research"])
+        result["research"] = _research_for_quarterly_policy(bundle["research"], bundle, config)
     # What the review discovered, what it refused and why, stated beside the analysis:
     # the scope it acquired, the rows it excluded by name, and the holdings and
     # candidates whose evidence says look here first.

@@ -135,7 +135,10 @@ def _estimates(security_id, eps):
 
 def _trailing(security_id):
     return {
+        "period_type": "ttm",
+        "period_start": "2025-07-01",
         "period_end": "2026-06-30",
+        "ttm_quarters": "2026-06-30,2026-03-31,2025-12-31,2025-09-30",
         "currency": "USD",
         "source_id": "statements:" + security_id,
         "revenue": 5000.0,
@@ -297,6 +300,17 @@ def _inject(bundle, config, as_of):
         }
         estimates = _estimates(security_id, close / 18.0)
         ttm, reasons = _trailing(security_id), []
+        financial_history = {
+            "basis": "quarterly",
+            "lookback_years": 3,
+            "max_quarters": 12,
+            "available_quarters": 4,
+            "oldest_period_end": "2025-09-30",
+            "latest_period_end": "2026-06-30",
+            "current_ttm_quarters": ttm["ttm_quarters"].split(","),
+            "prior_ttm_quarters": [],
+            "historical_growth_available": False,
+        }
         proposals = {
             "eps": propose_eps_model(
                 security,
@@ -307,16 +321,19 @@ def _inject(bundle, config, as_of):
                 dividends_ttm_per_share=1.25,
                 horizon_months=12,
                 dividends_source_id="prices:" + security_id,
+                financial_history=financial_history,
                 issues=reasons,
             ),
             "dcf": propose_dcf_inputs(
                 security,
                 ttm=ttm,
-                annual_statements=[ttm],
+                annual_statements=[],
                 shares_outstanding=500.0,
                 price_major=close,
                 currency="USD",
                 quote_currency="USD",
+                quarterly_required=True,
+                financial_history=financial_history,
                 estimates=estimates,
                 defaults={
                     "discount_rate": 0.09,
@@ -371,7 +388,12 @@ def _inject(bundle, config, as_of):
             "events": "ok",
             "profile": "ok",
         }
-        research[security_id] = {"brief": brief, "proposals": proposals, "coverage": coverage}
+        research[security_id] = {
+            "brief": brief,
+            "proposals": proposals,
+            "coverage": coverage,
+            "financial_history": financial_history,
+        }
         inputs[security_id] = {
             "symbol": security_id,
             "currency": "USD",

@@ -8,6 +8,7 @@ import pandas as pd
 from portfolio_lab.metrics import score_securities
 from portfolio_research import market_data
 from portfolio_research.identity import resolve_identities
+from portfolio_research.statements import ttm_from_quarters
 from tests.reference.test_metrics import sample
 from tests.test_identity import ledger, listing, position
 
@@ -15,6 +16,40 @@ from tests.test_identity import ledger, listing, position
 class ScoreIntegrityTests(unittest.TestCase):
     def score(self, bundle, config):
         return score_securities(bundle, config).set_index("security_id")
+
+    def quarterly_bundle(self):
+        bundle, config = sample()
+        rows = []
+        for original in bundle["fundamentals"].to_dict("records"):
+            for index, end in enumerate(
+                ("2026-06-30", "2026-03-31", "2025-12-31", "2025-09-30", "2025-06-30")
+            ):
+                row = dict(original)
+                day = pd.Timestamp(end)
+                row.update(
+                    period_type="quarterly",
+                    period_start=(day - pd.offsets.QuarterEnd(1) + pd.Timedelta(days=1))
+                    .date()
+                    .isoformat(),
+                    period_end=end,
+                    available_at=(day + pd.Timedelta(days=30)).date().isoformat(),
+                    received_at=(day + pd.Timedelta(days=30)).date().isoformat(),
+                    source_id=f"quarter:{original['security_id']}:{end}",
+                    assets=10e9 - index * 0.25e9,
+                    assets_begin=None,
+                )
+                for field in (
+                    "gross_profit",
+                    "operating_income",
+                    "net_income",
+                    "income_common",
+                    "operating_cash_flow",
+                    "capex",
+                ):
+                    row[field] = original[field] / 4
+                rows.append(row)
+        bundle["fundamentals"] = pd.DataFrame(rows)
+        return bundle, config
 
     def native_holding(self):
         bundle, config = sample()
@@ -161,6 +196,180 @@ class ScoreIntegrityTests(unittest.TestCase):
         self.assertTrue(scores.score.isna().all())
         self.assertTrue(pd.notna(scores.loc["B", "momentum"]))
 
+    def test_annual_and_unlabelled_facts_cannot_substitute_for_quarterly_ttm(self):
+        for kind in ("annual", None):
+            with self.subTest(kind=kind):
+                bundle, config = sample()
+                bundle["fundamentals"]["period_type"] = kind
+                scores = self.score(bundle, config)
+                self.assertTrue(scores.gross_profitability.isna().all())
+                self.assertTrue(scores.value.isna().all())
+                self.assertTrue(scores.score.isna().all())
+                self.assertIn("quarterly_ttm_required", scores.loc["B", "reasons"])
+
+    def test_declared_imported_ttm_needs_a_valid_twelve_month_scope(self):
+        bundle, config = sample()
+        self.assertTrue(pd.notna(self.score(bundle, config).loc["B", "score"]))
+        for start in (None, "2026-04-01", "2022-07-01"):
+            with self.subTest(start=start):
+                invalid = dict(bundle)
+                invalid["fundamentals"] = bundle["fundamentals"].copy()
+                invalid["fundamentals"]["period_start"] = start
+                scores = self.score(invalid, config)
+                self.assertTrue(scores.gross_profitability.isna().all())
+                self.assertIn(
+                    "ttm_outside_financial_window_or_unverified_period_scope",
+                    scores.loc["B", "reasons"],
+                )
+
+    def test_native_ttm_needs_four_verified_component_periods(self):
+        bundle, config = sample()
+        bundle["fundamentals"]["source_id"] = "yahoo_statements:retained"
+        self.assertTrue(self.score(bundle, config).score.isna().all())
+        bundle["fundamentals"]["ttm_quarters"] = "2026-06-30,2026-03-31,2025-12-31,2025-09-30"
+        self.assertTrue(pd.notna(self.score(bundle, config).loc["B", "score"]))
+
+    def test_known_old_balance_cannot_supply_beginning_assets_denominator(self):
+        bundle, config = sample()
+        bundle["fundamentals"]["assets_begin_period_end"] = "2022-06-30"
+        scores = self.score(bundle, config)
+        self.assertTrue(scores.gross_profitability.isna().all())
+        self.assertTrue(scores.operating_profitability.isna().all())
+        self.assertTrue(scores.negative_accruals.isna().all())
+        self.assertTrue(pd.notna(scores.loc["B", "value"]))
+        self.assertIn("beginning_assets_outside_financial_window", scores.loc["B", "reasons"])
+
+    def test_imported_quarters_build_exact_ttm_without_changing_raw_rows(self):
+        bundle, config = self.quarterly_bundle()
+        original = bundle["fundamentals"].copy(deep=True)
+        scores = self.score(bundle, config)
+        self.assertTrue(pd.notna(scores.loc["B", "score"]))
+        self.assertAlmostEqual(scores.loc["B", "metric_inputs"]["operating_income"], 1e9)
+        self.assertAlmostEqual(scores.loc["B", "metric_inputs"]["assets_begin"], 9e9)
+        self.assertAlmostEqual(scores.loc["B", "metric_inputs"]["average_assets"], 9.5e9)
+        self.assertEqual(scores.loc["B", "fundamental_period_type"], "ttm")
+        self.assertEqual(
+            scores.loc["B", "fundamental_quarters"],
+            "2026-06-30,2026-03-31,2025-12-31,2025-09-30",
+        )
+        self.assertEqual(len(scores.loc["B", "fundamental_component_source_ids"]), 5)
+        pd.testing.assert_frame_equal(bundle["fundamentals"], original)
+
+    def test_native_mixed_quarter_ttm_frame_handles_missing_provenance_cells(self):
+        bundle, config = self.quarterly_bundle()
+        retained = ttm_from_quarters(
+            bundle["fundamentals"]
+            .loc[bundle["fundamentals"].security_id.eq("B")]
+            .to_dict("records")
+        )
+        bundle["fundamentals"] = pd.DataFrame(
+            [*bundle["fundamentals"].to_dict("records"), retained]
+        )
+        # Native frames mix scalar quarterly fields with TTM provenance maps.
+        # Pandas fills the absent quarterly map cells with float NaN.
+        self.assertTrue(
+            bundle["fundamentals"]
+            .loc[bundle["fundamentals"].period_type.eq("quarterly"), "provenance"]
+            .isna()
+            .all()
+        )
+        original = bundle["fundamentals"].copy(deep=True)
+        scores = self.score(bundle, config)
+        self.assertTrue(pd.notna(scores.loc["B", "score"]))
+        self.assertAlmostEqual(scores.loc["B", "metric_inputs"]["operating_income"], 1e9)
+        pd.testing.assert_frame_equal(bundle["fundamentals"], original)
+
+    def test_ttm_component_evidence_cannot_contradict_its_declared_quarter_dates(self):
+        bundle, config = sample()
+        bundle["fundamentals"]["ttm_quarters"] = "2026-06-30,2026-03-31,2025-12-31,2025-09-30"
+        bundle["fundamentals"]["provenance"] = [
+            {
+                "gross_profit": {
+                    "components": [
+                        {"period_end": day}
+                        for day in ("2025-06-30", "2025-03-31", "2024-12-31", "2024-09-30")
+                    ]
+                }
+            }
+            for _ in range(len(bundle["fundamentals"]))
+        ]
+        self.assertTrue(self.score(bundle, config).score.isna().all())
+
+    def test_verified_quarters_are_preferred_to_period_only_import_for_same_end(self):
+        bundle, config = self.quarterly_bundle()
+        imported, _ = sample()
+        imported["fundamentals"]["operating_income"] = 1e20
+        bundle["fundamentals"] = pd.DataFrame(
+            [
+                *bundle["fundamentals"].to_dict("records"),
+                *imported["fundamentals"].to_dict("records"),
+            ]
+        )
+        scores = self.score(bundle, config)
+        self.assertAlmostEqual(scores.loc["B", "metric_inputs"]["operating_income"], 1e9)
+        self.assertEqual(scores.loc["B", "fundamental_period_type"], "ttm")
+
+    def test_unqualified_quarter_income_never_becomes_qualified_common_earnings(self):
+        bundle, config = self.quarterly_bundle()
+        bundle["fundamentals"].loc[
+            bundle["fundamentals"].period_end.eq("2026-03-31"), "earnings_definition"
+        ] = "consolidated_unqualified"
+        scores = self.score(bundle, config)
+        self.assertTrue(scores.earnings_yield.isna().all())
+        self.assertTrue(scores.score.isna().all())
+        self.assertTrue(pd.notna(scores.loc["B", "quality"]))
+
+    def test_incomplete_or_mixed_currency_quarters_do_not_sum_to_ttm(self):
+        for invalid in ("missing_quarter", "mixed_currency"):
+            with self.subTest(invalid=invalid):
+                bundle, config = self.quarterly_bundle()
+                if invalid == "missing_quarter":
+                    bundle["fundamentals"] = bundle["fundamentals"].loc[
+                        bundle["fundamentals"].period_end.ne("2026-03-31")
+                    ]
+                else:
+                    bundle["fundamentals"].loc[
+                        bundle["fundamentals"].period_end.eq("2026-03-31"), "currency"
+                    ] = "GBP"
+                scores = self.score(bundle, config)
+                self.assertTrue(scores.score.isna().all())
+                self.assertTrue(scores.earnings_yield.isna().all())
+
+    def test_future_restatement_does_not_replace_an_eligible_quarter(self):
+        bundle, config = self.quarterly_bundle()
+        original = self.score(bundle, config)
+        revised = (
+            bundle["fundamentals"].loc[bundle["fundamentals"].period_end.eq("2026-03-31")].copy()
+        )
+        revised["available_at"] = "2026-09-01"
+        revised["received_at"] = "2026-09-01"
+        revised["gross_profit"] = 1e20
+        bundle["fundamentals"] = pd.concat([bundle["fundamentals"], revised], ignore_index=True)
+        after = self.score(bundle, config)
+        pd.testing.assert_series_equal(original.gross_profitability, after.gross_profitability)
+
+    def test_cached_ttm_component_dates_and_imported_scope_honor_financial_years(self):
+        bundle, config = sample()
+        config["data"]["financial_history_years"] = 1
+        self.assertTrue(pd.notna(self.score(bundle, config).loc["B", "score"]))
+        bundle["fundamentals"]["period_start"] = "2025-06-01"
+        bundle["fundamentals"]["period_end"] = "2026-05-31"
+        self.assertTrue(self.score(bundle, config).score.isna().all())
+        bundle, config = sample()
+        bundle["fundamentals"]["ttm_quarters"] = "2026-06-30,2026-03-31,2025-12-31,2023-06-30"
+        scores = self.score(bundle, config)
+        self.assertTrue(scores.gross_profitability.isna().all())
+        self.assertTrue(scores.score.isna().all())
+
+    def test_old_ttm_period_is_excluded_even_when_staleness_is_relaxed(self):
+        bundle, config = sample()
+        config["data"]["max_fundamental_age_days"] = 3000
+        bundle["fundamentals"]["period_end"] = "2023-06-30"
+        bundle["fundamentals"]["period_start"] = "2022-07-01"
+        scores = self.score(bundle, config)
+        self.assertTrue(scores.gross_profitability.isna().all())
+        self.assertTrue(scores.score.isna().all())
+
     def test_mixed_date_only_and_timestamped_observations_keep_valid_scores(self):
         bundle, config = sample()
         before = self.score(bundle, config)
@@ -244,7 +453,7 @@ class ScoreIntegrityTests(unittest.TestCase):
         self.assertEqual(context["supplied_securities"], 5)
         self.assertEqual(context["ranked_issuers"], 3)
         self.assertFalse(context["market_wide"])
-        self.assertEqual(context["method_version"], "quality-value-momentum-2")
+        self.assertEqual(context["method_version"], "quality-value-momentum-3")
 
 
 if __name__ == "__main__":

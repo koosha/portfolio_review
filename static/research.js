@@ -46,6 +46,13 @@ function shortDate(value) {
   return Number.isNaN(date.getTime())?String(value):date.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
 }
 function holdingAnalysis(id) { return (result?.holding_analysis || []).find(row=>row.security_id===id); }
+function financialHistoryCoverage(id,analysis=holdingAnalysis(id)) {
+  const history=analysis?.financial_history || analysis?.inputs?.financial_history || result?.research?.[id]?.financial_history;
+  const available=numeric(history?.available_quarters),maximum=numeric(history?.max_quarters);
+  if(!Number.isInteger(available) || available<0 || !Number.isInteger(maximum) || maximum<1)return null;
+  const dates=[...new Set([history.oldest_period_end,history.latest_period_end].filter(Boolean))];
+  return el('p',`Financial history: ${available}/${maximum} quarters available${dates.length?` · ${dates.join('–')}`:''}`,'compact-note financial-history-coverage');
+}
 function holdingAnalysisAvailability() {
   const computed=result?.metadata?.computed_views?.holding_analysis;
   if(computed?.status==='unavailable')return {status:'legacy_inputs_unavailable',label:'Update analysis',reason:computed.reason || 'This saved review lacks the retained inputs needed for holding analysis. Update & analyze creates a complete review.',next_step:{label:'Update & analyze',operation:'update'}};
@@ -915,6 +922,8 @@ function detailCalculation(id) {
     terminal_growth_rate:pct(proposals.dcf.terminal_growth_rate),terminal_roic:pct(proposals.dcf.terminal_roic),
     diluted_shares:num(proposals.dcf.diluted_shares,0)}));
   if(!nodes.length)nodes.push(empty('No valuation was calculated and none was proposed for this security.','No calculation'));
+  const history=financialHistoryCoverage(id);
+  if(history)nodes.push(disclosure('Financial history coverage',history));
   return nodes;
 }
 function detailAssumptions(id) {
@@ -1267,7 +1276,7 @@ function renderCompany() {
     const chip=el('span',`${label}: ${state}`,`evidence-chip ${input.used?'used':'context'}`);chip.title=input.note || (input.source_ids || []).join(', ') || `${label} ${state.toLowerCase()}`;cards.append(chip);
   }
   replace('company-data-basis',cards,analysisReason(analysis),actionBreakdown(analysis),
-    disclosure('Inputs & source details',kv(analysis?.inputs || {}),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,method_version:analysis?.method_version || result?.metadata?.computed_views?.holding_analysis?.method_version,calculation_source:result?.metadata?.computed_views?.holding_analysis?.source || 'saved_review',trade_readiness:analysis?.trade_readiness?.status}),
+    disclosure('Inputs & source details',financialHistoryCoverage(securityId,analysis),kv(Object.fromEntries(Object.entries(analysis?.inputs || {}).filter(([key])=>key!=='financial_history'))),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,method_version:analysis?.method_version || result?.metadata?.computed_views?.holding_analysis?.method_version,calculation_source:result?.metadata?.computed_views?.holding_analysis?.source || 'saved_review',trade_readiness:analysis?.trade_readiness?.status}),
       result?.benchmark_reference?el('h4','Benchmark comparison'):null,result?.benchmark_reference?kv(result.benchmark_reference):null,
       listIssues(analysis?.trade_readiness?.reasons || [],'No additional trade readiness information.'),
       autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),

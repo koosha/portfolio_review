@@ -55,12 +55,23 @@ def _dividends(record, as_of, reasons):
     return None
 
 
-def _prior_ttm(record):
-    """The trailing window one year earlier, for growth in the brief."""
+def _quarterly_facts(record, config, as_of, bundle):
+    """Build only within-window quarterly views without mutating retained reports."""
+    from .holding_analysis import _statement_facts
     from .statements import ttm_from_quarters
 
-    quarters = (record.get("statements") or {}).get("quarterly") or []
-    return ttm_from_quarters(quarters[4:8]) if len(quarters) >= 8 else None
+    statements = record.get("statements") or {}
+    facts = _statement_facts(
+        (record.get("security") or {}).get("security_id"),
+        statements,
+        {**bundle, "as_of": bundle.get("as_of") or as_of},
+        config,
+    )
+    quarters, history, ttm = facts["quarters"], facts["financial_history"], facts["trailing"]
+    if ttm:
+        prior = ttm_from_quarters(quarters[4:]) if history["prior_ttm_quarters"] else None
+        ttm = {**ttm, "prior": prior, "currency": ttm.get("currency") or statements.get("currency")}
+    return ttm, history
 
 
 def _latest_price(record):
@@ -103,7 +114,8 @@ def _proposals(record, config, ttm, as_of, bundle=None):
     reasons: list[dict] = []
     from .calendar import bundle_cutoff, current_receipt_limit
 
-    bundle = bundle or {"as_of": as_of}
+    bundle = {**(bundle or {}), "as_of": (bundle or {}).get("as_of") or as_of}
+    ttm, financial_history = _quarterly_facts(record, config, as_of, bundle)
     valuation_context = {
         "as_of": as_of,
         "cutoff": bundle_cutoff(bundle),
@@ -123,6 +135,7 @@ def _proposals(record, config, ttm, as_of, bundle=None):
         dividends_ttm_per_share=_dividends(record, as_of, reasons),
         horizon_months=config["allocation"]["horizon_months"],
         valuation_context=valuation_context,
+        financial_history=financial_history,
         issues=reasons,
     )
     dcf = propose_dcf_inputs(
@@ -135,6 +148,8 @@ def _proposals(record, config, ttm, as_of, bundle=None):
         quote_currency=(record.get("prices") or {}).get("currency"),
         estimates=record.get("estimates"),
         valuation_context=valuation_context,
+        financial_history=financial_history,
+        quarterly_required=True,
         defaults={
             "discount_rate": DEFAULT_DISCOUNT_RATE,
             "terminal_growth_rate": DEFAULT_TERMINAL_GROWTH,
@@ -172,17 +187,18 @@ def build_research(records: dict, bundle: dict, config: dict, as_of: str, brief_
     previous = bundle.get("previous_research") or {}
     generated_at = (bundle.get("timeline") or {}).get("generated_at")
     issues = bundle.setdefault("issues", [])
+    # Direct enrichment callers may supply the date separately. Retain timeline
+    # cutoffs and receipts while giving every downstream fact/proposal the same date.
+    bundle = {**bundle, "as_of": bundle.get("as_of") or as_of}
     wanted = None if brief_ids is None else {str(sid) for sid in brief_ids}
     research = {}
     for sid, record in records.items():
         if wanted is not None and str(sid) not in wanted:
             research[sid] = {"brief": None, "proposals": None, "coverage": dict(record["coverage"])}
             continue
-        statements = record.get("statements") or {}
-        ttm = statements.get("ttm")
-        if isinstance(ttm, dict):
-            ttm = {**ttm, "prior": _prior_ttm(record), "currency": statements.get("currency")}
+        ttm, financial_history = _quarterly_facts(record, config, as_of, bundle)
         research[sid] = {
+            "financial_history": financial_history,
             "brief": _guarded(
                 "brief",
                 sid,

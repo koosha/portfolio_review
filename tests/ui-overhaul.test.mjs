@@ -58,6 +58,37 @@ test('a draft EPS signal exposes its actual model, benchmark difference and revi
   assert.match(details.textContent,/Central P\/E is held at the starting multiple/);
   assert.match(details.textContent,/Consensus earnings growth is applied to reported EPS as a draft proxy/);
 });
+test('quarterly financial coverage uses retained counts and dates inside collapsed source details',async t=>{
+  const {$,ui}=await fixture(t);const review=sample();
+  const history={basis:'quarterly',lookback_years:3,max_quarters:12,available_quarters:5,oldest_period_end:'2025-06-30',latest_period_end:'2026-06-30',current_ttm_quarters:['2025-09-30','2025-12-31','2026-03-31','2026-06-30'],prior_ttm_quarters:[],growth_requirement:'eight_contiguous_quarters',historical_growth_available:false};
+  review.holding_analysis[0].financial_history=history;review.holding_analysis[0].inputs.financial_history=history;
+  ui.load(review);
+  const coverage=$('company-data-basis').querySelector('.financial-history-coverage');
+  assert.equal(coverage.textContent,'Financial history: 5/12 quarters available · 2025-06-30–2026-06-30');
+  assert.equal(coverage.closest('details').querySelector('summary').textContent,'Inputs & source details');
+  assert.equal(coverage.closest('details').open,false);
+  assert.equal($('company-data-basis').querySelectorAll('.financial-history-coverage').length,1);
+  assert.doesNotMatch($('company-data-basis').textContent,/eight_contiguous_quarters/,'the summary does not duplicate the nested metadata as raw JSON');
+  assert.equal(ui.draft().dirty,false,'reading coverage does not edit the saved model');
+  $('research-holdings').querySelector('tbody .text-button').click();
+  const calculationCoverage=$('detail-calculation').querySelector('.financial-history-coverage');
+  assert.equal(calculationCoverage.textContent,coverage.textContent);
+  assert.equal(calculationCoverage.closest('details').open,false);
+});
+test('financial coverage preserves shorter windows, no-quarter data and saved reviews without metadata',async t=>{
+  const {$,ui}=await fixture(t);const review=sample();
+  review.research['SEC-ABC']={financial_history:{basis:'quarterly',lookback_years:1,max_quarters:4,available_quarters:1,oldest_period_end:'2026-06-30',latest_period_end:'2026-06-30'}};
+  ui.load(review);
+  assert.equal($('company-data-basis').querySelector('.financial-history-coverage').textContent,'Financial history: 1/4 quarters available · 2026-06-30');
+  review.research['SEC-ABC'].financial_history.available_quarters=0;
+  review.research['SEC-ABC'].financial_history.oldest_period_end=null;
+  review.research['SEC-ABC'].financial_history.latest_period_end=null;
+  ui.load(review);
+  assert.equal($('company-data-basis').querySelector('.financial-history-coverage').textContent,'Financial history: 0/4 quarters available');
+  ui.load(sample());
+  assert.equal($('company-data-basis').querySelector('.financial-history-coverage'),null,'legacy reviews do not acquire inferred coverage');
+  assert.equal($('company-status').textContent,'Buy');
+});
 test('browsing DCF leaves an EPS signal unchanged while selecting the action model creates a stale draft',async t=>{
   const {window,$,ui}=await fixture(t);ui.load(sample());
   window.document.querySelector('[data-company-tab="dcf"]').click();
