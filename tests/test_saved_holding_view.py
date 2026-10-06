@@ -43,6 +43,7 @@ class SavedHoldingViewTests(unittest.TestCase):
             {"security_id": "EQUITY", "action": "Hold", "method_version": "original"}
         ]
         displayed = saved_holding_view(result, bundle, config)
+        displayed.pop("benchmark_reference", None)
         self.assertEqual(displayed, result)
         self.assertNotIn("computed_views", displayed.get("metadata", {}))
 
@@ -78,7 +79,7 @@ class SavedHoldingViewTests(unittest.TestCase):
         row = saved_holding_view(result, bundle, config)["holding_analysis"][0]
         self.assertEqual(row["action"], "Review")
         self.assertIsNotNone(row["scenario_return"])
-        self.assertEqual(row["next_step"]["code"], "benchmark_missing")
+        self.assertEqual(row["next_step"]["code"], "benchmark_unknown")
         self.assertEqual(row["next_step"]["section"], "settings")
 
     def test_incompatible_archive_is_marked_as_view_unavailable(self):

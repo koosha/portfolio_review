@@ -41,6 +41,7 @@ RESULT_FIELDS = {
     "accounts",
     "account_labels",
     "holding_analysis",
+    "benchmark_reference",
 }
 SOURCE_FIELDS = {"source_id", "provider", "received_at", "available_at", "sha256", "rows", "status"}
 # The only hosts a published locator may point at. A provider-supplied URL is data: an

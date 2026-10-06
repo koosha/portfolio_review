@@ -137,6 +137,7 @@ def create_demo(directory: str | Path) -> Path:
             ticker="SIMETF",
             issuer_id="SIM_FUND",
             name="Simulated Broad Equity Fund",
+            equity_shared_state=True,
             sector="Fund",
             instrument_type="etf",
             currency="USD",

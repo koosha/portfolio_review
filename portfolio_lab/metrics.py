@@ -933,6 +933,9 @@ def portfolio_covariance(bundle: dict, config: dict, security_ids: list[str]) ->
         return {**empty, "matrix": np.empty((0, 0)), "complete": True}
     prices = _observed(_frame(bundle, "prices"), bundle, "date", config=config)
     metadata = _frame(bundle, "securities")
+    from portfolio_research.benchmark import comparison_metadata
+
+    metadata = comparison_metadata(bundle, metadata)
     base = config.get("mandate", {}).get("base_currency", "USD")
     if prices.empty:
         empty["issues"].append(

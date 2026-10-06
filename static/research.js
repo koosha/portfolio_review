@@ -35,7 +35,11 @@ function accountLabel(id, row={}) {
   const ids=[...new Set(accounts.map(item=>item.account_id).filter(Boolean))];
   return `Account ${Math.max(1,ids.indexOf(id)+1)}`;
 }
-function securityLabel(id) { const row=securityRow(id);return holdingAnalysis(id)?.ticker || row.ticker || row.symbol || id || 'Unresolved'; }
+function securityLabel(id) {
+  const row=securityRow(id),reference=result?.benchmark_reference;
+  const benchmark=reference && [reference.security_id,reference.configured_id,reference.selection].includes(id)?reference:{};
+  return holdingAnalysis(id)?.ticker || row.ticker || row.symbol || benchmark.ticker || id || 'Unresolved';
+}
 function shortDate(value) {
   if(!value)return 'Date unavailable';
   const date=new Date(String(value).slice(0,10)+'T12:00:00');
@@ -215,7 +219,7 @@ function field(label,value,onChange,{type='text',options=null,percent=false,help
     input.value=value ?? '';
   } else if (type==='textarea') { input=el('textarea'); input.rows=3; input.value=value ?? ''; }
   else { input=el('input'); input.type=type; if(type==='checkbox') input.checked=value===true;
-    else input.value=value===null || value===undefined ? '' : percent ? numeric(value)*100 : value;
+    else input.value=value===null || value===undefined ? '' : percent ? Number((numeric(value)*100).toPrecision(15)) : value;
     if(type==='number') input.step='any'; }
   input.id=id;
   if (type==='checkbox') wrapper.append(input,el('span',label)); else wrapper.append(el('span',label),input);
@@ -1172,6 +1176,7 @@ function renderCompany() {
   }
   replace('company-data-basis',cards,analysisReason(analysis),
     disclosure('Inputs & source details',kv(analysis?.inputs || {}),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,method_version:analysis?.method_version || result?.metadata?.computed_views?.holding_analysis?.method_version,calculation_source:result?.metadata?.computed_views?.holding_analysis?.source || 'saved_review',trade_readiness:analysis?.trade_readiness?.status}),
+      result?.benchmark_reference?el('h4','Benchmark comparison'):null,result?.benchmark_reference?kv(result.benchmark_reference):null,
       listIssues(analysis?.trade_readiness?.reasons || [],'No additional trade readiness information.'),
       autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),
       evidence.macro?.note?el('p',evidence.macro.note,'muted'):null));
@@ -1304,10 +1309,14 @@ function renderScenarios() {
     if(value===null)delete probabilities[name];else probabilities[name]=value;
     patch({allocation:{probability_overrides:probabilities}});
   },{type:'number',percent:true}))),button('Use source probabilities',()=>{patch({allocation:{probability_overrides:{}}});renderScenarios();},'quiet'));
-  const ids=[...new Set([...(result?.holdings || []).map(row=>row.security_id),...(result?.forecast_inputs || []).map(row=>row.security_id),config.mandate?.benchmark_id].filter(Boolean))].filter(id=>id!=='CASH');
-  const rows=ids.map(id=>({security_id:id,...Object.fromEntries(names.map(name=>[name,allocation.return_overrides?.[id]?.[name] ?? (result?.forecast_inputs || []).find(row=>row.security_id===id && row.scenario===name && row.horizon_months===horizon())?.return_value]))}));
-  replace('return-editor',el('h3','Asset and benchmark horizon returns (%)'),table(rows,[{key:'security_id',label:'Security',render:securityButton},...names.map(name=>({key:name,label:friendly(name),render:(value,row)=>field(`${row.security_id} ${name} return (%)`,value,next=>{
-    const map=clone(resolved().allocation?.return_overrides || {});map[row.security_id] ||= {};
+  const selectedBenchmark=config.mandate?.benchmark_id || 'VOO',reference=result?.benchmark_reference;
+  const benchmarkId=reference && ([reference.selection,reference.configured_id].includes(selectedBenchmark) || (!config.mandate?.benchmark_id && reference.default_applied))?reference.security_id || selectedBenchmark:selectedBenchmark;
+  const ids=[...new Set([...(result?.holdings || []).map(row=>row.security_id),...(result?.forecast_inputs || []).map(row=>row.security_id===selectedBenchmark?benchmarkId:row.security_id),benchmarkId].filter(Boolean))].filter(id=>id!=='CASH');
+  const rows=ids.map(id=>({security_id:id,...Object.fromEntries(names.map(name=>[name,allocation.return_overrides?.[id]?.[name] ?? (id===benchmarkId?allocation.return_overrides?.[selectedBenchmark]?.[name]:undefined) ?? (result?.forecast_inputs || []).find(row=>(row.security_id===id || (id===benchmarkId && row.security_id===selectedBenchmark)) && row.scenario===name && row.horizon_months===horizon())?.return_value]))}));
+  replace('return-editor',el('h3','Asset and benchmark horizon returns (%)'),table(rows,[{key:'security_id',label:'Security',render:securityButton},...names.map(name=>({key:name,label:friendly(name),render:(value,row)=>field(`${securityLabel(row.security_id)} ${name} return (%)`,value,next=>{
+    const map=clone(resolved().allocation?.return_overrides || {});
+    if(row.security_id===benchmarkId && selectedBenchmark!==benchmarkId){map[benchmarkId]={...(map[selectedBenchmark] || {}),...(map[benchmarkId] || {})};delete map[selectedBenchmark];}
+    map[row.security_id] ||= {};
     if(!Object.keys(map[row.security_id]).length)for(const stateName of names){const base=rows.find(item=>item.security_id===row.security_id)?.[stateName];if(base!==undefined && base!==null)map[row.security_id][stateName]=base;}
     if(next===null)delete map[row.security_id][name];else map[row.security_id][name]=next;
     patch({allocation:{return_overrides:map}});
@@ -1458,11 +1467,36 @@ async function recordDecision() {
 function configField(group,key,label= friendly(key),options={}) {
   return field(label,resolved()[group]?.[key],value=>patch({[group]:{[key]:value}}),options);
 }
+function benchmarkField(config) {
+  const selected=config.mandate?.benchmark_id || 'VOO',securities=new Map();
+  for(const row of [...(result?.holdings || []),...(result?.signals || []),...(result?.holding_analysis || []),...(result?.forecast_inputs || []),result?.benchmark_reference || {}]) {
+    if(!row.security_id)continue;
+    const existing=securities.get(row.security_id) || {};
+    securities.set(row.security_id,{security_id:row.security_id,ticker:row.ticker || row.symbol || existing.ticker,name:row.name || existing.name});
+  }
+  const name=row=>row.ticker?[row.ticker,row.name!==row.ticker?row.name:null].filter(Boolean).join(' · '):row.name || row.security_id;
+  const options=[['VOO','S&P 500 (VOO)'],['VTI','VTI (U.S. equities)'],
+    ...[...securities.values()].filter(row=>!['VOO','VTI'].includes(row.security_id) && !['VOO','VTI'].includes(row.ticker?.toUpperCase()))
+      .sort((a,b)=>name(a).localeCompare(name(b))).map(row=>[row.security_id,name(row)])];
+  if(selected && !options.some(([id])=>id===selected)) {
+    const matches=[...securities.values()].filter(row=>row.ticker?.toUpperCase()===selected.toUpperCase());
+    const reference=result?.benchmark_reference;
+    const row=securities.get(selected) || (matches.length===1?matches[0]:null)
+      || ([reference?.configured_id,reference?.selection].includes(selected)?reference:null);
+    options.push([selected,row?name(row):selected]);
+  }
+  const wrapper=field('Benchmark',selected,value=>patch({mandate:{benchmark_id:value || null}}),{options});
+  const input=wrapper.querySelector('select'),label=wrapper.querySelector('span');
+  label.id=`${input.id}-label`;input.setAttribute('aria-labelledby',label.id);
+  const help=el('small','Comparison reference for scenario returns.','field-help');help.id=`${input.id}-help`;
+  input.setAttribute('aria-describedby',help.id);wrapper.append(help);
+  return wrapper;
+}
 function renderSettings() {
   const config=resolved();
   replace('mandate-form',form([
     field('Base currency',config.mandate?.base_currency,value=>patch({mandate:{base_currency:value.toUpperCase() || null}})),
-    configField('mandate','benchmark_id','Approved benchmark security ID'),
+    benchmarkField(config),
     ...['issuer_cap','sector_cap','min_cash_weight','max_turnover','max_volatility','max_stress_loss'].map(key=>configField('mandate',key,`${friendly(key)} (%)`,{type:'number',percent:true})),
     configField('mandate','confirmed','I confirm this mandate',{type:'checkbox'}),
     configField('mandate','allow_taxable_proposals','Allow conditional taxable-account proposals',{type:'checkbox'}),
@@ -1490,10 +1524,10 @@ function renderSettings() {
     field('New-flow treatment',config.allocation?.flow_policy,value=>patch({allocation:{flow_policy:value || null}}),{options:[['','Unconfirmed'],['approved_benchmark','Approved benchmark']]}),
   ]),...(accountNodes.length?accountNodes:[empty('Load a reconciled snapshot to see exact account identifiers.','Accounts unavailable')]));
   const policies=config.mandate?.account_candidate_policy || {};
-  const accounts=(result?.summary?.accounts || []).map(row=>row.account_id).filter(Boolean);
+  const accounts=(result?.summary?.accounts || []).filter(row=>row.account_id);
   replace('candidate-policy-form',form([
-    ...accounts.map(id=>field(`${id} candidate comparison`,policies[id] || 'none',value=>{
-      const map={...(resolved().mandate?.account_candidate_policy || {})};map[id]=value;patch({mandate:{account_candidate_policy:map}});
+    ...accounts.map(row=>field(`${accountLabel(row.account_id,row)} candidate comparison`,policies[row.account_id] || 'none',value=>{
+      const map={...(resolved().mandate?.account_candidate_policy || {})};map[row.account_id]=value;patch({mandate:{account_candidate_policy:map}});
     },{options:[['none','None: compare held securities only'],['eligible_universe','Eligible universe: compare screened candidates']],
       help:'Unowned companies are compared for this account only where this says so.'})),
     field('Watchlist symbols (comma separated)',(config.signals?.watchlist || []).join(', '),value=>{

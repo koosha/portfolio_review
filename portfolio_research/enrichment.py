@@ -876,8 +876,11 @@ def _apply_shared_state(bundle, config, as_of) -> None:
     """
     from portfolio_lab.providers import _error_label, _merge
 
+    from .benchmark import prepare_benchmark, reference_security, retained_joint_probabilities
     from .market_values import _issue
     from .scenarios import DEFAULT_SHARED_STATE, SOURCE_LABEL, generate_joint_forecasts
+
+    config, reference = prepare_benchmark(bundle, config)
 
     # Generated rows are a calculation of the current controls. Reusing them from a
     # frozen bundle would make a replay silently ignore edits to those controls.
@@ -902,7 +905,17 @@ def _apply_shared_state(bundle, config, as_of) -> None:
     ]
 
     securities = bundle.get("securities")
-    if not isinstance(securities, pd.DataFrame) or securities.empty:
+    if not isinstance(securities, pd.DataFrame):
+        securities = pd.DataFrame()
+    comparator = reference_security(bundle)
+    if comparator:
+        securities = pd.concat([securities, pd.DataFrame([comparator])], ignore_index=True)
+    elif reference.get("existing_security") and reference.get("equity_shared_state"):
+        securities = securities.copy()
+        securities.loc[securities.security_id.eq(reference["security_id"]), "currency"] = reference[
+            "quote_currency"
+        ]
+    if securities.empty:
         return
     horizon = int(_setting(config, "allocation", "horizon_months", 12))
     stated, elsewhere = _forecast_ids(bundle, as_of, horizon)
@@ -910,6 +923,12 @@ def _apply_shared_state(bundle, config, as_of) -> None:
     if missing.empty:
         return
     state = (config.get("allocation") or {}).get("shared_state") or DEFAULT_SHARED_STATE
+    if state.get("probabilities") is None and comparator:
+        retained = retained_joint_probabilities(
+            bundle, config, as_of, horizon, state["market_returns"]
+        )
+        if retained:
+            state = {**state, "probabilities": retained}
     mandate = config.get("mandate") or {}
     issues = bundle.setdefault("issues", [])
     try:
@@ -919,7 +938,12 @@ def _apply_shared_state(bundle, config, as_of) -> None:
             as_of=as_of,
             horizon_months=horizon,
             presentation_currency=str(mandate.get("base_currency") or "USD"),
-            benchmark_ids=(mandate.get("benchmark_id"),),
+            benchmark_ids=(reference.get("security_id"),)
+            if reference.get("equity_shared_state")
+            else (),
+            unscaled_benchmark_ids=(reference.get("security_id"),)
+            if reference.get("equity_shared_state")
+            else (),
         )
     except Exception as exc:  # A malformed state leaves the run without its own set.
         _issue(issues, "SHARED_STATE_UNUSABLE", None, _error_label(exc), "error")
@@ -1031,6 +1055,11 @@ def enrich_market(
         frame = pd.DataFrame(rows) if rows else pd.DataFrame(columns=FRAME_COLUMNS.get(name, []))
         _merge(bundle, name, frame)
     bundle["research_inputs"] = {**(bundle.get("research_inputs") or {}), **inputs}
+    from .benchmark import enrich_reference_prices
+
+    enrich_reference_prices(
+        bundle, config, as_of, deadline=deadline, should_stop=lambda: _stop_requested(should_stop)
+    )
     planned = [str(security.get("security_id")) for _, security in plan["candidates"]]
     _record_universe(
         bundle,

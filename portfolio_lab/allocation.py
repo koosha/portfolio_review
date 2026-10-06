@@ -174,6 +174,9 @@ def _forecast_panel(
         ]
     return_overrides = allocation.get("return_overrides", {}) or {}
     known_ids = set(_frame(bundle, "securities").get("security_id", []))
+    reference = bundle.get("benchmark_reference") or {}
+    if reference.get("status") == "resolved":
+        known_ids.add(reference["security_id"])
     for sid, changes in return_overrides.items():
         if sid not in known_ids or set(changes) - set(names):
             return None, issues + [
@@ -305,6 +308,15 @@ def _exposure_coefficients(
     sector_coeffs: dict[str, dict[str, float]] = {}
     issues: list[dict] = []
     for sid in ids:
+        reference = bundle.get("benchmark_reference") or {}
+        if (
+            sid == reference.get("security_id")
+            and reference.get("status") == "resolved"
+            and not reference.get("existing_security")
+        ):
+            # This instrument has no portfolio weight or purchase pair. Its return
+            # comparison needs history, not fund look-through for nonexistent assets.
+            continue
         row = securities.loc[sid]
         if row.instrument_type == "equity":
             issuer = row.get("issuer_id")
@@ -920,7 +932,9 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
     locked_ids = set(mandate.get("locked_security_ids", []))
     account_ids = sorted(accounts.account_id.tolist())
     accounts = accounts.set_index("account_id")
-    security_map = securities.set_index("security_id")
+    from portfolio_research.benchmark import comparison_metadata
+
+    security_map = comparison_metadata(bundle, securities).set_index("security_id")
     # An account may admit the screened eligible universe instead of a hand-listed set.
     # Those candidates are a policy, not an instruction about a particular security, so
     # each one carries its own exclusions. Securities the owner holds, the benchmark and
@@ -1055,6 +1069,10 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
                 )
                 continue
             security = security_map.loc[sid]
+            if security.get("comparison_only") in (True, np.bool_(True)):
+                # Catalog references provide a return comparator, never a purchase
+                # instrument, even when someone lists their ID in permissions.
+                continue
             if security.currency != base:
                 if sid in screened_ids:
                     candidate_reasons.setdefault(sid, set()).add("not_permitted")
@@ -1246,7 +1264,13 @@ def build_proposals(bundle: dict, config: dict, scores: pd.DataFrame) -> dict:
             issues + [_issue("invalid_covariance", "Invalid covariance dimensions or values.")],
             **partition(),
         )
-    stress = stress_returns(bundle, config, ids)
+    held_or_permitted = {sid for _, sid in pair_ids}
+    stress = stress_returns(bundle, config, sorted(held_or_permitted))
+    for sid in set(ids) - held_or_permitted:
+        for values in stress.values():
+            # Internal coefficient only: these comparator rows have identically
+            # zero target weights, so their stress cannot affect any candidate.
+            values[sid] = 0.0
     for name, values in stress.items():
         if any(sid not in values or not _finite(values[sid]) for sid in ids):
             issues.append(

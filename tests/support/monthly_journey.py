@@ -14,7 +14,6 @@ patch point raise, so a recalculation that reached for one would fail loudly.
 import json
 import os
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -26,6 +25,7 @@ from portfolio_lab.demo import create_demo
 from portfolio_research import enrichment
 from portfolio_research.adapter import account_id, validate_supplemental
 from portfolio_research.briefs import build_brief
+from portfolio_research.calendar import review_context
 from portfolio_research.enrichment import coverage_report
 from portfolio_research.proposals import propose_dcf_inputs, propose_eps_model
 from portfolio_research.server import make_server
@@ -39,10 +39,10 @@ ACCOUNTS = (
     ("Synthetic unlabelled account", "p_fixture_monthly_unlabelled", "SIM03", None),
 )
 OFFLINE_FLAG = "providers-offline"
-# The dated snapshot evidence the owner supplies. A collection captured today is valued
-# on the day it was captured, so this follows the clock rather than pinning a date the
-# review would then have to call stale.
-VALUATION_DATE = datetime.now(UTC).date().isoformat()
+# The synthetic balances are valued at the current review's last completed market
+# session. UTC can already be tomorrow while New York is still today; a UTC day would
+# falsely make this supplied account evidence future-dated and block the fixture.
+VALUATION_DATE = review_context("current")["market_observation_date"]
 # The simulated screen: every company the demo inputs price, so the fund look-through
 # can name a sector for each issuer it reaches. Two of the unowned ones are on the
 # owner's watchlist, which is the stated reason they appear as new candidates.
@@ -177,6 +177,7 @@ def acquire_synthetic_candidates(bundle, config, as_of, *, refresh=False):
                 "ticker": BENCHMARK,
                 "issuer_id": "SIM_FUND",
                 "name": "Simulated Broad Equity Fund",
+                "equity_shared_state": True,
                 "sector": "Fund",
                 "instrument_type": "etf",
                 "currency": "USD",

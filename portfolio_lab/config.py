@@ -76,7 +76,7 @@ DEFAULTS = {
     "mandate": {
         "confirmed": False,
         "base_currency": "USD",
-        "benchmark_id": None,
+        "benchmark_id": "VOO",
         "issuer_cap": None,
         "sector_cap": None,
         "min_cash_weight": None,

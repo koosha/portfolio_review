@@ -84,6 +84,21 @@ GAP_STEPS = {
         "Update model horizon",
         "research",
     ),
+    "Choose the exact saved security for this ambiguous benchmark ticker.": (
+        "benchmark_ambiguous",
+        "Choose exact benchmark",
+        "settings",
+    ),
+    "Resolve the benchmark identity and quote currency.": (
+        "benchmark_identity_missing",
+        "Check benchmark",
+        "settings",
+    ),
+    "Choose VOO, VTI or a saved security; this benchmark is not available in the review.": (
+        "benchmark_unknown",
+        "Choose a benchmark",
+        "settings",
+    ),
 }
 
 
@@ -813,7 +828,8 @@ def build_holding_analysis(result, bundle, config, workspace):
             elif excess is None:
                 action, reason = (
                     "Review",
-                    "Select a benchmark with matching scenarios to compare this holding.",
+                    (bundle.get("benchmark_reference") or {}).get("reason")
+                    or "Select a benchmark with matching scenarios to compare this holding.",
                 )
             elif all(row.get("return_value") is not None for row in rows):
                 if excess > hurdle + cost:

@@ -55,7 +55,7 @@ class MethodologyTests(unittest.TestCase):
         self.assertFalse(config["allocation"]["optimize"])
         self.assertTrue(config["allocation"]["use_probabilities"])
         self.assertEqual(config["mandate"]["base_currency"], "USD")
-        self.assertIsNone(config["mandate"]["benchmark_id"])
+        self.assertEqual(config["mandate"]["benchmark_id"], "VOO")
         self.assertIsNone(config["allocation"]["active_sleeve_weight"])
         self.assertIsNone(config["allocation"]["sleeve_budget_basis"])
         self.assertIsNone(config["allocation"]["cash_return"])

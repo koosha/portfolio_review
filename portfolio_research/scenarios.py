@@ -277,6 +277,7 @@ def generate_joint_forecasts(
     horizon_months,
     presentation_currency: str = "USD",
     benchmark_ids=(),
+    unscaled_benchmark_ids=(),
 ) -> pd.DataFrame:
     """Expand one shared state into a dated joint scenario set.
 
@@ -311,6 +312,7 @@ def generate_joint_forecasts(
     # reinterpreted as a number for some other period.
     basis = int(state["horizon_months"])
     benchmarks = {str(sid).strip() for sid in (benchmark_ids or ()) if str(sid).strip()}
+    unscaled = set(unscaled_benchmark_ids or ())
     if basis != horizon:
         _issue(
             issues,
@@ -374,7 +376,13 @@ def generate_joint_forecasts(
                 )
                 continue
         sector = _sector(record.get("sector"))
-        multiplier = multipliers.get(sector) if sector is not None else None
+        multiplier = (
+            NEUTRAL_MULTIPLIER
+            if security_id in unscaled
+            else multipliers.get(sector)
+            if sector is not None
+            else None
+        )
         if multiplier is None:
             _issue(
                 issues,
