@@ -197,7 +197,15 @@ def _obtain(config, provider, security, fetch, *, refresh, issues, force=False):
         _issue(issues, "INVALID_LISTING_SYMBOL", sid, "No exact provider symbol for this security")
         return None
     cached = _cache(config, provider, sid)
-    if cached is not None and not force and (not refresh or _fresh(cached[1], config)):
+    compatible = cached is not None and (
+        (provider != ESTIMATES_PROVIDER or cached[0].get("unit_contract") == "period-currencies-2")
+        and (provider != PROFILE_PROVIDER or "market_cap_currency" in cached[0])
+    )
+    if (
+        cached is not None
+        and not force
+        and (not refresh or (compatible and _fresh(cached[1], config)))
+    ):
         return cached
     if not refresh:
         _issue(
@@ -320,17 +328,18 @@ def estimates(config, security, *, refresh, issues, as_of, force=False) -> dict 
     if obtained is None:
         return None
     payload, received_at, source = obtained
-    currency = next(
-        (
-            period.get("currency")
-            for period in payload.get("eps", {}).values()
-            if period.get("currency")
-        ),
-        None,
-    )
+
+    def common_currency(family):
+        units = {period.get("currency") for period in payload.get(family, {}).values()}
+        return next(iter(units)) if len(units) == 1 else None
+
     return {
         "security_id": security_id(security),
-        "currency": currency,
+        "currency": common_currency("eps"),
+        "revenue_currency": common_currency("revenue"),
+        "per_share_basis": "provider_listing_contract",
+        "unit_contract": payload.get("unit_contract") or "legacy_unverified",
+        "per_share_basis_note": "Consensus requested for this exact listing; listed-share units are an adapter assumption, not a verified ADS ratio.",
         "eps": payload.get("eps", {}),
         "revenue": payload.get("revenue", {}),
         "price_targets": payload.get("price_targets", {}),
@@ -439,14 +448,14 @@ def news_and_filings(
 
 
 def security_profile(
-    config, security, *, refresh, issues, as_of, issuer_lookup=None, force=False
+    config, security, *, refresh, issues, as_of, issuer_lookup=None, force=False, timeline=None
 ) -> dict | None:
     """Sector, industry, size, domicile and equity type for one security.
 
     Market capitalisation is a current snapshot: it is attached only when the review's
     ``as_of`` is today or later, never backdated into a historical review.
     """
-    from portfolio_lab.providers import _day
+    from .market_values import NEW_YORK, _units
 
     obtained = _obtain(
         config,
@@ -463,7 +472,25 @@ def security_profile(
     metadata = payload.get("metadata") or {}
     symbol = listing_symbol(security)
     kind, reason = equity_type_label(metadata.get("instrument_type"), symbol)
-    current = _day(as_of) >= _day(datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    current = str(as_of)[:10] == now.astimezone(NEW_YORK).date().isoformat()
+    cap_day = str(as_of)[:10]
+    if (timeline or {}).get("review_kind") == "current":
+        from .calendar import current_receipt_limit
+
+        cutoff = pd.to_datetime(
+            (timeline or {}).get("information_cutoff"), utc=True, errors="coerce"
+        )
+        receipt = pd.to_datetime(received_at, utc=True, errors="coerce")
+        current = bool(
+            not pd.isna(cutoff)
+            and not pd.isna(receipt)
+            and cutoff.tz_convert("America/New_York").date() == now.astimezone(NEW_YORK).date()
+            and receipt <= current_receipt_limit({"as_of": as_of, "timeline": timeline})
+        )
+        if current:
+            cap_day = receipt.tz_convert("America/New_York").date().isoformat()
+    _, cap_currency, _ = _units(payload.get("market_cap_currency"))
     issuer_id = None
     if issuer_lookup is not None:
         try:
@@ -475,8 +502,11 @@ def security_profile(
         "name": payload.get("name"),
         "sector": sector_label(payload.get("sector")),
         "industry": payload.get("industry"),
-        "market_cap": payload.get("market_cap") if current else None,
-        "market_cap_as_of": as_of if current and payload.get("market_cap") else None,
+        "market_cap": payload.get("market_cap") if current and cap_currency else None,
+        "reported_market_cap": payload.get("market_cap"),
+        "market_cap_issue": None if cap_currency else "Market-cap currency is undeclared.",
+        "market_cap_as_of": cap_day if current and payload.get("market_cap") else None,
+        "market_cap_currency": cap_currency,
         "market_cap_received_at": received_at if current else None,
         "market_cap_source_id": source["source_id"] if current else None,
         "shares_outstanding": payload.get("shares_outstanding"),

@@ -335,6 +335,54 @@ def _by_security(frame: pd.DataFrame) -> dict:
     return dict(tuple(frame.groupby("security_id", sort=False)))
 
 
+def _research_eligibility(security, bundle):
+    """Research inclusion never changes a security's purchase permission.
+
+    Explicit source/owner exclusions survive. Native identity starts every holding
+    with trading eligibility disabled; a verified, receipt-dated company profile
+    can independently qualify that ordinary US listing for research.
+    """
+    explicit = security.get("research_eligible")
+    if isinstance(explicit, (bool, np.bool_)):
+        return bool(explicit), "explicit_research_eligibility"
+    tradable = security.get("eligible")
+    if isinstance(tradable, (bool, np.bool_)) and bool(tradable):
+        return True, "source_eligible"
+    if security.get("resolution_basis") not in {
+        "quote_symbol",
+        "search_exact_match",
+        "display_symbol",
+    }:
+        return False, "source_ineligible"
+    issuer = security.get("issuer_id")
+    if (
+        not _text_present(issuer)
+        or issuer.startswith(("listing:", "name:"))
+        or security.get("resolution_status")
+        not in {"resolved", "resolved_from_display", "resolved_by_search"}
+    ):
+        return False, "research_identity_unverified"
+    inputs = (bundle.get("research_inputs") or {}).get(security.security_id)
+    facts = inputs.get("valuation_facts") if isinstance(inputs, dict) else None
+    profile = facts.get("profile") if isinstance(facts, dict) else None
+    if not isinstance(profile, dict) and isinstance(inputs, dict):
+        profile = inputs.get("profile")  # Early retained packet compatibility.
+    if not isinstance(profile, dict):
+        return False, "research_profile_missing_or_after_cutoff"
+    receipt = pd.to_datetime(profile.get("received_at"), utc=True, errors="coerce", format="mixed")
+    if (
+        not _text_present(profile.get("source_id"))
+        or not profile["source_id"].startswith("yahoo_profile:")
+        or pd.isna(receipt)
+        or receipt > _cutoff(bundle)
+        or profile.get("issuer_id") != issuer
+        or profile.get("domicile") != "US"
+        or profile.get("equity_type") != "ordinary_common"
+    ):
+        return False, "research_profile_missing_or_after_cutoff"
+    return True, "verified_native_profile"
+
+
 def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
     """Cross-sectional Q/V/M ranks over unique eligible issuers, not held names.
 
@@ -347,15 +395,45 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
             columns=["security_id", "quality", "value", "momentum", "score", "eligible", "reasons"]
         )
     signals, data = config.get("signals", {}), config.get("data", {})
+    from portfolio_research.market_values import sector_label
+
     prices = _observed(_frame(bundle, "prices"), bundle, "date", config=config)
     fundamentals = _observed(_frame(bundle, "fundamentals"), bundle, "period_end", config=config)
     now = _cutoff(bundle)
+    if not fundamentals.empty:
+        # A current normalized vendor answer is not an original filing vintage.
+        # Its assumed publication lag cannot make today's restatement historical.
+        vendor_snapshot = (
+            fundamentals.get("source_id", pd.Series("", index=fundamentals.index))
+            .fillna("")
+            .astype(str)
+            .str.startswith("yahoo_statements:")
+        )
+        vendor_snapshot |= (
+            fundamentals.get("adapter_version", pd.Series("", index=fundamentals.index))
+            .fillna("")
+            .astype(str)
+            .str.startswith("yfinance-adapter-")
+        )
+        if (bundle.get("timeline") or {}).get("review_kind") != "current":
+            received = _available_times(
+                fundamentals.get("received_at", pd.Series(None, index=fundamentals.index))
+            )
+            fundamentals = fundamentals.loc[~vendor_snapshot | received.le(now)].copy()
+        if "period_type" in fundamentals:
+            # CSV's original fundamentals contract supplies annualized/TTM flows.
+            # Preserve that legacy contract for unlabelled rows, but never read an
+            # explicitly labelled standalone quarter as a full year of earnings.
+            kinds = fundamentals.period_type.fillna("").astype(str).str.strip().str.lower()
+            fundamentals = fundamentals.loc[kinds.isin({"", "ttm", "annual"})].copy()
     if not prices.empty:
-        prices["_date"] = pd.to_datetime(prices.date, utc=True)
+        prices["_date"] = pd.to_datetime(prices.date, utc=True, format="mixed")
         prices = prices.sort_values("_date")
     if not fundamentals.empty:
-        fundamentals["_period"] = pd.to_datetime(fundamentals.period_end, utc=True)
-        fundamentals["_available"] = pd.to_datetime(fundamentals.available_at, utc=True)
+        fundamentals["_period"] = pd.to_datetime(fundamentals.period_end, utc=True, format="mixed")
+        fundamentals["_available"] = pd.to_datetime(
+            fundamentals.available_at, utc=True, format="mixed"
+        )
         fundamentals = fundamentals.sort_values(["_period", "_available"])
     rows = []
     anchor = pd.Period(now.tz_convert("America/New_York").tz_localize(None), freq="M")
@@ -373,6 +451,8 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
     fundamental_rows = _by_security(fundamentals)
     for _, security in securities.iterrows():
         sid, reasons = security.security_id, []
+        sector = sector_label(security.get("sector"))
+        research_eligible, research_basis = _research_eligibility(security, bundle)
         p = price_rows.get(sid, prices.iloc[0:0])
         f = fundamental_rows.get(sid, fundamentals.iloc[0:0])
         frow = f.iloc[-1] if not f.empty else pd.Series(dtype=object)
@@ -380,8 +460,11 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
             "security_id": sid,
             "ticker": security.get("ticker"),
             "issuer_id": security.get("issuer_id"),
-            "sector": security.get("sector"),
+            "sector": sector,
+            "normalization_sector": sector,
             "market_cap": _number(security.get("market_cap")),
+            "research_eligible": research_eligible,
+            "research_eligibility_basis": research_basis,
             "quality": np.nan,
             "value": np.nan,
             "momentum": np.nan,
@@ -415,8 +498,17 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
             reasons.append("us_domicile_unverified")
         if security.get("equity_type") != "ordinary_common":
             reasons.append("ordinary_common_equity_unverified")
-        if not bool(security.get("eligible", False)):
-            reasons.append("source_ineligible")
+        if not research_eligible:
+            reasons.append(
+                "research_ineligible"
+                if research_basis == "explicit_research_eligibility"
+                else research_basis
+            )
+        if not _text_present(security.get("issuer_id")):
+            reasons.append("unresolved_issuer")
+        resolution = security.get("resolution_status")
+        if _text_present(resolution) and resolution.lower() in {"unresolved", "conflict"}:
+            reasons.append("unresolved_security_identity")
         if security.get("currency") != config.get("mandate", {}).get("base_currency", "USD"):
             reasons.append("currency_mismatch")
         if (
@@ -424,8 +516,15 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
             and not p.currency.eq(config.get("mandate", {}).get("base_currency", "USD")).all()
         ):
             reasons.append("price_currency_mismatch")
-        if security.get("sector") in signals.get("excluded_sectors", []):
+        if sector in {"Financials", "Real Estate"} or sector in {
+            sector_label(value) for value in signals.get("excluded_sectors", [])
+        }:
+            # The initial implementation owns industrial-company definitions only.
+            # Removing a configurable exclusion cannot supply a bank/REIT model.
             reasons.append("separate_sector_model_required")
+        duplicate_sessions = not p.empty and p["_date"].dt.normalize().duplicated().any()
+        if duplicate_sessions:
+            reasons.append("duplicate_price_sessions")
         if latest is None or latest < signals.get("minimum_price", 5):
             reasons.append("price_ineligible")
         if adv is None or adv < signals.get("minimum_dollar_volume", 10_000_000):
@@ -468,7 +567,8 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
 
         def ratio(numerator, denominator):
             n, d = _number(numerator), _number(denominator)
-            return n / d if valid_f and n is not None and d is not None and d > 0 else np.nan
+            value = n / d if valid_f and n is not None and d is not None and d > 0 else None
+            return value if value is not None and math.isfinite(value) else np.nan
 
         assets, begin = _number(frow.get("assets")), _number(frow.get("assets_begin"))
         average = (
@@ -488,21 +588,51 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
         )
         if common_income is None:
             reasons.append("common_share_earnings_unqualified")
+        cap_currency = security.get("market_cap_currency")
+        cap_currency = cap_currency if _text_present(cap_currency) else security.get("currency")
+        cap_compatible = cap_currency == frow.get("currency")
+        if not cap_compatible:
+            reasons.append("market_cap_fundamental_currency_mismatch")
         row.update(
             {
                 "earnings_definition": frow.get("earnings_definition"),
+                "fundamental_source_id": frow.get("source_id"),
+                "fundamental_period_end": frow.get("period_end"),
+                "fundamental_available_at": frow.get("available_at"),
+                "fundamental_currency": frow.get("currency"),
+                "market_cap_currency": cap_currency,
+                "market_cap_source_id": security.get("market_cap_source_id"),
+                "market_cap_as_of": security.get("market_cap_as_of"),
+                "metric_inputs": {
+                    "gross_profit": _number(frow.get("gross_profit")),
+                    "operating_income": _number(frow.get("operating_income")),
+                    "net_income": income,
+                    "income_common": common_income,
+                    "operating_cash_flow": ocf,
+                    "capex": capex,
+                    "assets_begin": begin,
+                    "assets_end": assets,
+                    "average_assets": average,
+                    "issuer_market_cap": row["market_cap"],
+                },
                 "gross_profitability": ratio(frow.get("gross_profit"), begin),
                 "operating_profitability": ratio(frow.get("operating_income"), average),
                 "negative_accruals": ratio(-accrual if accrual is not None else None, average),
-                "earnings_yield": ratio(common_income, row["market_cap"]),
-                "cashflow_yield": ratio(cashflow, row["market_cap"]),
+                "earnings_yield": ratio(common_income, row["market_cap"])
+                if cap_compatible
+                else np.nan,
+                "cashflow_yield": ratio(cashflow, row["market_cap"]) if cap_compatible else np.nan,
                 "raw_momentum": np.nan,
+                "momentum_start_adjusted_close": None,
+                "momentum_end_adjusted_close": None,
+                "momentum_start_source_id": None,
+                "momentum_end_source_id": None,
                 "momentum_start_session": momentum_start_day,
                 "momentum_end_session": momentum_end_day,
                 "liquidity_session_count": int(len(liquidity_rows)),
             }
         )
-        if not p.empty:
+        if not p.empty and not duplicate_sessions:
             session_days = p["_date"].dt.strftime("%Y-%m-%d")
             older, recent = (
                 p[session_days == momentum_start_day],
@@ -515,6 +645,10 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
                 )
                 if start is not None and start > 0 and end is not None and end > 0:
                     row["raw_momentum"] = end / start - 1
+                    row["momentum_start_adjusted_close"] = start
+                    row["momentum_end_adjusted_close"] = end
+                    row["momentum_start_source_id"] = older.iloc[-1].get("source_id")
+                    row["momentum_end_source_id"] = recent.iloc[-1].get("source_id")
         if pd.isna(row["raw_momentum"]):
             reasons.append("missing_momentum_history")
         rows.append(row)
@@ -537,11 +671,27 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
         eligible.drop_duplicates("issuer_id").sort_values("market_cap", ascending=False).head(1000)
     )
     indices = representatives.index
+    result["rank_universe_issuer_count"] = len(indices)
+    result["sector_peer_count"] = 0
+    result["quality_metric_count"] = 0
+    result["quality_metric_required"] = int(signals.get("min_quality_metrics", 2))
+    result["quality_peer_counts"] = [{} for _ in rows]
+    result["value_peer_counts"] = [{} for _ in rows]
+    result["metric_percentiles"] = [{} for _ in rows]
     qcols = ["gross_profitability", "operating_profitability", "negative_accruals"]
     vcols = ["earnings_yield", "cashflow_yield"]
     lo, hi = signals.get("winsor_low", 0.025), signals.get("winsor_high", 0.975)
     minimum = int(signals.get("min_sector_size", 20))
     for _, group in result.loc[indices].groupby("sector", dropna=False):
+        result.loc[group.index, "sector_peer_count"] = len(group)
+        if not _text_present(group.iloc[0].sector) or group.iloc[0].sector.lower() in {
+            "unknown",
+            "unclassified",
+            "unresolved",
+        }:
+            for index in group.index:
+                result.at[index, "reasons"].append("unknown_sector_for_quality_value")
+            continue
         rank = pd.DataFrame(index=group.index)
         for col in qcols + vcols:
             usable = group[col].dropna()
@@ -554,6 +704,17 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
             else:
                 rank[col] = np.nan
         valid_quality = rank[qcols].notna().sum(axis=1) >= signals.get("min_quality_metrics", 2)
+        for index in group.index:
+            result.at[index, "quality_metric_count"] = int(rank.loc[index, qcols].notna().sum())
+            result.at[index, "quality_peer_counts"] = {
+                col: int(group[col].notna().sum()) for col in qcols
+            }
+            result.at[index, "value_peer_counts"] = {
+                col: int(group[col].notna().sum()) for col in vcols
+            }
+            result.at[index, "metric_percentiles"] = {
+                col: _number(rank.loc[index, col]) for col in qcols + vcols
+            }
         result.loc[group.index, "quality"] = rank[qcols].mean(axis=1).where(valid_quality)
         result.loc[group.index, "value"] = (
             rank[vcols].mean(axis=1).where(rank[vcols].notna().all(axis=1))
@@ -581,12 +742,64 @@ def score_securities(bundle: dict, config: dict) -> pd.DataFrame:
             if result.loc[target, "eligible"]:
                 for col in ("quality", "value", "momentum", "score"):
                     result.loc[target, col] = representative[col]
+                for col in (
+                    "normalization_sector",
+                    "sector_peer_count",
+                    "quality_metric_count",
+                    "quality_peer_counts",
+                    "value_peer_counts",
+                    "metric_percentiles",
+                    "fundamental_source_id",
+                    "fundamental_period_end",
+                    "fundamental_available_at",
+                    "fundamental_currency",
+                    "market_cap_currency",
+                    "market_cap_source_id",
+                    "market_cap_as_of",
+                    "metric_inputs",
+                    "earnings_definition",
+                    *qcols,
+                    *vcols,
+                    "raw_momentum",
+                    "momentum_start_adjusted_close",
+                    "momentum_end_adjusted_close",
+                    "momentum_start_source_id",
+                    "momentum_end_source_id",
+                ):
+                    result.at[target, col] = representative[col]
                 if target != index:
                     result.at[target, "reasons"].append("inherits_representative_issuer_score")
     for index, row in result.iterrows():
         if row.eligible and pd.isna(row.score):
             result.at[index, "reasons"].append("incomplete_family_or_insufficient_sector_peers")
+        if row.eligible and row.representative_security_id is None:
+            result.at[index, "reasons"].append("outside_ranked_universe")
     result["data_status"] = np.where(result.score.notna(), "complete", "incomplete")
+    result.attrs["scoring_context"] = {
+        "method_version": "quality-value-momentum-2",
+        "scope": "supplied_eligible_issuer_cross_section",
+        "supplied_securities": len(result),
+        "eligible_issuers": int(result.loc[result.eligible, "issuer_id"].nunique()),
+        "ranked_issuers": len(indices),
+        "quality_issuers": int(result.loc[indices, "quality"].notna().sum()),
+        "value_issuers": int(result.loc[indices, "value"].notna().sum()),
+        "momentum_issuers": int(result.loc[indices, "raw_momentum"].notna().sum()),
+        "complete_composite_issuers": int(result.loc[indices, "score"].notna().sum()),
+        "minimum_sector_peers": minimum,
+        "minimum_quality_metrics": int(signals.get("min_quality_metrics", 2)),
+        "winsor_low": float(lo),
+        "winsor_high": float(hi),
+        "momentum_months": int(signals.get("momentum_months", 12)),
+        "momentum_skip_months": int(signals.get("momentum_skip_months", 1)),
+        "momentum_start_session": momentum_start_day,
+        "momentum_end_session": momentum_end_day,
+        "rank_method": "average_ties_percentile",
+        "quality_value_normalization": "within_supplied_sector",
+        "momentum_normalization": "across_supplied_eligible_issuers",
+        "composite_method": "weighted_family_percentile_average",
+        "family_weights": dict(family_weights),
+        "market_wide": False,
+    }
     return result
 
 

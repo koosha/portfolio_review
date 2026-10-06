@@ -125,6 +125,7 @@ class PerAccountChrome(FakeChrome):
 def _estimates(security_id, eps):
     return {
         "currency": "USD",
+        "revenue_currency": "USD",
         "source_id": "estimates:" + security_id,
         "received_at": "2026-08-31T20:00:00Z",
         "eps": {"+1y": {"avg": eps, "low": eps * 0.8, "high": eps * 1.2}},

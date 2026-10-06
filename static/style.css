@@ -1804,6 +1804,8 @@ table caption {padding:10px 13px;font-size:11px}
 .security-readout {display:flex;gap:15px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--muted);padding:12px 0;border-top:1px solid var(--border)}
 .security-readout strong {color:var(--ink);font-size:14px;font-weight:600}
 .security-readout .badge {font-size:10px}
+.security-readout .action-model-control {width:170px;max-width:100%;margin-left:auto}
+.security-readout .action-model-control select {width:100%}
 .data-basis {margin:0 0 16px}
 .evidence-summary {display:flex;flex-wrap:wrap;gap:7px}
 .evidence-chip {padding:5px 9px;border:1px solid var(--border);background:#f8faf7;border-radius:6px;font-size:10px;color:#5b6d60}

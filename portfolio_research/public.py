@@ -18,6 +18,7 @@ RESULT_FIELDS = {
     "sector_exposure",
     "exposure_status",
     "signals",
+    "signal_context",
     "risk",
     "scenarios",
     "macro",

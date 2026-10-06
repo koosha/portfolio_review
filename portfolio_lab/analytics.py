@@ -155,6 +155,7 @@ def analyze(bundle: dict, config: dict) -> dict:
     )
     scores = stage("signals", lambda: metrics.score_securities(bundle, config), pd.DataFrame())
     result["signals"] = json_safe(scores)
+    result["signal_context"] = json_safe(scores.attrs.get("scoring_context", {}))
     result["risk"] = stage(
         "risk", lambda: metrics.risk_analysis(bundle, config), {"status": "incomplete"}
     )

@@ -79,7 +79,7 @@ def _fx_note(record, config):
     )
 
 
-def _proposals(record, config, ttm, as_of):
+def _proposals(record, config, ttm, as_of, bundle=None):
     """The EPS and DCF payloads a reviewer may adopt, with the reasons for refusals."""
     from .proposals import (
         DEFAULT_DISCOUNT_RATE,
@@ -97,8 +97,23 @@ def _proposals(record, config, ttm, as_of):
         "equity_type": (record.get("profile") or {}).get("equity_type")
         or record["security"].get("equity_type"),
         "sector": (record.get("profile") or {}).get("sector") or record["security"].get("sector"),
+        "domicile": (record.get("profile") or {}).get("domicile")
+        or record["security"].get("domicile"),
     }
     reasons: list[dict] = []
+    from .calendar import bundle_cutoff, current_receipt_limit
+
+    bundle = bundle or {"as_of": as_of}
+    valuation_context = {
+        "as_of": as_of,
+        "cutoff": bundle_cutoff(bundle),
+        "receipt_limit": current_receipt_limit(bundle),
+        "current": (bundle.get("timeline") or {}).get("review_kind") == "current",
+        "require_received": config["data"].get("require_received_by_cutoff", False),
+        "max_fx_age_days": config["data"].get("max_fx_age_days", 7),
+        "fx_observations": bundle.get("fx_observations") or [],
+        "listing_basis": record.get("listing_basis") or record["security"].get("listing_basis"),
+    }
     eps = propose_eps_model(
         security,
         price_major=latest.get("close"),
@@ -107,6 +122,7 @@ def _proposals(record, config, ttm, as_of):
         ttm=ttm,
         dividends_ttm_per_share=_dividends(record, as_of, reasons),
         horizon_months=config["allocation"]["horizon_months"],
+        valuation_context=valuation_context,
         issues=reasons,
     )
     dcf = propose_dcf_inputs(
@@ -118,6 +134,7 @@ def _proposals(record, config, ttm, as_of):
         currency=statements.get("currency"),
         quote_currency=(record.get("prices") or {}).get("currency"),
         estimates=record.get("estimates"),
+        valuation_context=valuation_context,
         defaults={
             "discount_rate": DEFAULT_DISCOUNT_RATE,
             "terminal_growth_rate": DEFAULT_TERMINAL_GROWTH,
@@ -191,7 +208,7 @@ def build_research(records: dict, bundle: dict, config: dict, as_of: str, brief_
                 "proposals",
                 sid,
                 issues,
-                lambda record=record, ttm=ttm: _proposals(record, config, ttm, as_of),
+                lambda record=record, ttm=ttm: _proposals(record, config, ttm, as_of, bundle),
                 default={"eps": None, "dcf": None, "reasons": []},
             ),
             "coverage": dict(record["coverage"]),

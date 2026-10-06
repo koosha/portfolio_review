@@ -84,6 +84,7 @@ PROFILE_FIELDS = (
     "market_cap",
     "market_cap_as_of",
     "market_cap_received_at",
+    "market_cap_currency",
     "shares_outstanding",
     "domicile",
     "equity_type",
@@ -196,7 +197,9 @@ def _issuer_lookup(securities):
     return lookup
 
 
-def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, events=True) -> dict:
+def _collect(
+    security, config, as_of, *, refresh, issues, issuer_lookup=None, events=True, timeline=None
+) -> dict:
     """Every adapter record for one security, with its own per-capability statuses.
 
     ``events`` is the one capability a candidate can be researched without: news and
@@ -246,7 +249,9 @@ def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, ev
         if events
         else None
     )
-    profile = run("profile", market_data.security_profile)
+    profile = run(
+        "profile", market_data.security_profile, timeline=timeline, issuer_lookup=issuer_lookup
+    )
     record = {
         "security": security,
         "prices": prices,
@@ -1012,6 +1017,7 @@ def enrich_market(
                 issues=issues,
                 issuer_lookup=lookup,
                 events=position < holdings or str(sid) in plan["with_events"],
+                timeline=bundle.get("timeline"),
             )
             _date_disclosures(record, bundle, issues)
             _apply_profile(securities, index, record)
@@ -1069,6 +1075,9 @@ def enrich_market(
         exhausted=exhausted,
         stopped=stopped,
     )
+    from .calendar import freeze_current_inputs
+
+    freeze_current_inputs(bundle)
     _apply_shared_state(bundle, config, as_of)
     bundle["coverage"] = coverage_report(bundle, config)
     bundle["research"] = build_research(

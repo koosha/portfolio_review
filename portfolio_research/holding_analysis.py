@@ -18,8 +18,9 @@ from portfolio_lab.metrics import _frame, _observed
 from .scenarios import DEFAULT_SHARED_STATE, _scale
 from .statements import share_units, split_adjust_dividends
 from .valuation import LABELS, calculate_dcf, calculate_eps
+from .valuation_basis import estimate_currency, listing_ratio, translate_per_share
 
-METHOD_VERSION = "holding-scenarios-1"
+METHOD_VERSION = "holding-scenarios-2"
 MAX_GROWTH = 0.30
 EARNINGS_SENSITIVITY = 0.5
 MULTIPLE_SENSITIVITY = 0.5
@@ -42,6 +43,16 @@ GAP_STEPS = {
     "Statement EPS and the quoted price use different currencies.": (
         "currency_mismatch",
         "Check currencies",
+        "data",
+    ),
+    "Statement EPS has no verified ordinary-share or listed-share basis.": (
+        "share_basis_missing",
+        "Check EPS share units",
+        "data",
+    ),
+    "The quote source has conflicting price currencies.": (
+        "quote_currency_conflict",
+        "Refresh price data",
         "data",
     ),
     "No comparable statement EPS or currency-matched consensus is available.": (
@@ -128,14 +139,12 @@ def _eligible(rows, bundle, config, date_column="period_end"):
         and not eligible.empty
         and "received_at" in eligible
     ):
-        from .calendar import bundle_cutoff
+        from .calendar import current_receipt_limit
 
         received = pd.to_datetime(
             eligible["received_at"], utc=True, errors="coerce", format="mixed"
         )
-        eligible = eligible.loc[
-            received.notna() & received.le(bundle_cutoff(bundle) + pd.Timedelta(hours=1))
-        ]
+        eligible = eligible.loc[received.notna() & received.le(current_receipt_limit(bundle))]
     if (bundle.get("timeline") or {}).get("review_kind") != "current" and not eligible.empty:
         from .calendar import bundle_cutoff, new_york_dates
 
@@ -173,7 +182,12 @@ def _estimate(record, bundle, config):
     """Consensus is receipt-dated; a present-day answer is never an old forecast."""
     if not isinstance(record, dict) or not record.get("received_at"):
         return None
-    from .calendar import bundle_cutoff
+    if record.get("unit_contract") == "legacy_unverified" or (
+        str(record.get("source_id") or "").startswith("yahoo_estimates:")
+        and record.get("unit_contract") != "period-currencies-2"
+    ):
+        return None
+    from .calendar import bundle_cutoff, current_receipt_limit
 
     stamp = pd.to_datetime(record["received_at"], utc=True, errors="coerce")
     cutoff = bundle_cutoff(bundle)
@@ -184,7 +198,7 @@ def _estimate(record, bundle, config):
         return None
     # Fetching can finish after generation, but a date beyond the operation's
     # bounded provider window is not evidence acquired for this current run.
-    if current and stamp > cutoff + pd.Timedelta(hours=1):
+    if current and stamp > current_receipt_limit(bundle):
         return None
     if config.get("data", {}).get("require_received_by_cutoff") and stamp > cutoff:
         return None
@@ -221,14 +235,18 @@ def _model_facts(sid, security, bundle, config):
                 # A converted close cannot be divided by unconverted statement EPS.
                 if _currency(candidate.get("currency")) == _currency(security.get("currency")):
                     price_row = candidate
-    currency = prices.get("currency") or price_row.get("currency") or security.get("currency")
+    currency = price_row.get("currency") or prices.get("currency") or security.get("currency")
+    price_currency_issue = bool(
+        prices.get("currency")
+        and price_row.get("currency")
+        and prices["currency"] != price_row["currency"]
+    )
     profile = facts.get("profile") or security
     if profile.get("received_at"):
-        from .calendar import bundle_cutoff
+        from .calendar import current_receipt_limit
 
         stamp = pd.to_datetime(profile.get("received_at"), utc=True, errors="coerce")
-        current = (bundle.get("timeline") or {}).get("review_kind") == "current"
-        limit = bundle_cutoff(bundle) + (pd.Timedelta(hours=1) if current else pd.Timedelta(0))
+        limit = current_receipt_limit(bundle)
         if pd.isna(stamp) or stamp > limit:
             profile = {}
     return {
@@ -237,6 +255,7 @@ def _model_facts(sid, security, bundle, config):
         "quarters": quarters,
         "price": price_row,
         "currency": _currency(currency),
+        "price_currency_issue": price_currency_issue,
         "statement_currency": _currency(
             statement_record.get("currency") or trailing.get("currency")
         ),
@@ -247,6 +266,11 @@ def _model_facts(sid, security, bundle, config):
         ],
         "profile": profile,
         "estimates": _estimate(inputs.get("estimates"), bundle, config),
+        "listing_basis": facts.get("listing_basis") or security.get("listing_basis"),
+        "fx_observations": [
+            *(bundle.get("fx_observations") or []),
+            *(facts.get("fx_observations") or []),
+        ],
     }
 
 
@@ -259,6 +283,21 @@ def _trailing_eps(facts):
     quarters = [row for row in quarters if row.get("period_end") in window]
     values = [_number(row.get("diluted_eps")) for row in quarters]
     if len(quarters) == 4 and all(value is not None for value in values):
+        periods = [pd.Timestamp(row["period_end"]) for row in quarters]
+        if len(set(periods)) != 4 or any(
+            not 60 <= (newer - older).days <= 100 for newer, older in zip(periods, periods[1:])
+        ):
+            facts["earnings_issue"] = (
+                "Statement EPS requires four distinct, nonoverlapping fiscal quarters."
+            )
+            return None, None, []
+        currencies = {row.get("currency") for row in quarters}
+        bases = {row.get("per_share_basis") for row in quarters}
+        if len(currencies) != 1 or None in currencies or len(bases) != 1:
+            facts["earnings_issue"] = "Quarterly EPS has inconsistent currencies or share units."
+            return None, None, []
+        facts["earnings_per_share_basis"] = next(iter(bases))
+        facts["earnings_currency"] = next(iter(currencies))
         # Financial statements often already restate comparative EPS for a split.
         # Unlike paid dividends, that basis cannot be inferred from a price action.
         splits = [row for row in facts["actions"] if row.get("kind") == "split"]
@@ -284,6 +323,8 @@ def _trailing_eps(facts):
             _sources(*quarters),
         )
     if trailing.get("period_type") == "annual" and _number(trailing.get("diluted_eps")) is not None:
+        facts["earnings_per_share_basis"] = trailing.get("per_share_basis")
+        facts["earnings_currency"] = trailing.get("currency") or facts["statement_currency"]
         splits = [
             row
             for row in facts["actions"]
@@ -306,7 +347,11 @@ def _trailing_eps(facts):
     profile = facts["profile"]
     listing_shares = _number(profile.get("shares_outstanding"))
     units = share_units(statement_shares, listing_shares)
+    if trailing.get("share_count_basis") == "ordinary_share" and facts.get("listing_ratio"):
+        units = share_units(statement_shares / facts["listing_ratio"], listing_shares)
     if income is not None and units["factor"]:
+        facts["earnings_per_share_basis"] = trailing.get("share_count_basis")
+        facts["earnings_currency"] = trailing.get("currency") or facts["statement_currency"]
         return (
             income / (statement_shares * units["factor"]),
             "common_earnings_per_diluted_share",
@@ -320,7 +365,19 @@ def _growth(facts):
     periods = estimates.get("eps") or {}
     current = _number((periods.get("0y") or {}).get("avg"))
     next_year = _number((periods.get("+1y") or {}).get("avg"))
-    if current is not None and current > 0 and next_year is not None and next_year > 0:
+    current_currency = estimate_currency(estimates, "0y")
+    next_currency = estimate_currency(estimates, "+1y")
+    current_basis = (periods.get("0y") or {}).get("per_share_basis")
+    next_basis = (periods.get("+1y") or {}).get("per_share_basis")
+    if (
+        current is not None
+        and current > 0
+        and next_year is not None
+        and next_year > 0
+        and current_currency is not None
+        and current_currency == next_currency
+        and current_basis == next_basis
+    ):
         return (
             min(MAX_GROWTH, max(-MAX_GROWTH, next_year / current - 1)),
             "consensus_year_to_year",
@@ -336,6 +393,8 @@ def _growth(facts):
             and before > 0
             and now is not None
             and now > 0
+            and _currency(first.get("currency")) is not None
+            and _currency(first.get("currency")) == _currency(second.get("currency"))
             and 330 <= (dates[0] - dates[1]).days <= 400
         ):
             return (
@@ -351,6 +410,7 @@ def automatic_eps(sid, security, bundle, config):
     if security.get("instrument_type") != "equity" or security.get("equity_type") not in (
         None,
         "ordinary_common",
+        "depositary_receipt",
     ):
         return None, "A company earnings model does not apply to this instrument."
     if security.get("resolution_status") in {"unresolved", "conflict"}:
@@ -360,25 +420,82 @@ def automatic_eps(sid, security, bundle, config):
     currency = facts["currency"]
     if not price or price <= 0 or not currency:
         return None, "A dated price with a verified quote currency is required."
-    from .calendar import bundle_cutoff
+    from .calendar import bundle_cutoff, current_receipt_limit
 
     cutoff = bundle_cutoff(bundle)
+    if facts["price_currency_issue"]:
+        return None, "The quote source has conflicting price currencies."
     price_date = pd.Timestamp(facts["price"].get("date"))
     if (cutoff.date() - price_date.date()).days > config["data"].get("max_price_age_days", 4):
         return None, "Refresh the stale price before comparing scenarios."
+    basis_context = {
+        "as_of": bundle["as_of"],
+        "cutoff": cutoff,
+        "current": (bundle.get("timeline") or {}).get("review_kind") == "current",
+        "require_received": config["data"].get("require_received_by_cutoff", False),
+        "receipt_limit": current_receipt_limit(bundle),
+    }
+    ratio, _ = listing_ratio(facts["listing_basis"], **basis_context)
+    facts["listing_ratio"] = ratio
     starting_eps, eps_basis, eps_sources = _trailing_eps(facts)
     convention = "trailing"
-    if starting_eps is not None and facts["statement_currency"] != currency:
-        return None, "Statement EPS and the quoted price use different currencies."
+    earnings_bridge = None
+    domicile = facts["profile"].get("domicile") or security.get("domicile")
+    requires_share_basis = bool(
+        security.get("depositary_receipt") is True
+        or facts["profile"].get("depositary_receipt") is True
+        or security.get("equity_type") == "depositary_receipt"
+        or (ratio is not None and ratio != 1)
+        or (currency == "USD" and domicile and domicile != "US")
+    )
+    if starting_eps is not None:
+        earnings_bridge = translate_per_share(
+            starting_eps,
+            from_currency=facts.get("earnings_currency") or facts["statement_currency"],
+            quote_currency=currency,
+            per_share_basis=facts.get("earnings_per_share_basis"),
+            listing_basis=facts["listing_basis"],
+            fx_observations=facts["fx_observations"],
+            max_fx_age_days=config["data"].get("max_fx_age_days", 7),
+            same_currency_listing_contract=not requires_share_basis,
+            **basis_context,
+        )
+        if earnings_bridge["value"] is None:
+            facts["earnings_issue"] = earnings_bridge["reason"]
+            starting_eps = None
+        else:
+            starting_eps = earnings_bridge["value"]
+            if earnings_bridge.get("share_ratio_source_id"):
+                eps_sources = sorted({*eps_sources, earnings_bridge["share_ratio_source_id"]})
+            if (earnings_bridge.get("fx") or {}).get("source_id"):
+                eps_sources = sorted({*eps_sources, earnings_bridge["fx"]["source_id"]})
     if starting_eps is not None:
         end = pd.Timestamp(facts["trailing"]["period_end"])
         if (cutoff.date() - end.date()).days > config["data"].get("max_fundamental_age_days", 150):
             return None, "Refresh the stale financial statements before valuing earnings."
     else:
         estimates = facts["estimates"] or {}
-        if _currency(estimates.get("currency")) != currency:
-            return None, "No comparable statement EPS or currency-matched consensus is available."
-        starting_eps = _number(((estimates.get("eps") or {}).get("0y") or {}).get("avg"))
+        consensus = (estimates.get("eps") or {}).get("0y") or {}
+        if estimate_currency(estimates, "0y") != currency:
+            return None, facts.get("earnings_issue") or (
+                "No comparable statement EPS or currency-matched consensus is available."
+            )
+        # This is the retained listing-estimate contract, explicitly distinct from
+        # validating an ADR ratio. A contrary declared ordinary-share basis must pass
+        # the same sourced share bridge as a filing value.
+        consensus_bridge = translate_per_share(
+            consensus.get("avg"),
+            from_currency=estimate_currency(estimates, "0y"),
+            quote_currency=currency,
+            per_share_basis=consensus.get("per_share_basis") or estimates.get("per_share_basis"),
+            listing_basis=facts["listing_basis"],
+            same_currency_listing_contract=True,
+            **basis_context,
+        )
+        if consensus_bridge["value"] is None:
+            return None, consensus_bridge["reason"]
+        starting_eps = consensus_bridge["value"]
+        earnings_bridge = consensus_bridge
         eps_basis, eps_sources, convention = (
             "current_fiscal_consensus_eps",
             _sources(estimates),
@@ -389,7 +506,7 @@ def automatic_eps(sid, security, bundle, config):
     if not eps_sources or not facts["price"].get("source_id"):
         return None, "Retained earnings and price sources are required."
     growth, growth_basis, growth_sources = _growth(facts)
-    if facts["estimates"] and _currency(facts["estimates"].get("currency")) != currency:
+    if facts["estimates"] and estimate_currency(facts["estimates"], "0y") != currency:
         # Growth ratios in another currency still mix accounting/listing assumptions;
         # prefer the observed issuer trend instead of silently using that consensus.
         clean = {**facts, "estimates": None}
@@ -453,7 +570,13 @@ def automatic_eps(sid, security, bundle, config):
                 "starting_pe": multiple,
                 "base_annual_earnings_growth": growth,
                 "earnings_basis": eps_basis,
+                "earnings_bridge": earnings_bridge,
                 "growth_basis": growth_basis,
+                "growth_convention": (
+                    "consensus_growth_applied_to_statement_eps_draft_proxy"
+                    if convention == "trailing" and growth_basis.startswith("consensus")
+                    else growth_basis
+                ),
                 "statement_period_end": facts["trailing"].get("period_end"),
                 "price_date": facts["price"].get("date"),
                 "estimates_received_at": (facts["estimates"] or {}).get("received_at"),
@@ -473,6 +596,9 @@ def automatic_eps(sid, security, bundle, config):
                 "dividend_basis": "trailing_cash_annualized" if paid else "explicit_zero_draft",
                 "growth_cap": MAX_GROWTH,
                 "share_count": "constant_after_starting_eps",
+                "reporting_to_quote_fx": (
+                    "constant_retained_spot_rate" if (earnings_bridge or {}).get("fx") else None
+                ),
             },
             "notes": [
                 "Draft scenarios; shared market shocks adjust earnings growth and terminal P/E.",
@@ -480,7 +606,22 @@ def automatic_eps(sid, security, bundle, config):
                 "Cash dividends scale with the horizon; buybacks are reflected only in EPS/shares.",
                 "FRED observations provide context; they do not numerically change this model.",
             ]
-            + ([facts["earnings_issue"]] if facts.get("earnings_issue") else []),
+            + ([facts["earnings_issue"]] if facts.get("earnings_issue") else [])
+            + (
+                [
+                    "Consensus EPS growth is a draft proxy applied to reported EPS; their accounting definitions may differ."
+                ]
+                if convention == "trailing" and growth_basis.startswith("consensus")
+                else []
+            )
+            + (
+                [
+                    "Consensus EPS uses the retained listing-estimate unit contract; no ADS ratio was inferred."
+                ]
+                if convention == "forward"
+                and earnings_bridge["input_per_share_basis"] == "retained_listing_contract"
+                else []
+            ),
         },
     }
     return payload, None
@@ -514,7 +655,7 @@ def _frozen_proposal(sid, security, bundle, config):
     estimates = ((bundle.get("research_inputs") or {}).get(sid) or {}).get("estimates")
     if estimates and _estimate(estimates, bundle, config) is None:
         return None
-    from .calendar import bundle_cutoff
+    from .calendar import bundle_cutoff, current_receipt_limit
 
     cutoff = bundle_cutoff(bundle)
     quote = _observed(_frame(bundle, "prices"), bundle, "date", config=config)
@@ -534,10 +675,7 @@ def _frozen_proposal(sid, security, bundle, config):
         if receipt.get("source_id") not in identifiers:
             continue
         stamp = pd.to_datetime(receipt.get("received_at"), utc=True, errors="coerce")
-        current = (bundle.get("timeline") or {}).get("review_kind") == "current"
-        if not pd.isna(stamp) and stamp > cutoff + (
-            pd.Timedelta(hours=1) if current else pd.Timedelta(0)
-        ):
+        if pd.isna(stamp) or stamp > current_receipt_limit(bundle):
             return None
     verified = calculate_eps(source)
     if verified["status"] != "ready":
@@ -682,14 +820,42 @@ def build_holding_analysis(result, bundle, config, workspace):
             holdings.setdefault(sid, []).append(row)
     forecasts = {}
     for row in result.get("forecast_inputs", []):
+        if row.get("horizon_months") not in {None, config["allocation"]["horizon_months"]}:
+            continue
+        if (
+            row.get("forecast_date") is not None
+            and str(row["forecast_date"])[:10] != str(bundle.get("as_of"))[:10]
+        ):
+            continue
         forecasts.setdefault(str(row["security_id"]), []).append(row)
     benchmark_id = config["mandate"].get("benchmark_id")
     benchmark = [
         {"label": str(row["scenario"]).lower(), "return_value": row.get("return_value")}
         for row in forecasts.get(benchmark_id, [])
     ]
-    probabilities = _probabilities(result, config, LABELS)
+    matching_result = {
+        **result,
+        "forecast_inputs": [row for rows in forecasts.values() for row in rows],
+    }
+    probabilities = _probabilities(matching_result, config, LABELS)
     benchmark_return, benchmark_metric = _summary_return(benchmark, probabilities)
+    # An unweighted central comparison still requires the same complete three-case
+    # benchmark packet; a partial or mismatched comparator cannot create a Buy/Sell.
+    complete_benchmark = (
+        {row["label"] for row in benchmark} == set(LABELS)
+        and len(benchmark) == len(LABELS)
+        and all(_number(row["return_value"]) is not None for row in benchmark)
+        and all(
+            row.get("horizon_months") in {None, config["allocation"]["horizon_months"]}
+            and (
+                row.get("forecast_date") is None
+                or str(row["forecast_date"])[:10] == str(bundle.get("as_of"))[:10]
+            )
+            for row in forecasts.get(benchmark_id, [])
+        )
+    )
+    if not complete_benchmark:
+        benchmark_return = None
     result_rows = []
     for sid, positions in holdings.items():
         security = secmap.get(sid) or positions[0]

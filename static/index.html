@@ -289,7 +289,7 @@
 <div class="table-tools"><label class="grow">Find a holding<input id="analysis-search" type="search" placeholder="Symbol or company"></label><label>Horizon<select id="research-horizon"><option value="6">6 months</option><option value="12">12 months</option><option value="18">18 months</option></select></label></div>
 <div id="holding-analysis-message" class="analysis-notice" role="status" hidden></div>
 <div id="holding-analysis"></div>
-<p class="compact-note">Actions reflect the displayed scenario assumptions. Open a holding to inspect its inputs.</p>
+<p class="compact-note">Signals use the model shown. Open a holding to inspect its assumptions.</p>
 </section>
 <section class="panel" data-analysis>
 <div class="section-heading">
@@ -345,8 +345,10 @@
 </div>
 </details>
 </section>
-<details class="panel research-screen" data-analysis><summary>Compare quality, value &amp; momentum</summary>
+<details class="panel research-screen" data-analysis><summary>Quality, value &amp; momentum scores</summary>
 <div class="section-heading"><h2>Research scores</h2><span id="screen-scope" class="badge"></span></div>
+<p class="compact-note">Relative ranks within eligible peers. Update &amp; analyze refreshes the inputs.</p>
+<div id="score-method"></div>
 <label>Find a security<input id="screen-search" type="search"></label><div id="company-screen"></div></details>
 </section>
 <section id="page-scenarios" class="page" aria-label="Scenarios" hidden>

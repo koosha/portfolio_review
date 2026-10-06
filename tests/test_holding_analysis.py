@@ -104,6 +104,202 @@ def fixture(horizon=12):
 
 
 class HoldingAnalysisTests(unittest.TestCase):
+    def test_native_collection_passes_the_existing_identity_lookup_to_the_profile(self):
+        from contextlib import ExitStack
+
+        from portfolio_research.enrichment import _collect
+
+        security, bundle, config, _ = fixture()
+
+        def lookup(metadata):
+            return "issuer:1"
+
+        with ExitStack() as stack:
+            for name in ("price_history", "statements", "estimates", "news_and_filings"):
+                stack.enter_context(
+                    patch("portfolio_research.market_data." + name, return_value=None)
+                )
+            profile = stack.enter_context(
+                patch(
+                    "portfolio_research.market_data.security_profile",
+                    return_value={"issuer_id": "issuer:1"},
+                )
+            )
+            record = _collect(
+                security,
+                config,
+                bundle["as_of"],
+                refresh=False,
+                issues=[],
+                issuer_lookup=lookup,
+                timeline=bundle["timeline"],
+            )
+        self.assertIs(profile.call_args.kwargs["issuer_lookup"], lookup)
+        self.assertEqual(record["profile"]["issuer_id"], security["issuer_id"])
+
+    def test_explicit_depositary_receipt_supports_a_listing_consensus_company_model(self):
+        security, bundle, config, _ = fixture()
+        security["equity_type"] = "depositary_receipt"
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(reason)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["eps_convention"], "forward")
+
+    def test_statement_eps_subunits_are_normalized_before_the_price_multiple(self):
+        security, bundle, config, _ = fixture()
+        facts = bundle["research_inputs"]["EQUITY"]["valuation_facts"]
+        facts["prices"]["currency"] = "GBP"
+        facts["prices"]["prices"][0]["currency"] = "GBP"
+        for row in facts["statements"]["quarterly"]:
+            row.update(currency="GBp", diluted_eps=250, per_share_basis="listed_share")
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(reason)
+        self.assertEqual(payload["proposal_meta"]["inputs"]["starting_eps"], 10)
+
+    def test_foreign_statements_use_verified_listing_consensus_when_statement_units_missing(self):
+        security, bundle, config, _ = fixture()
+        statements = bundle["research_inputs"]["EQUITY"]["valuation_facts"]["statements"]
+        statements["currency"] = "CNY"
+        for row in statements["quarterly"]:
+            row["currency"] = "CNY"
+        before = deepcopy(bundle["research_inputs"])
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(reason)
+        self.assertEqual(payload["eps_convention"], "forward")
+        meta = payload["proposal_meta"]
+        self.assertFalse(meta["inputs"]["statements_used"])
+        self.assertEqual(meta["inputs"]["earnings_basis"], "current_fiscal_consensus_eps")
+        self.assertEqual(meta["inputs"]["starting_eps"], 10)
+        self.assertTrue(any("no verified" in note for note in meta["notes"]))
+        self.assertEqual(bundle["research_inputs"], before)
+
+    def test_documented_ordinary_earnings_convert_to_quote_per_ads_once(self):
+        from tests.test_valuation_basis import fx_record, ratio_record
+
+        security, bundle, config, _ = fixture()
+        facts = bundle["research_inputs"]["EQUITY"]["valuation_facts"]
+        facts["statements"]["currency"] = "CNY"
+        for row in facts["statements"]["quarterly"]:
+            row.update(currency="CNY", diluted_eps=1.375, per_share_basis="ordinary_share")
+        facts["listing_basis"] = ratio_record()
+        bundle["fx_observations"] = [fx_record()]
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(reason)
+        self.assertEqual(payload["eps_convention"], "trailing")
+        self.assertAlmostEqual(payload["proposal_meta"]["inputs"]["starting_eps"], 6.6)
+        self.assertEqual(
+            payload["proposal_meta"]["assumptions"]["reporting_to_quote_fx"],
+            "constant_retained_spot_rate",
+        )
+
+    def test_a_known_ads_requires_statement_share_basis_even_in_same_currency(self):
+        from tests.test_valuation_basis import ratio_record
+
+        security, bundle, config, _ = fixture()
+        facts = bundle["research_inputs"]["EQUITY"]["valuation_facts"]
+        facts["listing_basis"] = ratio_record()
+        bundle["research_inputs"]["EQUITY"]["estimates"] = None
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(payload)
+        self.assertIn("share basis", reason)
+
+    def test_a_foreign_usd_listing_needs_verified_statement_units_or_listing_consensus(self):
+        security, bundle, config, _ = fixture()
+        security["domicile"] = "CN"
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(reason)
+        self.assertEqual(payload["eps_convention"], "forward")
+        bundle["research_inputs"]["EQUITY"]["estimates"] = None
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(payload)
+        self.assertIn("share basis", reason)
+        for row in bundle["research_inputs"]["EQUITY"]["valuation_facts"]["statements"][
+            "quarterly"
+        ]:
+            row["per_share_basis"] = "listed_share"
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(reason)
+        self.assertEqual(payload["eps_convention"], "trailing")
+
+    def test_currency_of_actual_eps_observations_wins_over_an_inconsistent_wrapper(self):
+        security, bundle, config, _ = fixture()
+        facts = bundle["research_inputs"]["EQUITY"]["valuation_facts"]
+        for row in facts["statements"]["quarterly"]:
+            row["currency"] = "CAD"
+        bundle["research_inputs"]["EQUITY"]["estimates"] = None
+        payload, _ = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(payload)
+
+    def test_contradictory_price_currency_cannot_create_a_signal(self):
+        security, bundle, config, _ = fixture()
+        bundle["research_inputs"]["EQUITY"]["valuation_facts"]["prices"]["prices"][0][
+            "currency"
+        ] = "GBP"
+        payload, reason = automatic_eps("EQUITY", security, bundle, config)
+        self.assertIsNone(payload)
+        self.assertIn("conflicting price currencies", reason)
+
+    def test_duplicate_or_overlapping_eps_quarters_are_not_an_annual_earnings_value(self):
+        for dates in (
+            ("2026-06-30", "2026-06-30", "2025-12-31", "2025-09-30"),
+            ("2026-06-30", "2026-06-29", "2026-06-28", "2026-06-27"),
+        ):
+            security, bundle, config, _ = fixture()
+            statements = bundle["research_inputs"]["EQUITY"]["valuation_facts"]["statements"]
+            for row, day in zip(statements["quarterly"], dates):
+                row["period_end"] = day
+            statements["ttm"]["ttm_quarters"] = ",".join(dates)
+            bundle["research_inputs"]["EQUITY"]["estimates"] = None
+            self.assertIsNone(automatic_eps("EQUITY", security, bundle, config)[0])
+
+    def test_consensus_growth_requires_the_same_currency_in_both_periods(self):
+        security, bundle, config, _ = fixture()
+        estimates = bundle["research_inputs"]["EQUITY"]["estimates"]
+        estimates["eps"]["0y"]["currency"] = "USD"
+        estimates["eps"]["+1y"]["currency"] = "CNY"
+        payload, _ = automatic_eps("EQUITY", security, bundle, config)
+        self.assertEqual(
+            payload["proposal_meta"]["inputs"]["growth_basis"], "flat_earnings_assumption"
+        )
+
+    def test_consensus_growth_on_statement_eps_is_an_explicit_accounting_proxy(self):
+        security, bundle, config, _ = fixture()
+        payload, _ = automatic_eps("EQUITY", security, bundle, config)
+        self.assertEqual(
+            payload["proposal_meta"]["inputs"]["growth_convention"],
+            "consensus_growth_applied_to_statement_eps_draft_proxy",
+        )
+        self.assertTrue(
+            any(
+                "accounting definitions may differ" in note
+                for note in payload["proposal_meta"]["notes"]
+            )
+        )
+
+    def test_partial_wrong_horizon_or_wrong_date_benchmark_is_not_a_buy_comparison(self):
+        for defect in ("partial", "horizon", "date"):
+            _, bundle, config, result = fixture()
+            config["allocation"]["use_probabilities"] = False
+            if defect == "partial":
+                result["forecast_inputs"] = [result["forecast_inputs"][1]]
+            elif defect == "horizon":
+                result["forecast_inputs"][1]["horizon_months"] = 6
+            else:
+                result["forecast_inputs"][1]["forecast_date"] = "2026-07-31"
+            row = build_holding_analysis(result, bundle, config, {})[0]
+            self.assertEqual(row["action"], "Review")
+            self.assertIsNone(row["benchmark_return"])
+
+    def test_frozen_current_inputs_do_not_admit_receipts_after_the_final_cutoff(self):
+        security, bundle, config, _ = fixture()
+        bundle["timeline"].update(
+            review_kind="current", input_acquisition_started_at="2026-08-31T19:00:00Z"
+        )
+        item = bundle["research_inputs"]["EQUITY"]
+        item["valuation_facts"]["statements"] = {}
+        item["estimates"]["received_at"] = "2026-08-31T20:30:00Z"
+        self.assertIsNone(automatic_eps("EQUITY", security, bundle, config)[0])
+
     def test_sec_covered_company_keeps_native_valuation_statements_without_overwriting_sec(self):
         from contextlib import ExitStack
 
@@ -191,6 +387,9 @@ class HoldingAnalysisTests(unittest.TestCase):
             facts = bundle["research_inputs"]["EQUITY"]["valuation_facts"]
             if defect == "currency":
                 facts["statements"]["currency"] = "CAD"
+                for row in facts["statements"]["quarterly"]:
+                    row["currency"] = "CAD"
+                bundle["research_inputs"]["EQUITY"]["estimates"] = None
             elif defect == "earnings":
                 for row in facts["statements"]["quarterly"]:
                     row["diluted_eps"] = -2

@@ -191,13 +191,68 @@ def bundle_cutoff(bundle):
     return information_cutoff(bundle["as_of"])
 
 
+def current_receipt_limit(bundle):
+    """Receipt bound while acquiring, or the exact boundary once inputs freeze."""
+    cutoff = bundle_cutoff(bundle)
+    timeline = bundle.get("timeline") or {}
+    acquiring = timeline.get("review_kind") == "current" and not timeline.get(
+        "input_acquisition_started_at"
+    )
+    return cutoff + (pd.Timedelta(hours=1) if acquiring else pd.Timedelta(0))
+
+
+def freeze_current_inputs(bundle, *, completed_at=None):
+    """Include sources actually received during a bounded current acquisition.
+
+    A current collection is selected at load start. Provider answers can arrive
+    later in that same operation, so freeze the information set at its latest
+    retained source receipt. Preserve each source timestamp, the market date and
+    the collection boundary. Historical reconstructions and frozen replays never
+    move. Future receipts or receipts beyond the current acquisition window do
+    not advance a cutoff.
+    """
+    timeline = bundle.get("timeline") or {}
+    if timeline.get("review_kind") != "current" or timeline.get("frozen_input_replay"):
+        return
+    initial = _aware_utc(
+        timeline.get("input_acquisition_started_at") or timeline["information_cutoff"]
+    )
+    previous = _aware_utc(timeline["information_cutoff"])
+    completed = _aware_utc(completed_at or datetime.now(ZoneInfo("UTC")))
+    limit = min(completed, initial + pd.Timedelta(hours=1))
+    receipts = [previous]
+    for source in bundle.get("sources") or []:
+        if not isinstance(source, dict) or not source.get("source_id"):
+            continue
+        stamp = pd.to_datetime(source.get("received_at"), utc=True, errors="coerce")
+        if pd.notna(stamp) and initial < stamp <= limit:
+            receipts.append(stamp)
+    frozen = max(receipts)
+    if frozen <= previous:
+        # A completed cache-only acquisition freezes the original boundary too;
+        # replay must not keep admitting an extra hour of receipts.
+        bundle["timeline"] = {
+            **timeline,
+            "input_acquisition_started_at": initial.isoformat(),
+        }
+        return
+    bundle["timeline"] = {
+        **timeline,
+        "input_acquisition_started_at": initial.isoformat(),
+        "information_cutoff": frozen.isoformat(),
+        "decision_cutoff": frozen.isoformat(),
+        "generated_at": frozen.isoformat(),
+        **_execution_stamps(_first_session_closing_after(frozen)),
+    }
+
+
 def settle_execution(timeline, completed_at):
     """Return a timeline whose earliest execution follows the completed result.
 
     A current review executes at the first close after generation, which can be minutes
     away. When the analysis completes on or after that close, execution moves to the
     first session closing strictly after completion and ``generated_at`` records the
-    completion instant; the information cutoff stays at load start. Historical
+    completion instant; the information cutoff stays at the frozen input boundary. Historical
     timelines execute after their decision date and are returned unchanged.
     """
     settled = dict(timeline)

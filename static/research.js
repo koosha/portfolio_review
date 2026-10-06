@@ -94,6 +94,40 @@ function actionBadge(row) {
   const action=row?.action || row?.display_action || 'Not analyzed', node=el('span',action,`action-badge ${action.toLowerCase().replaceAll(' ','-')}`);
   node.title=row?.reason || 'No holding action was computed.';return node;
 }
+function modelLabel(row) {
+  if(row?.model==='eps_multiple')return ['automatic_draft','retained_proposal_draft'].includes(row.source_type)?'Draft EPS × P/E':'EPS × P/E';
+  if(row?.model==='fcff_dcf')return 'DCF value';
+  if(row?.model==='shared_state')return 'Market scenarios';
+  return row?.analysis_missing?'Not computed':'Unavailable';
+}
+function actionBreakdown(row) {
+  if(row.analysis_missing)return null;
+  const benchmark=row.compare_to_benchmark?.security_id || resolved().mandate?.benchmark_id || 'VOO';
+  const isDCF=row.model==='fcff_dcf';
+  const values={model:modelLabel(row),signal_basis:friendly(row.basis),return_basis:friendly(row.return_metric),
+    ...(isDCF?{intrinsic_value_gap:pct(row.intrinsic_value_gap)}:{
+      scenario_return:pct(row.scenario_return),benchmark:securityLabel(benchmark),benchmark_return:pct(row.benchmark_return),
+      difference:pct(row.excess_return),review_hurdle:pct(row.review_hurdle),round_trip_cost_assumption:pct(row.round_trip_cost_fraction),
+    })};
+  const inputs=row.valuation_input?.proposal_meta?.inputs || row.inputs || {};
+  const central=row.valuation_input?.scenarios?.find(item=>item.label==='central');
+  const assumptions=row.model==='eps_multiple'?kv({starting_eps:num(inputs.starting_eps),starting_pe:num(inputs.starting_pe),
+    base_annual_earnings_growth:pct(inputs.base_annual_earnings_growth),central_horizon_eps:num(central?.eps),central_horizon_pe:num(central?.pe),
+    growth_basis:inputs.growth_basis,earnings_basis:inputs.earnings_basis}):null;
+  const unchangedMultiple=row.source_type==='automatic_draft' && numeric(inputs.starting_pe)!==null && numeric(central?.pe)!==null
+    && Math.abs(numeric(central.pe)-numeric(inputs.starting_pe))<1e-10;
+  return disclosure('Why this signal',kv(values),
+    table(row.scenarios || [],[{key:'label',label:'Outcome'},{key:'probability',render:pct},
+      ...(isDCF?[{key:'value_per_share',label:'Intrinsic value / share',render:value=>money(value,row.inputs?.currency)}]:[
+        {key:'eps',label:'Horizon EPS',render:num},{key:'pe',label:'P/E',render:num},{key:'horizon_price',render:num},
+        {key:'distributions_per_starting_share',label:'Distributions / share',render:num},{key:'return_value',label:'Scenario return',render:pct},
+      ])]),assumptions,
+    el('p',isDCF?'DCF estimates intrinsic value. A holding signal requires horizon return scenarios.':row.model==='shared_state'?'Shared market scenarios support a Hold signal; company evidence is required for a change.':'Buy: difference > hurdle + round-trip cost. Sell: difference < −(hurdle + round-trip cost). Otherwise: Hold.','compact-note'),
+    row.model==='eps_multiple'?el('p','The EPS bridge uses earnings growth, horizon P/E and distributions. It does not calculate DCF value.','compact-note'):null,
+    unchangedMultiple?el('p','Central P/E is held at the starting multiple; central return follows assumed EPS growth and distributions.','compact-note'):null,
+    inputs.growth_convention==='consensus_growth_applied_to_statement_eps_draft_proxy'?el('p','Consensus earnings growth is applied to reported EPS as a draft proxy; accounting definitions may differ.','compact-note'):null,
+    button('Portfolio proposal gates',()=>navigate('review'),'text-button'));
+}
 function when(value) {
   if (!value) return 'Never';
   const date = new Date(value);
@@ -849,6 +883,24 @@ function detailEvidence(id) {
 function detailCalculation(id) {
   const company=result?.company_research?.[id], proposals=result?.research?.[id]?.proposals;
   const nodes=[];
+  const signal=(result?.signals || []).find(row=>row.security_id===id);
+  if(signal) {
+    const representative=(result?.signals || []).find(row=>row.security_id===signal.representative_security_id) || signal;
+    const metrics=[['gross_profitability','Gross profitability'],['operating_profitability','Operating profitability'],['negative_accruals','Negative cash accruals'],['earnings_yield','Earnings yield'],['cashflow_yield','Cash-flow yield'],['raw_momentum','Momentum return']];
+    nodes.push(el('h3','Quality, value & momentum'),
+      kv({normalization_sector:signal.normalization_sector || signal.sector,ranked_issuers:signal.rank_universe_issuer_count,
+        sector_peers:signal.sector_peer_count,quality_metrics_used:signal.quality_metric_count,quality_metrics_required:signal.quality_metric_required,
+        representative_security:signal.representative_security_id?securityLabel(signal.representative_security_id):null,
+        momentum_start_session:representative.momentum_start_session,momentum_end_session:representative.momentum_end_session}),
+      table(metrics.map(([key,metric])=>({metric,raw_value:representative[key],percentile:key==='raw_momentum'?signal.momentum:signal.metric_percentiles?.[key],
+        usable_peers:signal.quality_peer_counts?.[key] ?? signal.value_peer_counts?.[key] ?? (key==='raw_momentum'?result?.signal_context?.momentum_issuers:null)})),[
+        {key:'metric'},{key:'raw_value',label:'Raw metric',render:pct},{key:'percentile',label:'Input percentile',render:pct},{key:'usable_peers',label:'Usable peers',render:num},
+      ]),listIssues((signal.reasons || []).map(friendly),'Required inputs and peer coverage are present.'),
+      disclosure('Calculation inputs & sources',kv(representative.metric_inputs || {}),
+        kv(Object.fromEntries(['fundamental_source_id','fundamental_period_end','fundamental_available_at','fundamental_currency',
+          'market_cap_source_id','market_cap_as_of','market_cap_currency','momentum_start_adjusted_close','momentum_end_adjusted_close','momentum_start_source_id','momentum_end_source_id'].map(key=>[key,representative[key]])))),
+      disclosure('Reported fundamental inputs',autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===representative.security_id))));
+  }
   if(company?.eps)nodes.push(el('h3','EPS and multiple'),table(company.eps.scenarios,[{key:'label',label:'Outcome'},
     {key:'horizon_price',label:'Horizon price',render:value=>money(value,company.eps.currency)},
     {key:'total_return',label:'Total return',render:pct},{key:'status',render:badge}],'Reviewed assumptions calculated by this run.'));
@@ -914,6 +966,10 @@ function renderAnalysisFreshness() {
   $('holding-analysis-state').className=`badge ${stale?'dirty':''}`;
   $('holding-analysis').classList.toggle('stale-result',stale);
   $('company-status').title=stale?'Assumptions changed; the action is from the previous calculation.':'Based on the displayed scenario inputs.';
+  const model=$('calculated-action-model');
+  if(model)model.textContent=`Signal uses ${modelLabel(holdingDisplay(securityId))}${stale?' · previous calculation':''}`;
+  const selected=document.querySelector('[data-action-model] select');
+  if(selected)selected.value=draft.workspace.valuations?.[securityId]?.active_model || (holdingAnalysis(securityId)?.model==='fcff_dcf'?'dcf':'eps');
 }
 function renderHoldingAnalysis() {
   const search=$('analysis-search').value.toLowerCase().trim();
@@ -936,12 +992,12 @@ function renderHoldingAnalysis() {
     else {message.append(el('strong',availability.label),el('span',availability.reason));const next=nextStepButton(availability);if(next)message.append(next);}
   }
   replace('holding-analysis',table(rows,[
-    {key:'action',label:'Action',render:(_value,row)=>actionBadge(row)},
+    {key:'action',label:'Scenario signal',render:(_value,row)=>actionBadge(row)},
     {key:'ticker',label:'Holding',render:(_value,row)=>{const cell=el('div',null,'holding-name');cell.append(button(row.ticker || securityLabel(row.security_id),()=>openHolding(row.security_id),'text-button'),el('small',row.name || ''));return cell;}},
+    {key:'model',label:'Model',render:(_value,row)=>{const node=el('span',modelLabel(row),'input-basis');node.title=[row.evidence?.statements?.used?'Statements used':null,row.evidence?.estimates?.used?'Estimates used':null,row.reason].filter(Boolean).join(' · ');return node;}},
     {key:'starting_price',label:'Price',render:num},
     ...labels.map(label=>({key:label,label:friendly(label),render:(value,row)=>{const scenario=row.scenarios?.find(item=>item.label===label);if(numeric(value)===null && numeric(scenario?.value_per_share)!==null){const span=el('span',money(scenario.value_per_share,row.inputs?.currency));span.title='Conditional intrinsic value per share; no horizon return is assumed.';return span;}const span=el('span',pct(value),numeric(value)<0?'negative':numeric(value)>0?'positive':'');return span;}})),
     {key:'excess_return',label:'Vs benchmark',render:pct},
-    {key:'evidence',label:'Inputs',render:(value,row)=>{const node=el('span',row.model==='eps_multiple'?'EPS × P/E':row.model==='fcff_dcf'?'DCF value':row.model==='shared_state'?'Market scenarios':row.analysis_missing?'Not computed':'Unavailable','input-basis');node.title=[value?.statements?.used?'Statements used':null,value?.estimates?.used?'Estimates used':null,value?.macro?.used?'Economic data used':'Economic data: context only',row.reason].filter(Boolean).join(' · ');return node;}},
     {key:'reason',label:'Why / next step',wrap:true,render:(_value,row)=>analysisReason(row,{compact:true})},
   ]));
   $('research-horizon').value=horizon();renderAnalysisFreshness();
@@ -969,10 +1025,36 @@ function renderAccountNames() {
 
 function renderScreen() {
   const search=$('screen-search').value.toLowerCase(), rows=(result?.signals || []).filter(row=>JSON.stringify(row).toLowerCase().includes(search));
-  $('screen-scope').textContent=`${result?.signals?.length || 0} supplied securities · not a market-wide claim`;
+  const context=result?.signal_context || {},spec=(previewReady(draft)?resolved():saved?.config || draft.baseConfig).signals || {};
+  $('screen-scope').textContent=context.ranked_issuers!==undefined?`${context.ranked_issuers} ranked issuers · ${context.complete_composite_issuers ?? 0} complete scores`:`${result?.signals?.length || 0} supplied securities`;
+  const minimum=context.minimum_sector_peers ?? spec.min_sector_size ?? 20;
+  const weights=context.family_weights || spec.family_weights || {quality:1/3,value:1/3,momentum:1/3};
+  const weightTotal=Object.values(weights).reduce((sum,value)=>sum+(numeric(value) ?? 0),0);
+  const weightSummary=['quality','value','momentum'].map(key=>`${friendly(key)} ${pct(weightTotal>0 && numeric(weights[key])!==null?numeric(weights[key])/weightTotal:null)}`).join(' · ');
+  const incomplete=(result?.signals || []).length && !(result?.signals || []).some(row=>numeric(row.score)!==null);
+  const peerGap=(result?.signals || []).some(row=>row.eligible && (row.reasons || []).includes('incomplete_family_or_insufficient_sector_peers'));
+  const attention=incomplete?el('div',null,'analysis-notice'):null;
+  if(attention)attention.append(el('span',peerGap?`Scores unavailable · quality and value need ${minimum} usable sector peers per metric.`:'Scores unavailable · check data and universe eligibility.'),button(peerGap?'Peer settings':'Check data',()=>{
+    navigate(peerGap?'settings':'data');
+    if(peerGap){$('candidate-policy-form').scrollIntoView({behavior:'smooth',block:'center'});$('candidate-policy-form').querySelector('select,input')?.focus();}
+  },'text-button'));
+  replace('score-method',attention,disclosure('How scores work',
+    el('p','QVM ranks research priority. Scenario models determine holding signals. Opening this comparison shows the saved review; Update & analyze refreshes evidence and peers.','compact-note'),
+    table([
+      {family:'Quality',inputs:'Gross profit / beginning assets; operating income / average assets; −(net income − operating cash flow) / average assets.',method:`Mean of favorable sector percentiles; at least ${context.minimum_quality_metrics ?? spec.min_quality_metrics ?? 2} inputs.`},
+      {family:'Value',inputs:'Common earnings / issuer market value; (operating cash flow − capex) / issuer market value.',method:'Mean of both sector percentiles.'},
+      {family:'Momentum',inputs:`Adjusted return from ${context.momentum_months ?? spec.momentum_months ?? 12}-to-${context.momentum_skip_months ?? spec.momentum_skip_months ?? 1} month-end endpoints.`,method:'Percentile across supplied eligible issuers.'},
+      {family:'Composite',inputs:'Quality, Value and Momentum.',method:'Configured weighted average; all three families required. Shown on a 0–100 scale.'},
+    ],[{key:'family'},{key:'inputs',wrap:true},{key:'method',wrap:true}]),
+    kv({minimum_usable_sector_peers:minimum,winsorized_percentiles:`${pct(context.winsor_low ?? spec.winsor_low ?? .025)}–${pct(context.winsor_high ?? spec.winsor_high ?? .975)}`,tie_method:'Average ranks'}),
+    el('p',`Family weights · ${weightSummary}`,'compact-note score-weights'),
+    Object.keys(context).length?disclosure('Technical score metadata',kv(context)):null,
+    el('p','Missing inputs or peers leave a blank score. Funds and noneligible issuers remain available in company research. Open a security for its raw metrics, dates and peer counts.','compact-note'),
+    button('Import peer data',()=>{navigate('data');$('import-kind').value='universe';$('import-kind').focus();$('import-kind').scrollIntoView({behavior:'smooth',block:'center'});},'text-button')));
+  const score=value=>numeric(value)===null?'—':num(numeric(value)*100,1);
   replace('company-screen',table(rows,[{key:'security_id',label:'Security',render:securityButton},{key:'sector'},
-    {key:'quality',render:pct},{key:'value',render:pct},{key:'momentum',render:pct},{key:'score',label:'Composite rank',render:pct},
-    {key:'eligible',render:value=>badge(value?'eligible':'ineligible')},{key:'reasons',label:'Coverage / eligibility',wrap:true}],
+    {key:'quality',label:'Quality score',render:score},{key:'value',label:'Value score',render:score},{key:'momentum',label:'Momentum rank',render:pct},{key:'score',label:'Composite score',render:score},
+    {key:'eligible',label:'Peer universe',render:value=>badge(value?'included':'excluded')},{key:'data_status',label:'Score status',render:badge},{key:'reasons',label:'Coverage / eligibility',wrap:true,render:value=>(Array.isArray(value)?value:[value]).filter(Boolean).map(friendly).join(' · ')}],
   'Ranks are relative research scores, not return forecasts. Open a security for raw inputs and peer coverage.'));
 }
 // A proposal is this review's reviewable starting point, never an adopted assumption:
@@ -1167,6 +1249,16 @@ function renderCompany() {
   summary.append(el('strong',analysis?.name || security.name || securityLabel(securityId)),
     el('span',money(analysis?.inputs?.starting_price ?? security.price,security.currency)),el('span',`${horizon()} months`),
     el('span',kept?.origin || (analysis?.valuation_input?'Source defaults':'Scenario assumptions'),'badge'));
+  const calculatedModel=el('span',`Signal uses ${modelLabel(analysis)}`,'compact-note');calculatedModel.id='calculated-action-model';summary.append(calculatedModel);
+  if(!analysis.analysis_missing && (['eps_multiple','fcff_dcf'].includes(analysis.model) || kept?.eps || kept?.dcf || proposalFor('eps') || proposalFor('dcf'))) {
+    const active=kept?.active_model || (analysis.model==='fcff_dcf'?'dcf':'eps');
+    const selector=field('Action model',active,kind=>{
+      updateValuation(kind,()=>{});renderCompany();document.querySelector(`[data-company-tab="${kind}"]`)?.click();
+      document.querySelector('[data-action-model] select')?.focus();
+    },{options:[['eps','EPS × P/E'],['dcf','DCF value']],help:'Choose the model for the scenario signal, then recalculate. Tabs only change the view.'});
+    selector.querySelector('select').setAttribute('aria-label','Action model');
+    selector.dataset.actionModel='true';selector.classList.add('action-model-control');summary.append(selector);
+  }
   replace('security-summary',summary);
   const evidence=analysis?.evidence || {};
   const cards=el('div',null,'evidence-summary');
@@ -1174,7 +1266,7 @@ function renderCompany() {
     const input=evidence[key] || {}, state=input.used?'Used':key==='macro' && (result?.macro || []).length?'Context only':['available','ok','ready','complete'].includes(input.status)?'Available · unused':input.status==='unavailable' || !input.status?'Unavailable':friendly(input.status);
     const chip=el('span',`${label}: ${state}`,`evidence-chip ${input.used?'used':'context'}`);chip.title=input.note || (input.source_ids || []).join(', ') || `${label} ${state.toLowerCase()}`;cards.append(chip);
   }
-  replace('company-data-basis',cards,analysisReason(analysis),
+  replace('company-data-basis',cards,analysisReason(analysis),actionBreakdown(analysis),
     disclosure('Inputs & source details',kv(analysis?.inputs || {}),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,method_version:analysis?.method_version || result?.metadata?.computed_views?.holding_analysis?.method_version,calculation_source:result?.metadata?.computed_views?.holding_analysis?.source || 'saved_review',trade_readiness:analysis?.trade_readiness?.status}),
       result?.benchmark_reference?el('h4','Benchmark comparison'):null,result?.benchmark_reference?kv(result.benchmark_reference):null,
       listIssues(analysis?.trade_readiness?.reasons || [],'No additional trade readiness information.'),
@@ -1197,6 +1289,7 @@ function renderCompany() {
       }
     });
   },`company-${securityId}`);
+  renderAnalysisFreshness();
 }
 // Grouped bars for two series over the same states, drawn like `lineChart`: one baseline
 // at zero, one pair of bars per state, and every value also stated in the axis text so

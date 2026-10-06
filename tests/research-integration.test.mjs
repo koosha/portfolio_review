@@ -192,6 +192,7 @@ RESEARCHED = ('SIM01', 'SIM03')
 
 def estimates(sid, eps):
     return {'currency': 'USD', 'source_id': 'estimates:' + sid, 'received_at': '2026-08-31T20:00:00Z',
+        'revenue_currency': 'USD',
         'eps': {'+1y': {'avg': eps, 'low': eps * 0.8, 'high': eps * 1.2}},
         'revenue': {'+1y': {'avg': 5400.0, 'low': 5100.0, 'high': 5700.0}}}
 
@@ -399,6 +400,29 @@ test('one researched review drives the dashboard, its controls and a recorded de
       'the saved run reopened');
     assert.equal($('eps-output').textContent, calculated, 'a reopened run reproduces its own valuation');
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
+  });
+
+  await t.test('selecting DCF recalculates intrinsic value without reusing the prior EPS buy signal', async () => {
+    window.document.querySelector('[data-page="research"]').click();
+    setInput(window, $('research-security'), 'SIM01');
+    const model=$('security-summary').querySelector('[data-action-model] select');
+    assert.equal(model.value,'eps');
+    setInput(window,model,'dcf');
+    assert.equal($('draft-state').textContent,'Dirty');
+    assert.match($('calculated-action-model').textContent,/EPS × P\/E.*previous calculation/);
+    $('recalculate').click();
+    await until(() => $('draft-state').textContent === 'Preview','the DCF preview');
+    assert.equal($('security-summary').querySelector('[data-action-model] select').value,'dcf');
+    assert.equal($('company-status').textContent,'Review');
+    assert.equal($('calculated-action-model').textContent,'Signal uses DCF value');
+    assert.match($('dcf-output').textContent,/Intrinsic Value Per Share/);
+    assert.match($('company-data-basis').textContent,/horizon scenarios are required/);
+    assert.equal($('research-error').hidden,true,$('research-error').textContent);
+    $('reset-draft').click();
+    await until(() => $('draft-dialog').hasAttribute('open'),'the DCF reset choice');
+    $('draft-dialog').querySelector('[data-draft-choice="discard"]').click();
+    await until(() => $('draft-state').textContent === 'Saved','the original EPS model restored');
+    assert.equal($('security-summary').querySelector('[data-action-model] select').value,'eps');
   });
 
   await t.test('a stated market view is retained and reset restores the saved assumptions', async () => {

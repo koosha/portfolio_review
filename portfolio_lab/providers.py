@@ -1125,6 +1125,9 @@ def enrich_bundle(bundle: dict, config: dict, as_of: str) -> dict:
             "Network connectors were skipped because data.mode is demo/offline.",
             "info",
         )
+    from portfolio_research.calendar import freeze_current_inputs
+
+    freeze_current_inputs(result)
     _filter_frames(result, as_of, bool(data.get("require_received_by_cutoff", False)))
     if result["prices"].empty:
         _issue(

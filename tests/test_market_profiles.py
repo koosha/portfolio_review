@@ -29,6 +29,31 @@ class AdapterClock(datetime):
 
 
 class ProfileTests(AdapterCase):
+    def test_actual_company_collection_preserves_the_resolved_issuer_profile(self):
+        from portfolio_research.enrichment import _collect
+
+        security = {
+            **self.security("AAPL"),
+            "issuer_id": "cik:0000320193",
+            "cik": "0000320193",
+            "instrument_type": "equity",
+        }
+        with (
+            patch.object(market_data, "datetime", AdapterClock),
+            patch("yfinance.Ticker", FakeTicker),
+        ):
+            record = _collect(
+                security,
+                self.config,
+                AS_OF,
+                refresh=True,
+                issues=self.issues,
+                issuer_lookup=lambda metadata: "cik:0000320193",
+            )
+        self.assertEqual(record["profile"]["issuer_id"], security["issuer_id"])
+        self.assertEqual(record["profile"]["cik"], "0000320193")
+        self.assertEqual(record["profile"]["market_cap_currency"], "USD")
+
     def test_security_profile_maps_sector_domicile_equity_type_and_identifiers(self):
         with patch.object(market_data, "datetime", AdapterClock):
             profile = self.call(
@@ -37,6 +62,7 @@ class ProfileTests(AdapterCase):
         self.assertEqual(profile["sector"], "Technology")
         self.assertEqual(profile["industry"], "Consumer Electronics")
         self.assertAlmostEqual(profile["market_cap"], 4_500_000_000_000)
+        self.assertEqual(profile["market_cap_currency"], "USD")
         self.assertEqual(profile["market_cap_as_of"], AS_OF)
         self.assertAlmostEqual(profile["shares_outstanding"], 15_000_000_000)
         self.assertEqual(profile["cik"], "0000320193")
@@ -57,6 +83,70 @@ class ProfileTests(AdapterCase):
         self.assertIsNone(profile["market_cap"])
         self.assertIsNone(profile["market_cap_as_of"])
         self.assertEqual(profile["sector"], "Technology")
+
+    def test_current_ny_evening_does_not_lose_cap_when_utc_is_the_next_day(self):
+        class EveningClock(AdapterClock):
+            @classmethod
+            def now(cls, tz=None):
+                stamp = datetime(2026, 9, 17, 1, tzinfo=timezone.utc)
+                return stamp if tz is None else stamp.astimezone(tz)
+
+        with patch.object(market_data, "datetime", EveningClock):
+            profile = self.call(security_profile, "AAPL")
+        self.assertIsNotNone(profile["market_cap"])
+        self.assertEqual(profile["market_cap_as_of"], "2026-09-16")
+
+    def test_current_profile_uses_actual_receipt_date_separate_from_last_market_session(self):
+        with (
+            patch.object(market_data, "datetime", AdapterClock),
+            patch.object(
+                market_data,
+                "_obtain",
+                return_value=(
+                    {
+                        "market_cap": 1000,
+                        "market_cap_currency": "USD",
+                        "metadata": {"instrument_type": "EQUITY"},
+                    },
+                    "2026-09-16T20:05:00Z",
+                    {"source_id": "profile:current"},
+                ),
+            ),
+        ):
+            profile = security_profile(
+                self.config,
+                self.security("AAPL"),
+                refresh=True,
+                issues=[],
+                as_of="2026-09-15",
+                timeline={
+                    "review_kind": "current",
+                    "information_cutoff": "2026-09-16T20:00:00Z",
+                },
+            )
+        self.assertEqual(profile["market_cap"], 1000)
+        self.assertEqual(profile["market_cap_as_of"], "2026-09-16")
+        self.assertEqual(profile["market_cap_received_at"], "2026-09-16T20:05:00Z")
+
+    def test_native_market_cap_without_quote_currency_is_preserved_but_not_usable(self):
+        with (
+            patch.object(market_data, "datetime", AdapterClock),
+            patch.object(
+                market_data,
+                "_obtain",
+                return_value=(
+                    {"market_cap": 1000, "financial_currency": "USD", "metadata": {}},
+                    "2026-09-16T20:00:00Z",
+                    {"source_id": "profile:unknown-unit"},
+                ),
+            ),
+        ):
+            profile = security_profile(
+                self.config, self.security("AAPL"), refresh=True, issues=[], as_of=AS_OF
+            )
+        self.assertIsNone(profile["market_cap"])
+        self.assertEqual(profile["reported_market_cap"], 1000)
+        self.assertIsNone(profile["market_cap_currency"])
 
     def test_sector_labels_follow_the_application_vocabulary(self):
         self.assertEqual(sector_label("Financial Services"), "Financials")
