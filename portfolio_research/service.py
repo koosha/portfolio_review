@@ -25,6 +25,7 @@ from .calendar import REVIEW_KINDS, decision_context, review_context
 from .decisions import decision_fields, last_decision
 from .public import _clean, _safe_text, public_config, public_result, public_workspace
 from .repository import ResearchRepository
+from .saved_view import BACKEND_VERSION, CAPABILITIES, saved_holding_view
 
 _LATEST = object()  # "the stored supplemental", distinct from an explicit None.
 INPUT_KINDS = {"prices", "fundamentals", "macro", "fund_holdings", "forecasts", "universe"}
@@ -176,6 +177,8 @@ class ResearchService:
         runs = self.store.list_runs()
         return {
             "product": "Portfolio Review",
+            "backend_version": BACKEND_VERSION,
+            "capabilities": deepcopy(CAPABILITIES),
             "mode": config["data"]["mode"],
             "dataset": "Yahoo holdings"
             if self.collector
@@ -249,15 +252,79 @@ class ResearchService:
 
     def _current_snapshot(self, config=None, supplemental=_LATEST):
         """Current holdings with identity and USD presentation from cached providers."""
+        from .account_labels import with_account_labels
         from .current import current_snapshot
 
         if supplemental is _LATEST:
             supplemental = self.store.latest("supplemental")
-        return current_snapshot(
+        snapshot = current_snapshot(
             self.config["source"]["path"],
             supplemental=supplemental,
             config=config or self.resolved_config(),
         )
+        return with_account_labels(snapshot, aliases=self._account_aliases())
+
+    def _account_aliases(self):
+        return self.store.latest("account_aliases", {}).get("aliases", {})
+
+    def accounts(self):
+        """Source names and user labels, independent of a completed research run."""
+        from .account_labels import account_catalog, collector_accounts
+
+        if self.collector:
+            records = collector_accounts(self.config["source"]["path"])
+            rows = account_catalog({"accounts": records}, aliases=self._account_aliases())
+        else:
+            runs = self.store.list_runs()
+            if runs:
+                identifier = runs[0]["run_id"]
+                rows = account_catalog(
+                    self.store.load_run(identifier),
+                    self.store.load_bundle(identifier),
+                    aliases=self._account_aliases(),
+                )
+            else:
+                rows = []
+        return _clean(
+            {
+                "accounts": rows,
+                "account_labels": {row["account_id"]: row["display_name"] for row in rows},
+            }
+        )
+
+    def save_account_name(self, payload):
+        """Persist a display preference without editing source data or saved analyses."""
+        from .account_labels import validate_alias
+
+        if not isinstance(payload, dict) or set(payload) != {"account_id", "display_name"}:
+            raise ValueError("An account name needs account_id and display_name.")
+        identifier = payload["account_id"]
+        if not isinstance(identifier, str):
+            raise ValueError("Choose an existing account.")
+        name = validate_alias(payload["display_name"])
+        with self.lock:
+            known = {row["account_id"] for row in self.accounts()["accounts"]}
+            if identifier not in known:
+                raise ValueError("Choose an existing account.")
+            aliases = deepcopy(self._account_aliases())
+            if name is None:
+                aliases.pop(identifier, None)
+            else:
+                aliases[identifier] = name
+            record_id = self.store.append_record("account_aliases", {"aliases": aliases})
+        return {"record_id": record_id, **self.accounts()}
+
+    def records(self, kind, run_id=None):
+        """Archived decisions with live account labels; the archived record is untouched."""
+        from .account_labels import with_account_labels
+
+        records = self.store.records(kind, run_id)
+        bundle = self.store.load_bundle(run_id) if run_id else None
+        context = {} if bundle else self.accounts()
+        presented = with_account_labels(
+            {**context, "records": records}, bundle, aliases=self._account_aliases()
+        )
+        return _clean(presented["records"])
 
     def exceptions(self):
         """Open listing and FX exceptions of the newest collection.
@@ -361,8 +428,9 @@ class ResearchService:
     def run(self, run_id):
         saved = self.store.load_run(run_id)
         bundle = self.store.load_bundle(run_id)
+        displayed = saved_holding_view(saved, bundle, saved["saved_config"])
         return {
-            "result": public_result(saved),
+            "result": public_result(displayed, bundle, aliases=self._account_aliases()),
             "config": public_config(saved["saved_config"]),
             "workspace": public_workspace(bundle.get("workspace", {})),
             "previous_run_id": self._previous_run_id(saved["run_id"], saved.get("metadata", {})),
@@ -593,9 +661,11 @@ class ResearchService:
         }
         output = job["output"]
         if output and "result" in output:
-            workspace = _unpack_bundle(output["bundle"]).get("workspace", {})
+            bundle = _unpack_bundle(output["bundle"])
+            workspace = bundle.get("workspace", {})
+            displayed = saved_holding_view(output["result"], bundle, output["config"])
             result["output"] = {
-                "result": public_result(output["result"]),
+                "result": public_result(displayed, bundle, aliases=self._account_aliases()),
                 "config": public_config(output["config"]),
                 "workspace": public_workspace(workspace),
             }

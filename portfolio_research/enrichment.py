@@ -84,6 +84,7 @@ PROFILE_FIELDS = (
     "market_cap",
     "market_cap_as_of",
     "market_cap_received_at",
+    "market_cap_currency",
     "shares_outstanding",
     "domicile",
     "equity_type",
@@ -196,7 +197,9 @@ def _issuer_lookup(securities):
     return lookup
 
 
-def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, events=True) -> dict:
+def _collect(
+    security, config, as_of, *, refresh, issues, issuer_lookup=None, events=True, timeline=None
+) -> dict:
     """Every adapter record for one security, with its own per-capability statuses.
 
     ``events`` is the one capability a candidate can be researched without: news and
@@ -229,8 +232,13 @@ def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, ev
         )
     # A fund has no income statement to read, exactly as it has no per-share estimates:
     # asking spends a round trip and earns a gap the owner can never close.
-    no_statements = fund or sec_covered
-    statements = None if no_statements else run("statements", market_data.statements)
+    # SEC observations remain the structured scoring source. Native statement
+    # quarters additionally provide diluted EPS/share units for company valuation;
+    # fetching those facts does not replace the SEC fundamentals with a vendor copy.
+    no_statements = fund
+    statements = (
+        None if no_statements else run("statements", market_data.statements, timeline=timeline)
+    )
     _attempt("statements", sid, issues, _complete_trailing, statements)
     estimates = None if fund else run("estimates", market_data.estimates)
     disclosure = (
@@ -243,7 +251,9 @@ def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, ev
         if events
         else None
     )
-    profile = run("profile", market_data.security_profile)
+    profile = run(
+        "profile", market_data.security_profile, timeline=timeline, issuer_lookup=issuer_lookup
+    )
     record = {
         "security": security,
         "prices": prices,
@@ -252,6 +262,7 @@ def _collect(security, config, as_of, *, refresh, issues, issuer_lookup=None, ev
         "fund": disclosure,
         "events": news,
         "profile": profile,
+        "sec_covered": sec_covered,
         "sources": [
             source
             for source in (
@@ -420,20 +431,18 @@ def _newest_vintage(rows, history) -> list[dict]:
 
 
 def _statement_rows(record, history) -> list[dict]:
-    """The statements the engines read: the annual periods and the trailing window.
+    """Keep quarterly history alongside distinct annual-context and TTM records.
 
-    The fundamentals frame holds one row per ``(security_id, period_end)``, so a quarter
-    would shadow the annual period that ends on the same date and a quarterly figure
-    would be read as a year. Quarterly rows build the trailing window and the brief and
-    stay out of the frame; the trailing row is the most recent annualised period.
+    Period type is part of the frame's key: a quarter cannot shadow a twelve-month
+    observation ending on the same day. Engines build or select verified TTM windows.
     """
+    if record.get("sec_covered"):
+        return []
     statements = record.get("statements") or {}
     annual = _newest_vintage(list(statements.get("annual") or []), history)
-    # A restated quarter's earlier vintage is still kept, even though the quarterly rows
-    # themselves never enter the frame.
-    _newest_vintage(list(statements.get("quarterly") or []), history)
+    quarterly = _newest_vintage(list(statements.get("quarterly") or []), history)
     trailing = statements.get("ttm")
-    return [*annual, *([trailing] if isinstance(trailing, dict) else [])]
+    return [*annual, *quarterly, *([trailing] if isinstance(trailing, dict) else [])]
 
 
 def _frames(records, bundle) -> dict:
@@ -870,11 +879,46 @@ def _apply_shared_state(bundle, config, as_of) -> None:
     """
     from portfolio_lab.providers import _error_label, _merge
 
+    from .benchmark import prepare_benchmark, reference_security, retained_joint_probabilities
     from .market_values import _issue
-    from .scenarios import DEFAULT_SHARED_STATE, generate_joint_forecasts
+    from .scenarios import DEFAULT_SHARED_STATE, SOURCE_LABEL, generate_joint_forecasts
+
+    config, reference = prepare_benchmark(bundle, config)
+
+    # Generated rows are a calculation of the current controls. Reusing them from a
+    # frozen bundle would make a replay silently ignore edits to those controls.
+    # Imported/user-applied rows are evidence and are deliberately left untouched.
+    frame = bundle.get("forecasts")
+    if isinstance(frame, pd.DataFrame) and "source" in frame:
+        generated = frame["source"].fillna("").eq(SOURCE_LABEL)
+        bundle["forecasts"] = frame.loc[~generated].copy()
+    generated_codes = {
+        "SHARED_STATE_HORIZON_RESCALED",
+        "INCOMPLETE_STATE_PROBABILITIES",
+        "UNKNOWN_SECTOR_MULTIPLIER",
+        "NO_STATE_FOR_INSTRUMENT",
+        "MISSING_FX_STATE",
+        "SHARED_STATE_UNUSABLE",
+        "IMPORTED_FORECAST_SUPERSEDED",
+    }
+    bundle["issues"] = [
+        issue
+        for issue in bundle.get("issues", [])
+        if issue.get("origin") != "shared_state" and issue.get("code") not in generated_codes
+    ]
 
     securities = bundle.get("securities")
-    if not isinstance(securities, pd.DataFrame) or securities.empty:
+    if not isinstance(securities, pd.DataFrame):
+        securities = pd.DataFrame()
+    comparator = reference_security(bundle)
+    if comparator:
+        securities = pd.concat([securities, pd.DataFrame([comparator])], ignore_index=True)
+    elif reference.get("existing_security") and reference.get("equity_shared_state"):
+        securities = securities.copy()
+        securities.loc[securities.security_id.eq(reference["security_id"]), "currency"] = reference[
+            "quote_currency"
+        ]
+    if securities.empty:
         return
     horizon = int(_setting(config, "allocation", "horizon_months", 12))
     stated, elsewhere = _forecast_ids(bundle, as_of, horizon)
@@ -882,6 +926,12 @@ def _apply_shared_state(bundle, config, as_of) -> None:
     if missing.empty:
         return
     state = (config.get("allocation") or {}).get("shared_state") or DEFAULT_SHARED_STATE
+    if state.get("probabilities") is None and comparator:
+        retained = retained_joint_probabilities(
+            bundle, config, as_of, horizon, state["market_returns"]
+        )
+        if retained:
+            state = {**state, "probabilities": retained}
     mandate = config.get("mandate") or {}
     issues = bundle.setdefault("issues", [])
     try:
@@ -891,12 +941,19 @@ def _apply_shared_state(bundle, config, as_of) -> None:
             as_of=as_of,
             horizon_months=horizon,
             presentation_currency=str(mandate.get("base_currency") or "USD"),
-            benchmark_ids=(mandate.get("benchmark_id"),),
+            benchmark_ids=(reference.get("security_id"),)
+            if reference.get("equity_shared_state")
+            else (),
+            unscaled_benchmark_ids=(reference.get("security_id"),)
+            if reference.get("equity_shared_state")
+            else (),
         )
     except Exception as exc:  # A malformed state leaves the run without its own set.
         _issue(issues, "SHARED_STATE_UNUSABLE", None, _error_label(exc), "error")
         return
-    issues.extend(generated.attrs.get("issues") or [])
+    issues.extend(
+        {**issue, "origin": "shared_state"} for issue in generated.attrs.get("issues") or []
+    )
     if generated.empty:
         return
     for sid in sorted(elsewhere & set(generated["security_id"].astype(str))):
@@ -958,6 +1015,7 @@ def enrich_market(
                 issues=issues,
                 issuer_lookup=lookup,
                 events=position < holdings or str(sid) in plan["with_events"],
+                timeline=bundle.get("timeline"),
             )
             _date_disclosures(record, bundle, issues)
             _apply_profile(securities, index, record)
@@ -974,6 +1032,24 @@ def enrich_market(
             "estimates": record.get("estimates"),
             "fund_overview": (record.get("fund") or {}).get("fund_overview") or {},
             "coverage": record["coverage"],
+            # Preserve local units and the exact quarterly EPS/distribution evidence
+            # before presentation FX changes the public price frame. Previews use
+            # these retained facts and never ask a provider again.
+            "valuation_facts": {
+                "prices": {
+                    key: value
+                    for key, value in (record.get("prices") or {}).items()
+                    if key != "prices"
+                }
+                | {
+                    "prices": sorted(
+                        (record.get("prices") or {}).get("prices") or [],
+                        key=lambda row: str(row.get("date") or ""),
+                    )[-1:]
+                },
+                "statements": record.get("statements"),
+                "profile": record.get("profile"),
+            },
         }
         _report(progress, position + 1, total)
     bundle["securities"] = securities
@@ -983,6 +1059,11 @@ def enrich_market(
         frame = pd.DataFrame(rows) if rows else pd.DataFrame(columns=FRAME_COLUMNS.get(name, []))
         _merge(bundle, name, frame)
     bundle["research_inputs"] = {**(bundle.get("research_inputs") or {}), **inputs}
+    from .benchmark import enrich_reference_prices
+
+    enrich_reference_prices(
+        bundle, config, as_of, deadline=deadline, should_stop=lambda: _stop_requested(should_stop)
+    )
     planned = [str(security.get("security_id")) for _, security in plan["candidates"]]
     _record_universe(
         bundle,
@@ -992,6 +1073,9 @@ def enrich_market(
         exhausted=exhausted,
         stopped=stopped,
     )
+    from .calendar import freeze_current_inputs
+
+    freeze_current_inputs(bundle)
     _apply_shared_state(bundle, config, as_of)
     bundle["coverage"] = coverage_report(bundle, config)
     bundle["research"] = build_research(

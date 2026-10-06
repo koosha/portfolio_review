@@ -26,6 +26,7 @@ def estimates_payload():
     return {
         "security_id": "SEC-1",
         "currency": "USD",
+        "unit_contract": "period-currencies-2",
         "eps": {
             "0q": {
                 "avg": 1.1,

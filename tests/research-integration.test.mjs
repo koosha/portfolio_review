@@ -105,7 +105,8 @@ test('research event handlers integrate with a disposable synthetic HTTP applica
     await until(() => analysed.every(node => !node.hidden), 'the loaded run shown again');
     assert.equal($('research-run').value, initialRunId, 'the selector names the run on screen');
     assert.match($('analysis-caption').textContent, /Last completed analysis/);
-    assert.match($('analysis-caption').textContent, new RegExp(initialRunId.slice(0, 8)));
+    assert.match($('technical-context').textContent, new RegExp(initialRunId.slice(0, 8)));
+    assert.doesNotMatch($('research-run').selectedOptions[0].textContent,new RegExp(initialRunId.slice(0,8)),'routine navigation uses a date, not a run hash');
     assert.equal($('draft-state').textContent, 'Dirty', 'cancelling keeps the draft it asked about');
     $('reset-draft').click();
     await until(() => $('draft-dialog').hasAttribute('open'), 'the explicit reset choice');
@@ -191,11 +192,14 @@ RESEARCHED = ('SIM01', 'SIM03')
 
 def estimates(sid, eps):
     return {'currency': 'USD', 'source_id': 'estimates:' + sid, 'received_at': '2026-08-31T20:00:00Z',
+        'revenue_currency': 'USD',
         'eps': {'+1y': {'avg': eps, 'low': eps * 0.8, 'high': eps * 1.2}},
         'revenue': {'+1y': {'avg': 5400.0, 'low': 5100.0, 'high': 5700.0}}}
 
 def trailing(sid):
-    return {'period_end': '2026-06-30', 'currency': 'USD', 'source_id': 'statements:' + sid,
+    return {'period_type': 'ttm', 'period_start': '2025-07-01', 'period_end': '2026-06-30',
+        'ttm_quarters': '2026-06-30,2026-03-31,2025-12-31,2025-09-30',
+        'currency': 'USD', 'source_id': 'statements:' + sid,
         'revenue': 5000.0, 'operating_income': 900.0, 'net_income': 600.0,
         'operating_cash_flow': 800.0, 'capex': 200.0, 'depreciation': 150.0,
         'change_working_capital': 20.0, 'tax_provision': 200.0, 'pretax_income': 800.0,
@@ -212,12 +216,17 @@ def inject(bundle, as_of):
             'instrument_type': 'equity', 'equity_type': 'ordinary_common', 'currency': 'USD',
             'price_source_id': 'prices:' + sid}
         estimate, ttm, reasons = estimates(sid, close / 18.0), trailing(sid), []
+        financial_history = {'basis': 'quarterly', 'lookback_years': 3, 'max_quarters': 12,
+            'available_quarters': 4, 'oldest_period_end': '2025-09-30',
+            'latest_period_end': '2026-06-30', 'current_ttm_quarters': ttm['ttm_quarters'].split(','),
+            'prior_ttm_quarters': [], 'historical_growth_available': False}
         proposals = {
             'eps': propose_eps_model(security, price_major=close, quote_currency='USD',
                 estimates=estimate, ttm=ttm, dividends_ttm_per_share=1.25, horizon_months=12,
-                dividends_source_id='prices:' + sid, issues=reasons),
-            'dcf': propose_dcf_inputs(security, ttm=ttm, annual_statements=[ttm],
+                dividends_source_id='prices:' + sid, financial_history=financial_history, issues=reasons),
+            'dcf': propose_dcf_inputs(security, ttm=ttm, annual_statements=[],
                 shares_outstanding=500.0, price_major=close, currency='USD', quote_currency='USD',
+                quarterly_required=True, financial_history=financial_history,
                 estimates=estimate, defaults={'discount_rate': 0.09, 'terminal_growth_rate': 0.025,
                 'projection_years': 5}, issues=reasons),
             'reasons': reasons}
@@ -233,7 +242,8 @@ def inject(bundle, as_of):
             fx_note=None, as_of=as_of, generated_at='2026-08-31T21:00:00Z', horizon_months=12)
         coverage = {'prices': 'ok', 'statements': 'ok', 'estimates': 'ok',
             'fund_disclosures': 'not_applicable', 'events': 'ok', 'profile': 'ok'}
-        research[sid] = {'brief': brief, 'proposals': proposals, 'coverage': coverage}
+        research[sid] = {'brief': brief, 'proposals': proposals, 'coverage': coverage,
+            'financial_history': financial_history}
         inputs[sid] = {'symbol': sid, 'currency': 'USD', 'quote_currency': 'USD',
             'estimates': estimate, 'fund_overview': {}, 'coverage': coverage}
     bundle['research_inputs'] = inputs
@@ -400,6 +410,29 @@ test('one researched review drives the dashboard, its controls and a recorded de
     assert.equal($('research-error').hidden, true, $('research-error').textContent);
   });
 
+  await t.test('selecting DCF recalculates intrinsic value without reusing the prior EPS buy signal', async () => {
+    window.document.querySelector('[data-page="research"]').click();
+    setInput(window, $('research-security'), 'SIM01');
+    const model=$('security-summary').querySelector('[data-action-model] select');
+    assert.equal(model.value,'eps');
+    setInput(window,model,'dcf');
+    assert.equal($('draft-state').textContent,'Dirty');
+    assert.match($('calculated-action-model').textContent,/EPS × P\/E.*previous calculation/);
+    $('recalculate').click();
+    await until(() => $('draft-state').textContent === 'Preview','the DCF preview');
+    assert.equal($('security-summary').querySelector('[data-action-model] select').value,'dcf');
+    assert.equal($('company-status').textContent,'Review');
+    assert.equal($('calculated-action-model').textContent,'Signal uses DCF value');
+    assert.match($('dcf-output').textContent,/Intrinsic Value Per Share/);
+    assert.match($('company-data-basis').textContent,/horizon scenarios are required/);
+    assert.equal($('research-error').hidden,true,$('research-error').textContent);
+    $('reset-draft').click();
+    await until(() => $('draft-dialog').hasAttribute('open'),'the DCF reset choice');
+    $('draft-dialog').querySelector('[data-draft-choice="discard"]').click();
+    await until(() => $('draft-state').textContent === 'Saved','the original EPS model restored');
+    assert.equal($('security-summary').querySelector('[data-action-model] select').value,'eps');
+  });
+
   await t.test('a stated market view is retained and reset restores the saved assumptions', async () => {
     window.document.querySelector('[data-page="scenarios"]').click();
     const central = namedInput(window, 'Central market return (%)');
@@ -408,8 +441,8 @@ test('one researched review drives the dashboard, its controls and a recorded de
     setInput(window, central, 12);
     assert.equal($('draft-state').textContent, 'Dirty');
     assert.match($('resolved-diff').textContent, /shared_state/, 'the stated market view is a retained change');
-    assert.match($('shared-state-editor').textContent, /next .*review/i,
-      'the panel says when a stated market view is expanded into scenarios');
+    assert.match($('shared-state-editor').textContent, /Recalculate applies/i,
+      'the panel explains how assumptions update outcomes');
     // The grouped readout is the only non-colour encoding of those bars, so it wraps
     // rather than sharing the single-line axis row written for three short spans.
     assert.ok($('scenario-comparison').querySelector('.chart-readout'),

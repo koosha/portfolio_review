@@ -25,6 +25,7 @@ VERSION = 1
 FRAME_COLUMNS = {
     "accounts": [
         "account_id",
+        "name",
         "account_type",
         "currency",
         "total_value",

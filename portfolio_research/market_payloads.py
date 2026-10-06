@@ -188,10 +188,27 @@ def _calendar_payload(ticker):
 def _estimates_payload(ticker):
     eps = _estimate_frame(_attribute(ticker, "earnings_estimate"), "yearAgoEps")
     revenue = _estimate_frame(_attribute(ticker, "revenue_estimate"), "yearAgoRevenue")
+    # yfinance 1.7 broadcasts the first earnings/revenue currency onto its entire
+    # DataFrame. Restore each raw period's declaration from its already populated
+    # cache; never fetch another response or substitute a different period's unit.
+    trend = getattr(getattr(ticker, "_analysis", None), "_earnings_trend", None)
+    if isinstance(trend, list):
+        raw = {row.get("period"): row for row in trend if isinstance(row, dict)}
+        for family, rows, field in (
+            ("earningsEstimate", eps, "earningsCurrency"),
+            ("revenueEstimate", revenue, "revenueCurrency"),
+        ):
+            for period, row in rows.items():
+                row["currency"] = _text((raw.get(period, {}).get(family) or {}).get(field), 8)
+                row["currency_basis"] = "provider_period_declaration"
+    else:
+        for row in [*eps.values(), *revenue.values()]:
+            row["currency_basis"] = "dataframe_currency_unverified"
     targets = _attribute(ticker, "analyst_price_targets")
     targets = targets if isinstance(targets, dict) else {}
     payload = {
         "eps": eps,
+        "unit_contract": "period-currencies-2" if isinstance(trend, list) else "legacy_unverified",
         "revenue": revenue,
         "price_targets": {
             field: _number(targets.get(field))
@@ -286,16 +303,20 @@ def _news_payload(ticker):
 def _profile_payload(ticker):
     info = _attribute(ticker, "info")
     info = info if isinstance(info, dict) else {}
+    metadata = _metadata(ticker)
     payload = {
         "sector": _text(info.get("sector"), 60),
         "industry": _text(info.get("industry"), 80),
         "market_cap": _number(info.get("marketCap")),
+        "market_cap_currency": _text(metadata.get("currency") or info.get("currency"), 8),
         "shares_outstanding": _number(info.get("sharesOutstanding")),
         "name": _text(info.get("longName")),
         "country": _text(info.get("country"), 60),
         "financial_currency": _text(info.get("financialCurrency"), 8),
-        "metadata": _metadata(ticker),
+        "metadata": metadata,
     }
-    if not any(value for key, value in payload.items() if key != "metadata"):
+    if not any(
+        value for key, value in payload.items() if key not in {"metadata", "market_cap_currency"}
+    ):
         raise ProviderShapeError("The provider returned no company profile fields.")
     return payload

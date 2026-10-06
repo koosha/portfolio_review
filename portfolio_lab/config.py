@@ -46,6 +46,9 @@ DEFAULTS = {
         "fred_enabled": True,
         "fred_series": ["DGS10", "T10Y2Y", "CPIAUCSL", "UNRATE", "NFCI"],
         "lookback_years": 5,
+        # Company financial analysis uses quarterly reports within at most three years.
+        # Price, macro and FX histories keep their separate observation window above.
+        "financial_history_years": 3,
         "max_price_age_days": 4,
         "max_fundamental_age_days": 150,
         "max_fund_holdings_age_days": 100,
@@ -76,7 +79,7 @@ DEFAULTS = {
     "mandate": {
         "confirmed": False,
         "base_currency": "USD",
-        "benchmark_id": None,
+        "benchmark_id": "VOO",
         "issuer_cap": None,
         "sector_cap": None,
         "min_cash_weight": None,
@@ -234,6 +237,10 @@ def validate_config(config: dict) -> dict:
     _number(c["data"]["provider_timeout_seconds"], "data.provider_timeout_seconds", 0.1, 300)
     _number(c["data"]["provider_min_interval_seconds"], "data.provider_min_interval_seconds", 0, 10)
     _number(c["data"]["provider_refresh_hours"], "data.provider_refresh_hours", 0, 8760)
+    _number(c["data"]["financial_history_years"], "data.financial_history_years", 1, 3)
+    if int(c["data"]["financial_history_years"]) != c["data"]["financial_history_years"]:
+        raise ValueError("data.financial_history_years must be an integer")
+    c["data"]["financial_history_years"] = int(c["data"]["financial_history_years"])
     for key, low, high in [("assumed_publication_lag_days", 0, 365), ("news_limit", 1, 100)]:
         _number(c["data"][key], f"data.{key}", low, high)
         if int(c["data"][key]) != c["data"][key]:

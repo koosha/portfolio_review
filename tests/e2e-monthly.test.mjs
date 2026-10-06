@@ -248,18 +248,14 @@ test('the owner completes the six monthly steps with no developer intervention',
     await until(() => $('draft-state').textContent === 'Dirty', 'the edited draft');
     assert.match($('resolved-diff').textContent, /shared_state/,
       'the stated market view is a retained change');
-    assert.match($('shared-state-editor').textContent, /next .*review/i,
-      'the panel says when a stated market view is expanded into scenarios');
-    // Two separate claims, kept apart. The stated market view is a retained change, and
-    // where it goes is checked end to end by 'a stated market view saved for future
-    // reviews reaches the next review' below. What a recalculation can move is something
-    // else: a saved run's joint scenarios are frozen inputs, so the recalculation replays
-    // them and only the assumption applied to those scenarios changes this run's outcome.
-    setInput(window, cashReturn(window), 4);
+    assert.match($('shared-state-editor').textContent, /Recalculate applies/i,
+      'the panel explains that recalculation applies the edited assumptions');
+    // Recalculation applies the stated market change using retained observations.
+    // No cash change or provider refresh is needed to update these scenarios.
     $('recalculate').click();
     await until(() => $('draft-state').textContent === 'Preview', 'the recalculated preview');
     assert.notEqual($('scenario-results').textContent, savedResults,
-      'the explicit cash assumption changes the portfolio outcome');
+      'the changed market assumption changes the portfolio outcome');
     $('reset-draft').click();
     await until(() => $('draft-dialog').hasAttribute('open'), 'the explicit reset choice');
     $('draft-dialog').querySelector('[data-draft-choice="discard"]').click();

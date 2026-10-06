@@ -11,6 +11,7 @@ import time
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -213,6 +214,18 @@ class FakeTicker:
 
     def __init__(self, symbol):
         self.symbol = symbol
+        # These synthetic consensus rows explicitly declare USD per period in the
+        # raw provider contract, independently of yfinance's broadcast DataFrame.
+        self._analysis = SimpleNamespace(
+            _earnings_trend=[
+                {
+                    "period": period,
+                    "earningsEstimate": {"earningsCurrency": "USD"},
+                    "revenueEstimate": {"revenueCurrency": "USD"},
+                }
+                for period in ("0q", "+1q", "0y", "+1y")
+            ]
+        )
 
     def _record(self, attribute):
         FakeTicker.calls.append((self.symbol, attribute))

@@ -244,7 +244,11 @@ def enrich_inputs(bundle, config, as_of=None, refresh=False):
     enriched = enrich_bundle(source, c, as_of)
     if fx is None:
         return enriched
-    return _presented(enriched, c, fx, bool(refresh) and c["data"]["mode"] == "live")
+    enriched = _presented(enriched, c, fx, bool(refresh) and c["data"]["mode"] == "live")
+    from portfolio_research.calendar import freeze_current_inputs
+
+    freeze_current_inputs(enriched)
+    return enriched
 
 
 def load_inputs(
@@ -300,7 +304,10 @@ def _settle_execution(result, bundle, started):
 
     timeline = bundle["timeline"]
     elapsed = pd.Timedelta(seconds=max(monotonic() - started, 0.0))
-    completed = pd.Timestamp(timeline["generated_at"]) + elapsed
+    completed = (
+        pd.Timestamp(timeline.get("input_acquisition_started_at", timeline["generated_at"]))
+        + elapsed
+    )
     settled = settle_execution(timeline, completed.isoformat())
     if settled == timeline:
         return

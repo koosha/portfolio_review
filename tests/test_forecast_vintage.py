@@ -3,8 +3,8 @@
 An owner-imported forecast from an earlier vintage is superseded and said to be
 superseded, one already dated for this run keeps its own source, and an import stated
 over a different horizon never counts as coverage of the horizon being read. The
-mandate benchmark is covered on the shared date even when it is a fund. No network: the
-frames are built from explicit dicts.
+mandate benchmark is covered on the shared date when explicitly identified as an equity
+fund. No network: the frames are built from explicit dicts.
 """
 
 import unittest
@@ -42,7 +42,7 @@ class SharedStateVintageTests(unittest.TestCase):
         return {
             "securities": securities(
                 security("HOLD1", owned=True),
-                security("BENCH", sector=None, instrument_type="etf"),
+                security("BENCH", sector=None, instrument_type="etf", equity_shared_state=True),
                 security("CAND1", candidate=True),
             ),
             "forecasts": pd.DataFrame(forecasts),

@@ -76,7 +76,10 @@ def create_demo(directory: str | Path) -> Path:
         fundamentals.append(
             dict(
                 security_id=sid,
+                period_type="ttm",
+                period_start="2025-07-01",
                 period_end="2026-06-30",
+                ttm_quarters="2026-06-30,2026-03-31,2025-12-31,2025-09-30",
                 available_at="2026-08-10T12:00:00Z",
                 received_at="2026-08-10T12:00:00Z",
                 revenue=assets * 0.95,
@@ -89,6 +92,7 @@ def create_demo(directory: str | Path) -> Path:
                 capex=cfo * 0.25,
                 assets=assets,
                 assets_begin=assets / 1.06,
+                assets_begin_period_end="2025-06-30",
                 debt=assets * 0.2,
                 cash=assets * 0.12,
                 source_id="synthetic_statements",
@@ -137,6 +141,7 @@ def create_demo(directory: str | Path) -> Path:
             ticker="SIMETF",
             issuer_id="SIM_FUND",
             name="Simulated Broad Equity Fund",
+            equity_shared_state=True,
             sector="Fund",
             instrument_type="etf",
             currency="USD",

@@ -118,6 +118,12 @@ def analyze(bundle: dict, config: dict) -> dict:
             if config["data"]["require_received_by_cutoff"]
             else "available-by-cutoff reconstruction; retrieval may be later",
             "purpose": "Conditional portfolio research; no trade execution",
+            "financial_history_policy": {
+                "frequency": "quarterly",
+                "max_years": config["data"].get("financial_history_years", 3),
+                "max_quarters": 4 * config["data"].get("financial_history_years", 3),
+                "baseline": "latest_four_quarters",
+            },
         },
         "sources": bundle.get("sources", []),
         "issues": issues,
@@ -155,6 +161,7 @@ def analyze(bundle: dict, config: dict) -> dict:
     )
     scores = stage("signals", lambda: metrics.score_securities(bundle, config), pd.DataFrame())
     result["signals"] = json_safe(scores)
+    result["signal_context"] = json_safe(scores.attrs.get("scoring_context", {}))
     result["risk"] = stage(
         "risk", lambda: metrics.risk_analysis(bundle, config), {"status": "incomplete"}
     )

@@ -183,6 +183,7 @@ class EnrichmentGateTests(unittest.TestCase):
         table = FxTable(fx_records(), max_age_days=7)
         patches = [
             patch("yfinance.Ticker", ReviewTicker),
+            patch("portfolio_research.market_data._now", return_value=SUNDAY_RECEIPT),
             patch(
                 "portfolio_research.market_listings.listing_metadata", side_effect=listing_metadata
             ),
@@ -239,10 +240,10 @@ class EnrichmentGateTests(unittest.TestCase):
         self.assertIn("news", set(events.kind))
         statements = bundle["fundamentals"]
         apple = statements[statements.security_id == "AAPL"]
-        # One row per period end: annual periods and the trailing window, never a quarter
-        # standing in for a year.
-        self.assertEqual(set(apple.period_type), {"annual", "ttm"})
-        self.assertEqual(len(apple), len(set(apple.period_end)))
+        # Distinct period scopes coexist at the same reporting date, so a quarter
+        # supplies the quarterly history without shadowing a trailing-year row.
+        self.assertEqual(set(apple.period_type), {"annual", "quarterly", "ttm"})
+        self.assertEqual(len(apple), len(apple.drop_duplicates(["period_end", "period_type"])))
         trailing = apple[apple.period_type == "ttm"].iloc[0]
         self.assertAlmostEqual(float(trailing["revenue"]), 104.0 + 103.0 + 102.0 + 101.0)
         self.assertAlmostEqual(float(trailing["depreciation"]), 4.0 * 4)

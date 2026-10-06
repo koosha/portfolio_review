@@ -20,6 +20,7 @@ VALUATION_KEYS = {
     "source",
     "version",
     "horizon_months",
+    "active_model",
 }
 
 
@@ -40,6 +41,8 @@ def validate_workspace(payload):
                 raise ValueError(
                     "A company valuation origin must be " + ", ".join(sorted(VALUATION_ORIGINS))
                 )
+            if key == "valuations" and value.get("active_model") not in {None, "eps", "dcf"}:
+                raise ValueError("The active company model must be EPS or DCF.")
     return deepcopy(payload)
 
 
@@ -56,16 +59,68 @@ def validate_workspace_revision(workspace, previous):
             raise ValueError("An edited assessment cannot reuse its previous review timestamp.")
 
 
+def _research_for_quarterly_policy(research, bundle, config):
+    """Keep frozen evidence while withholding obsolete automatic DCF defaults.
+
+    Older source-generated templates could substitute annual lines for missing
+    quarters. Recalculation must not offer those as current quarterly defaults;
+    reviewed workspace models and independent forward-consensus EPS stay separate.
+    """
+    current = deepcopy(research)
+    from .statements import ttm_in_window
+
+    configured_years = config.get("data", {}).get("financial_history_years", 3)
+    for record in current.values():
+        proposals = record.get("proposals") or {}
+        dcf = proposals.get("dcf")
+        if not isinstance(dcf, dict):
+            continue
+        meta = dcf.get("proposal_meta") or {}
+        history = meta.get("financial_history") or {}
+        years = history.get("lookback_years")
+        if (
+            history.get("basis") == "quarterly"
+            and type(years) is int
+            and 1 <= years <= configured_years
+            and ttm_in_window(
+                {
+                    "period_type": "ttm",
+                    "period_end": history.get("latest_period_end"),
+                    "ttm_quarters": history.get("current_ttm_quarters"),
+                },
+                as_of=bundle["as_of"],
+                years=configured_years,
+            )
+        ):
+            continue
+        proposals["dcf"] = None
+        proposals.setdefault("reasons", []).append(
+            {
+                "code": "dcf_quarterly_history_required",
+                "severity": "info",
+                "detail": "Refresh quarterly company data to rebuild DCF defaults.",
+            }
+        )
+    return current
+
+
 def analyze_review(bundle, config, *, previous=None):
     """The published review: engine outputs, the owner's workspace and what to look at.
 
     ``previous`` is the last published run's result when there is one. It is read only
     to explain what changed since then; nothing in this run depends on it existing.
     """
+    from .benchmark import benchmark_view, prepare_benchmark
+    from .enrichment import _apply_shared_state
     from .evidence import validate_assessment
+    from .holding_analysis import build_holding_analysis
     from .readiness import readiness
     from .valuation import calculate_dcf, calculate_eps, dcf_sensitivity, eps_sensitivity
 
+    # Scenario expansion is a pure calculation, so replay must use the current
+    # controls rather than previously expanded generated rows. Imports remain frozen.
+    _apply_shared_state(bundle, config, bundle["as_of"])
+    config, _ = prepare_benchmark(bundle, config)
     workspace = validate_workspace(bundle.get("workspace", {}))
     result = analyze(bundle, config)
     result["observations"] = {}
@@ -143,7 +198,7 @@ def analyze_review(bundle, config, *, previous=None):
     # it: briefs and proposals are proposed, and the requirements table says what each
     # output of this run actually has.
     if bundle.get("research"):
-        result["research"] = deepcopy(bundle["research"])
+        result["research"] = _research_for_quarterly_policy(bundle["research"], bundle, config)
     # What the review discovered, what it refused and why, stated beside the analysis:
     # the scope it acquired, the rows it excluded by name, and the holdings and
     # candidates whose evidence says look here first.
@@ -155,5 +210,9 @@ def analyze_review(bundle, config, *, previous=None):
         from .priorities import review_priorities
 
         result["priorities"] = review_priorities(result, bundle, config, previous=previous)
+    result["holding_analysis"] = build_holding_analysis(result, bundle, config, workspace)
+    result["benchmark_reference"] = benchmark_view(bundle, result)
     result["readiness"] = readiness(result, bundle, config)
-    return json_safe(result)
+    from .account_labels import with_account_labels
+
+    return json_safe(with_account_labels(result, bundle))

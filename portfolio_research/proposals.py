@@ -32,7 +32,9 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-METHOD_VERSION = "proposal-template-1"
+from .valuation_basis import estimate_currency, listing_ratio, translate_per_share
+
+METHOD_VERSION = "proposal-template-3"
 EPS_PERIOD_BY_HORIZON = {6: "0y", 12: "+1y", 18: "+1y"}
 FINANCIAL_SECTORS = {"Financials", "Real Estate"}
 DEFAULT_DISCOUNT_RATE = 0.09
@@ -78,7 +80,7 @@ def _equity_reason(security):
             "equity listing; the per-share earnings model does not apply"
         )
     equity_type = security.get("equity_type")
-    if equity_type is not None and equity_type != "ordinary_common":
+    if equity_type is not None and equity_type not in {"ordinary_common", "depositary_receipt"}:
         return (
             f"equity_type {equity_type!r} is not ordinary common equity; the per-share "
             "earnings model does not apply"
@@ -106,6 +108,8 @@ def propose_eps_model(
     dividends_ttm_per_share,
     horizon_months,
     dividends_source_id: str | None = None,
+    valuation_context: Mapping | None = None,
+    financial_history: Mapping | None = None,
     issues: list | None = None,
 ) -> dict | None:
     """Propose a forward P/E payload for `valuation.calculate_eps`, or None with a reason.
@@ -131,18 +135,14 @@ def propose_eps_model(
     price = _number(price_major)
     if price is None or price <= 0:
         return _refuse(issues, code, sid, "a positive quoted price in major units is required")
-    estimate_currency = (
-        _currency(estimates.get("currency")) if isinstance(estimates, Mapping) else None
-    )
-    if estimate_currency is not None and estimate_currency != currency:
-        return _refuse(
-            issues,
-            code,
-            sid,
-            f"consensus EPS is quoted in {estimate_currency} while the price is in {currency}; "
-            "a verified conversion is required",
-        )
     period = EPS_PERIOD_BY_HORIZON[horizon_months]
+    if (estimates or {}).get("unit_contract") == "legacy_unverified" or (
+        str((estimates or {}).get("source_id") or "").startswith("yahoo_estimates:")
+        and (estimates or {}).get("unit_contract") != "period-currencies-2"
+    ):
+        return _refuse(
+            issues, code, sid, "refresh consensus to verify each period's currency declaration"
+        )
     block = _estimate_block(estimates, "eps", period)
     if block is None:
         return _refuse(issues, code, sid, f"consensus EPS for {period} is unavailable")
@@ -150,6 +150,43 @@ def propose_eps_model(
     missing = sorted(key for key, value in values.items() if value is None)
     if missing:
         return _refuse(issues, code, sid, f"consensus EPS {period} is missing {', '.join(missing)}")
+    unit = estimate_currency(estimates, period)
+    context = dict(valuation_context or {})
+    bridge = None
+    declared_basis = block.get("per_share_basis") or (estimates or {}).get("per_share_basis")
+    if declared_basis not in (
+        None,
+        "listed_share",
+        "ordinary_share",
+        "provider_listing_contract",
+        "retained_listing_contract",
+    ):
+        return _refuse(issues, code, sid, "consensus EPS share units are unsupported")
+    if not unit:
+        return _refuse(issues, code, sid, f"consensus EPS {period} currency is undeclared")
+    if not context and (unit != currency or block.get("per_share_basis") == "ordinary_share"):
+        return _refuse(
+            issues,
+            code,
+            sid,
+            f"consensus EPS in {unit} needs a verified listed-share conversion to the {currency} quote",
+        )
+    if context:
+        for key, value in values.items():
+            converted = translate_per_share(
+                value,
+                from_currency=unit,
+                quote_currency=currency,
+                per_share_basis=block.get("per_share_basis")
+                or (estimates or {}).get("per_share_basis"),
+                same_currency_listing_contract=True,
+                **context,
+            )
+            if converted["value"] is None:
+                return _refuse(issues, code, sid, converted["reason"])
+            values[key] = converted["value"]
+            if key == "avg":
+                bridge = converted
     if values["avg"] == 0:
         return _refuse(issues, code, sid, f"consensus EPS {period} average is zero; no multiple")
     multiple = price / values["avg"]
@@ -189,6 +226,8 @@ def propose_eps_model(
         "model": "eps_multiple",
         "estimate_period": period,
         "estimate_label": ESTIMATE_LABEL,
+        "financial_history": dict(financial_history or {}),
+        "earnings_bridge": bridge,
         "evidence": {
             key: source
             for key, source in (
@@ -303,6 +342,9 @@ def propose_dcf_inputs(
     estimates,
     defaults,
     quote_currency=None,
+    valuation_context: Mapping | None = None,
+    financial_history: Mapping | None = None,
+    quarterly_required: bool = False,
     issues: list | None = None,
 ) -> dict | None:
     """Propose an FCFF payload for `valuation.calculate_dcf`, or None with a reason.
@@ -333,9 +375,19 @@ def propose_dcf_inputs(
     if unit_currency is None:
         return _refuse(issues, code, sid, f"statement currency {currency!r} is not a code")
     trailing = ttm if isinstance(ttm, Mapping) else {}
-    annual = _latest_annual(annual_statements)
     if not trailing:
         return _refuse(issues, code, sid, "trailing twelve-month statements are unavailable")
+    references = trailing.get("quarters_used")
+    if not isinstance(references, (list, tuple)):
+        references = [part for part in str(trailing.get("ttm_quarters") or "").split(",") if part]
+    quarterly_derived = trailing.get("period_type") == "ttm" and len(set(references)) == 4
+    if quarterly_required and not quarterly_derived:
+        return _refuse(
+            issues, code, sid, "four verified quarterly periods are required for a DCF draft"
+        )
+    # A missing line in the quarterly TTM is missing evidence. An annual line is
+    # not a replacement for that flow period; verified Q4 derivation happens upstream.
+    annual = {} if quarterly_required or quarterly_derived else _latest_annual(annual_statements)
     evidence, notes = {}, []
     revenue_now = _line("revenue", trailing, annual, evidence, notes)
     ebit_now = _line("operating_income", trailing, annual, evidence, notes)
@@ -393,6 +445,13 @@ def propose_dcf_inputs(
     growth = _number((growth_block or {}).get("growth"))
     if growth is None and growth_block is not None:
         consensus_revenue = _number(growth_block.get("avg"))
+        if estimate_currency(estimates, "+1y", "revenue") != unit_currency:
+            return _refuse(
+                issues,
+                code,
+                sid,
+                "consensus revenue and statement revenue use different or undeclared currencies",
+            )
         growth = consensus_revenue / revenue_now - 1 if consensus_revenue is not None else None
         if growth is not None:
             notes.append("revenue growth derived from the consensus +1y revenue level")
@@ -408,10 +467,46 @@ def propose_dcf_inputs(
     working_capital_ratio = working_capital / revenue_now
     sbc_ratio = stock_compensation / revenue_now
     statement_shares = _number(trailing.get("diluted_shares"))
-    factor, share_basis = _share_factor(statement_shares, _number(shares_outstanding))
+    context = dict(valuation_context or {})
+    # EPS may be reported per ADS alongside an ordinary-share denominator. The
+    # statement share-count declaration is independent of the EPS declaration.
+    denominator_basis = trailing.get("share_count_basis")
+    declared_domicile = security.get("domicile")
+    requires_denominator_basis = (
+        security.get("equity_type") == "depositary_receipt"
+        or security.get("depositary_receipt") is True
+        or (_currency(quote_currency) == "USD" and declared_domicile and declared_domicile != "US")
+    )
+    if requires_denominator_basis and denominator_basis not in {"ordinary_share", "listed_share"}:
+        return _refuse(
+            issues,
+            code,
+            sid,
+            "a verified ordinary-share or listed-share denominator is required for this listing",
+        )
+    ratio = 1.0
+    if denominator_basis == "ordinary_share":
+        ratio, ratio_gap = (
+            listing_ratio(
+                context.get("listing_basis"),
+                **{
+                    key: context[key]
+                    for key in ("as_of", "cutoff", "current", "require_received", "receipt_limit")
+                    if key in context
+                },
+            )
+            if context.get("as_of") and context.get("cutoff")
+            else (None, "A dated, sourced ordinary-share to listed-share ratio is required.")
+        )
+        if ratio_gap:
+            return _refuse(issues, code, sid, ratio_gap)
+    factor, share_basis = _share_factor(
+        statement_shares / ratio if statement_shares is not None else None,
+        _number(shares_outstanding),
+    )
     if factor is None:
         return _refuse(issues, code, sid, share_basis)
-    diluted_shares = statement_shares * factor
+    diluted_shares = statement_shares * factor / ratio
     invested_capital = assets - cash
     notes.append("invested_capital[1] proxied by total assets less cash")
     notes.append("excess_cash: all cash treated as excess")
@@ -459,6 +554,9 @@ def propose_dcf_inputs(
         "excess_cash": cash,
         "nonoperating_assets": 0,
         "diluted_shares": diluted_shares,
+        "per_share_basis": "listed_share"
+        if denominator_basis in {"ordinary_share", "listed_share"}
+        else "retained_listing_contract",
         "projections": projections,
     }
     from portfolio_research import valuation
@@ -473,7 +571,27 @@ def propose_dcf_inputs(
     # `value_per_share` is denominated in the statement currency. A quote in another
     # currency is a different unit, so the two are never divided; the change is simply
     # unavailable until a verified conversion exists.
+    comparison_value = value_per_share
+    quote_bridge = None
     comparable = quote is not None and quote == unit_currency
+    if (
+        not comparable
+        and context
+        and quote is not None
+        and value_per_share is not None
+        and denominator_basis in {"ordinary_share", "listed_share"}
+    ):
+        # The enterprise calculation stays entirely in reporting currency. Only
+        # its already normalized per-listed-share result is translated for comparison.
+        quote_bridge = translate_per_share(
+            value_per_share,
+            from_currency=unit_currency,
+            quote_currency=quote,
+            per_share_basis="listed_share",
+            **context,
+        )
+        comparison_value = quote_bridge["value"]
+        comparable = comparison_value is not None
     if not comparable and price is not None:
         notes.append(
             f"implied change against the quoted price is unavailable: the statements are "
@@ -493,9 +611,11 @@ def propose_dcf_inputs(
         ],
         "convergence": DCF_CONVERGENCE,
         "estimate_label": ESTIMATE_LABEL,
+        "financial_history": dict(financial_history or {}),
         "notes": notes,
         "inputs": {
             "trailing_period_end": trailing.get("period_end"),
+            "financial_history": dict(financial_history or {}),
             "ebit_margin": margin,
             "tax_rate": tax_rate,
             "revenue_growth_path": growth_path,
@@ -504,6 +624,11 @@ def propose_dcf_inputs(
             "working_capital_ratio": working_capital_ratio,
             "share_factor": factor,
             "share_basis": share_basis,
+            "ordinary_shares_per_listed_share": ratio,
+            "share_ratio_source_id": (context.get("listing_basis") or {}).get("source_id")
+            if denominator_basis == "ordinary_share"
+            else None,
+            "per_share_basis": payload["per_share_basis"],
         },
         "verification": {
             "status": verified["status"],
@@ -513,9 +638,11 @@ def propose_dcf_inputs(
         },
         "price_major": price,
         "price_currency": quote,
+        "quote_value_per_share": comparison_value if comparable else None,
+        "quote_value_bridge": quote_bridge,
         "implied_change_vs_price": (
-            value_per_share / price - 1
-            if comparable and price and value_per_share is not None
+            comparison_value / price - 1
+            if comparable and price and comparison_value is not None
             else None
         ),
     }

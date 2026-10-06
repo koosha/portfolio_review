@@ -16,6 +16,7 @@ let view = CURRENT_VIEW, previousRun = null;
 let supplemental = null, supplementalSupported = false, decisionRecords = [], latestEvaluation = null;
 let fieldCounter = 0;
 let current = null, currentRequest = 0;
+let accountDirectory = null;
 let exceptionState = null, exceptionRequest = 0;
 const columnVisibility = new Set(['security_id','account_id','quantity','price','market_value','calculated_weight','currency']);
 const text = value => value === null || value === undefined || value === '' ? '—' : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -24,6 +25,116 @@ const numeric = value => { try { return numberOrNull(value); } catch { return nu
 const num = (value, digits=2) => numeric(value) === null ? '—' : numeric(value).toLocaleString(undefined,{maximumFractionDigits:typeof digits==='number'?digits:2});
 const pct = value => numeric(value) === null ? '—' : `${num(numeric(value)*100,1)}%`;
 const money = (value, currency=result?.summary?.currency) => numeric(value) === null ? '—' : `${num(value)}${currency ? ` ${currency}` : ''}`;
+function accountLabel(id, row={}) {
+  const directory=accountDirectory?.accounts || [];
+  const known=directory.find(item=>item.account_id===id);
+  const label=known?.display_name || row.account_name || row.display_name || result?.account_labels?.[id]
+    || (result?.accounts || []).find(item=>item.account_id===id)?.display_name || row.name;
+  if(label && !/^account_[0-9a-f]{8,}$/i.test(label) && label!==id)return label;
+  const accounts=[...(result?.accounts || result?.summary?.accounts || []),...objectRows(current?.current?.accounts)];
+  const ids=[...new Set(accounts.map(item=>item.account_id).filter(Boolean))];
+  return `Account ${Math.max(1,ids.indexOf(id)+1)}`;
+}
+function securityLabel(id) {
+  const row=securityRow(id),reference=result?.benchmark_reference;
+  const benchmark=reference && [reference.security_id,reference.configured_id,reference.selection].includes(id)?reference:{};
+  return holdingAnalysis(id)?.ticker || row.ticker || row.symbol || benchmark.ticker || id || 'Unresolved';
+}
+function shortDate(value) {
+  if(!value)return 'Date unavailable';
+  const date=new Date(String(value).slice(0,10)+'T12:00:00');
+  return Number.isNaN(date.getTime())?String(value):date.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+}
+function holdingAnalysis(id) { return (result?.holding_analysis || []).find(row=>row.security_id===id); }
+function financialHistoryCoverage(id,analysis=holdingAnalysis(id)) {
+  const history=analysis?.financial_history || analysis?.inputs?.financial_history || result?.research?.[id]?.financial_history;
+  const available=numeric(history?.available_quarters),maximum=numeric(history?.max_quarters);
+  if(!Number.isInteger(available) || available<0 || !Number.isInteger(maximum) || maximum<1)return null;
+  const dates=[...new Set([history.oldest_period_end,history.latest_period_end].filter(Boolean))];
+  return el('p',`Financial history: ${available}/${maximum} quarters available${dates.length?` · ${dates.join('–')}`:''}`,'compact-note financial-history-coverage');
+}
+function holdingAnalysisAvailability() {
+  const computed=result?.metadata?.computed_views?.holding_analysis;
+  if(computed?.status==='unavailable')return {status:'legacy_inputs_unavailable',label:'Update analysis',reason:computed.reason || 'This saved review lacks the retained inputs needed for holding analysis. Update & analyze creates a complete review.',next_step:{label:'Update & analyze',operation:'update'}};
+  if(Array.isArray(result?.holding_analysis))return {status:'available'};
+  if(!result)return {status:'no_review',label:'Not analyzed',reason:'Run Update & analyze to create your first review.',next_step:{label:'Update & analyze',operation:'update'}};
+  if(Number(service.capabilities?.holding_analysis)>=1)return {status:'missing_run_analysis',label:'Update analysis',reason:'This saved review has no holding analysis. Update & analyze builds the scenarios and actions.',next_step:{label:'Update & analyze',operation:'update'}};
+  return {status:'backend_update_required',label:'Restart app',reason:'The running app does not support holding analysis. Restart Portfolio Review, then reload this page.',next_step:{label:'Reload page',operation:'reload'}};
+}
+function holdingDisplay(id,holding=securityRow(id)) {
+  const row=holdingAnalysis(id),availability=holdingAnalysisAvailability();if(row && availability.status==='available')return row;
+  const held=(result?.holdings || []).some(item=>item.security_id===id);
+  const issue=availability.status==='available'
+    ?held?{status:'missing_holding_analysis',label:'Update analysis',reason:'No analysis was computed for this holding in the saved review.',next_step:{label:'Update & analyze',operation:'update'}}
+      :{status:'candidate',label:'Candidate',reason:'This security is outside the current holdings; no holding action was computed.'}
+    :availability;
+  return {security_id:id,ticker:holding.ticker || holding.symbol || id,name:holding.name,action:null,display_action:issue.label,
+    status:issue.status,reason:issue.reason,next_step:issue.next_step,analysis_missing:true,model:null,scenarios:[]};
+}
+function analysisNextStep(row) {
+  if(row?.next_step)return row.next_step;
+  if(row?.status==='ready' || row?.status==='candidate' || !row)return null;
+  if(row.model==='fcff_dcf')return {label:'Review horizon scenarios',section:'scenarios'};
+  if(row.model==='eps_multiple')return {label:'Review assumptions',section:'research'};
+  if(row.model==='shared_state')return {label:'Review company evidence',section:'research',tab:'evidence'};
+  return {label:'Check data',section:'data'};
+}
+function nextStepButton(row) {
+  const step=analysisNextStep(row);if(!step)return null;
+  return button(step.label || 'View details',async()=>{
+    if(step.operation==='update'){await startWorkflow();return;}
+    if(step.operation==='reload'){location.reload();return;}
+    if(step.section==='research'){securityId=row.security_id;renderCompany();navigate('research');if(step.tab)document.querySelector(`[data-company-tab="${step.tab}"]`)?.click();$('company-heading').scrollIntoView({behavior:'smooth',block:'start'});return;}
+    navigate(pages.includes(step.section)?step.section:'data');
+  },'text-button');
+}
+function analysisReason(row,{compact=false}={}) {
+  const node=el('div',null,'analysis-reason');
+  if(compact && row.status==='ready' && ['Buy','Sell','Hold'].includes(row.action)){
+    const brief=row.action==='Buy'?'Above hurdle':row.action==='Sell'?'Below hurdle':row.model==='shared_state'?'Market scenarios':'Within hurdle';
+    node.append(el('span',brief));node.title=row.reason || brief;return node;
+  }
+  node.append(el('span',row.reason || 'No reason was supplied by the analysis engine.'));
+  const next=nextStepButton(row);if(next)node.append(next);return node;
+}
+function actionBadge(row) {
+  const action=row?.action || row?.display_action || 'Not analyzed', node=el('span',action,`action-badge ${action.toLowerCase().replaceAll(' ','-')}`);
+  node.title=row?.reason || 'No holding action was computed.';return node;
+}
+function modelLabel(row) {
+  if(row?.model==='eps_multiple')return ['automatic_draft','retained_proposal_draft'].includes(row.source_type)?'Draft EPS × P/E':'EPS × P/E';
+  if(row?.model==='fcff_dcf')return 'DCF value';
+  if(row?.model==='shared_state')return 'Market scenarios';
+  return row?.analysis_missing?'Not computed':'Unavailable';
+}
+function actionBreakdown(row) {
+  if(row.analysis_missing)return null;
+  const benchmark=row.compare_to_benchmark?.security_id || resolved().mandate?.benchmark_id || 'VOO';
+  const isDCF=row.model==='fcff_dcf';
+  const values={model:modelLabel(row),signal_basis:friendly(row.basis),return_basis:friendly(row.return_metric),
+    ...(isDCF?{intrinsic_value_gap:pct(row.intrinsic_value_gap)}:{
+      scenario_return:pct(row.scenario_return),benchmark:securityLabel(benchmark),benchmark_return:pct(row.benchmark_return),
+      difference:pct(row.excess_return),review_hurdle:pct(row.review_hurdle),round_trip_cost_assumption:pct(row.round_trip_cost_fraction),
+    })};
+  const inputs=row.valuation_input?.proposal_meta?.inputs || row.inputs || {};
+  const central=row.valuation_input?.scenarios?.find(item=>item.label==='central');
+  const assumptions=row.model==='eps_multiple'?kv({starting_eps:num(inputs.starting_eps),starting_pe:num(inputs.starting_pe),
+    base_annual_earnings_growth:pct(inputs.base_annual_earnings_growth),central_horizon_eps:num(central?.eps),central_horizon_pe:num(central?.pe),
+    growth_basis:inputs.growth_basis,earnings_basis:inputs.earnings_basis}):null;
+  const unchangedMultiple=row.source_type==='automatic_draft' && numeric(inputs.starting_pe)!==null && numeric(central?.pe)!==null
+    && Math.abs(numeric(central.pe)-numeric(inputs.starting_pe))<1e-10;
+  return disclosure('Why this signal',kv(values),
+    table(row.scenarios || [],[{key:'label',label:'Outcome'},{key:'probability',render:pct},
+      ...(isDCF?[{key:'value_per_share',label:'Intrinsic value / share',render:value=>money(value,row.inputs?.currency)}]:[
+        {key:'eps',label:'Horizon EPS',render:num},{key:'pe',label:'P/E',render:num},{key:'horizon_price',render:num},
+        {key:'distributions_per_starting_share',label:'Distributions / share',render:num},{key:'return_value',label:'Scenario return',render:pct},
+      ])]),assumptions,
+    el('p',isDCF?'DCF estimates intrinsic value. A holding signal requires horizon return scenarios.':row.model==='shared_state'?'Shared market scenarios support a Hold signal; company evidence is required for a change.':'Buy: difference > hurdle + round-trip cost. Sell: difference < −(hurdle + round-trip cost). Otherwise: Hold.','compact-note'),
+    row.model==='eps_multiple'?el('p','The EPS bridge uses earnings growth, horizon P/E and distributions. It does not calculate DCF value.','compact-note'):null,
+    unchangedMultiple?el('p','Central P/E is held at the starting multiple; central return follows assumed EPS growth and distributions.','compact-note'):null,
+    inputs.growth_convention==='consensus_growth_applied_to_statement_eps_draft_proxy'?el('p','Consensus earnings growth is applied to reported EPS as a draft proxy; accounting definitions may differ.','compact-note'):null,
+    button('Portfolio proposal gates',()=>navigate('review'),'text-button'));
+}
 function when(value) {
   if (!value) return 'Never';
   const date = new Date(value);
@@ -46,7 +157,7 @@ function persist() {
   try { sessionStorage.setItem(draftKey(draft.baseRunId),JSON.stringify(draft)); }
   catch { error('This browser could not retain the draft. Keep this tab open until you save a run.'); }
 }
-function dirty(changes={}) { draft=editDraft(draft,changes); persist(); renderState(true); renderDiff(); }
+function dirty(changes={}) { draft=editDraft(draft,changes); persist(); renderState(true); renderDiff(); renderAnalysisFreshness(); }
 function patch(values) { validateConfigurationPatch(values);dirty({patch:merge(draft.patch,values)}); }
 function workspaceEdit(mutator) { const next=clone(draft.workspace); mutator(next); dirty({workspace:next}); }
 const resolved = () => merge(draft.baseConfig,draft.patch);
@@ -111,7 +222,7 @@ function readinessNote(output) {
 function insight({metric,comparison,source_run,rationale}) {
   const node=el('div',null,'insight');
   node.append(el('strong',text(metric),'insight-metric'),el('span',text(comparison),'insight-comparison'),
-    el('small',[source_run,rationale].filter(Boolean).join(' · '),'insight-source'));
+    disclosure('Basis',el('small',[source_run,rationale].filter(Boolean).join(' · '),'insight-source')));
   return node;
 }
 // Current holdings and a saved analysis are dated separately and are never read as one
@@ -124,10 +235,13 @@ function applyView() {
     ?`Last completed analysis · ${friendly(result.metadata?.review_kind || 'historical')} · market date ${text(result.metadata?.as_of)} · generated ${result.metadata?.computed_at?when(result.metadata.computed_at):'time unavailable'} · run ${String(result.run_id || '').slice(0,12)}${analysisOperationNote()}`
     :result?'No completed analysis shown · current holdings above are the newest collection. Choose a saved run to see its analysis.'
     :'No completed analysis yet · Current holdings above are shown from the newest collection.';
-  $('analysis-caption').textContent=caption;
+  $('analysis-caption').textContent=analysed?`Last completed analysis · ${shortDate(result.metadata?.as_of)}`:'No completed analysis shown';
+  $('analysis-caption').hidden=true;
+  $('technical-context').replaceChildren(kv({review_date:result?.metadata?.as_of,valuation_date:result?.metadata?.valuation_date,generated:result?.metadata?.computed_at,run_id:result?.run_id,source:service.dataset,operation:operationBehindRun()?.status || null}));
+  $('research-empty').hidden=analysed;
   // Every analysed page repeats the same statement, so no page can display a month-old
   // run while the one selector above them says no analysis is shown.
-  for(const node of document.querySelectorAll('[data-analysis-note]'))node.textContent=caption;
+  for(const node of document.querySelectorAll('[data-analysis-note]')){node.textContent='';node.hidden=true;}
 }
 // The selector, the view and the sections on screen are one statement. A load that did
 // not happen restores all three together rather than leaving them disagreeing.
@@ -146,11 +260,11 @@ function field(label,value,onChange,{type='text',options=null,percent=false,help
     input.value=value ?? '';
   } else if (type==='textarea') { input=el('textarea'); input.rows=3; input.value=value ?? ''; }
   else { input=el('input'); input.type=type; if(type==='checkbox') input.checked=value===true;
-    else input.value=value===null || value===undefined ? '' : percent ? numeric(value)*100 : value;
+    else input.value=value===null || value===undefined ? '' : percent ? Number((numeric(value)*100).toPrecision(15)) : value;
     if(type==='number') input.step='any'; }
   input.id=id;
   if (type==='checkbox') wrapper.append(input,el('span',label)); else wrapper.append(el('span',label),input);
-  if(help) wrapper.append(el('small',help,'field-help'));
+  if(help) input.title=help;
   input.addEventListener(options || type==='checkbox' ? 'change' : 'input', () => {
     try {
       let next=type==='checkbox' ? input.checked : input.value;
@@ -163,11 +277,12 @@ function form(fields) { const node=el('div',null,'form-grid'); node.append(...fi
 function table(rows, columns, caption='') {
   if (!rows?.length) return empty('No rows are available for this scope.','No data');
   const wrap=el('div',null,'table-wrap'), grid=el('table'), body=el('tbody'), head=el('thead'), heading=el('tr');
-  let order=[...rows], sortedKey='', ascending=true;
+  let order=[...rows], sortedKey='', ascending=true, pageIndex=0;
+  const pageSize=100, pager=el('div',null,'table-pagination');
   if(caption) grid.append(el('caption',caption));
   const draw=()=>{
     body.replaceChildren();
-    for(const row of order) {
+    for(const row of order.slice(pageIndex*pageSize,(pageIndex+1)*pageSize)) {
       const tr=el('tr');
       for(const column of columns) {
         const td=el('td',null,column.wrap?'wrap':'');
@@ -177,11 +292,17 @@ function table(rows, columns, caption='') {
       } body.append(tr);
     }
     if(body.querySelector('input, select, textarea'))for(const control of heading.querySelectorAll('button'))control.disabled=true;
+    pager.replaceChildren();
+    if(order.length>pageSize){
+      const previous=button('Previous',()=>{pageIndex--;draw();},'quiet');previous.disabled=pageIndex===0;
+      const next=button('Next',()=>{pageIndex++;draw();},'quiet');next.disabled=(pageIndex+1)*pageSize>=order.length;
+      pager.append(el('span',`${pageIndex*pageSize+1}–${Math.min((pageIndex+1)*pageSize,order.length)} of ${order.length}`),previous,next);
+    }
   };
   for(const column of columns) {
     const th=el('th'); th.scope='col';
     const control=button(column.label || friendly(column.key),()=>{
-      ascending=sortedKey===column.key ? !ascending : true; sortedKey=column.key;
+      ascending=sortedKey===column.key ? !ascending : true; sortedKey=column.key;pageIndex=0;
       order.sort((a,b)=>{
         const x=a[column.key],y=b[column.key];
         if(x===null || x===undefined) return y===null || y===undefined?0:1;
@@ -193,7 +314,7 @@ function table(rows, columns, caption='') {
       th.setAttribute('aria-sort',ascending?'ascending':'descending'); draw();
     },'sort-button'); th.append(control);heading.append(th);
   }
-  head.append(heading);grid.append(head,body);wrap.append(grid);draw();return wrap;
+  head.append(heading);grid.append(head,body);wrap.append(grid,pager);draw();return wrap;
 }
 function autoTable(rows, preferred=null) {
   if(!Array.isArray(rows)) return kv(rows);
@@ -290,7 +411,10 @@ function renderState(writeStatus=false) {
   // Recording a decision needs a loaded run and a finished calculation, so it is settled
   // here with the other controls: a run loaded while busy re-enables it when busy clears.
   $('save-decision').disabled=busy || !draft.baseRunId;
-  if(!busy && writeStatus) announce(unapplied?'Advanced JSON has unapplied edits. Apply or discard them before calculating.':draft.dirty && !previewReady(draft)?'Draft changed · displayed results are out of date until recalculated.':previewReady(draft)?'Preview calculated · save a new run to retain this result.':draft.baseRunId?'Saved inputs · display filters leave the analytical scope unchanged.':'Run Update & analyze to create the first retained input set.');
+  if(!busy && writeStatus) announce(unapplied?'Apply or discard advanced edits.':draft.dirty && !previewReady(draft)?'Assumptions changed. Recalculate to update actions and returns.':previewReady(draft)?'Recalculated. Save analysis to keep this version.':draft.baseRunId?'': 'Update & analyze to start.');
+  $('save-run').hidden=!draft.dirty;
+  $('reset-draft').hidden=!draft.dirty;
+  $('recalculate').hidden=!draft.baseRunId;
 }
 function renderDiff() {
   const changes=differences(draft.baseConfig,resolved());
@@ -340,9 +464,10 @@ function valueCurrencyCell(row) {
 function valueCurrencyLine(summary,className='account-meta') {
   const label=typeof summary?.label==='string'?summary.label:'';
   if(!label)return null;
-  const node=el('div',label,`${className}${summary?.basis==='presentation'?' assumed':''}`.trim());
-  node.title='How this value currency was established. Amounts converted at a dated FX observation name their pair and date separately.';
-  return node;
+  const currency=summary.currency || summary.presentation_currency || label.match(/\b[A-Z]{3}\b/)?.[0] || 'USD';
+  const basis=summary.basis==='presentation'?'assumed':summary.basis==='mixed'?'mixed basis':summary.basis==='attested'?'confirmed':'source';
+  const node=disclosure(`Currency: ${currency}${basis==='source'?'':` · ${basis}`}`,el('p',label,'muted'));
+  node.className=`${className} currency-details`;return node;
 }
 function subtotalLine(line) {
   const missing=numeric(line?.missing_value_count) || 0;
@@ -382,21 +507,23 @@ function identityLine(row,held,records) {
 }
 function accountCard(row, context={}) {
   const node=el('article',null,'account-card'), heading=el('div',null,'account-card-heading');
-  heading.append(el('strong',row?.name || row?.account_id || 'Account'),completenessBadge(row?.completeness));
+  heading.append(el('strong',accountLabel(row?.account_id,row)),completenessBadge(row?.completeness));
   const positions=numeric(row?.position_count);
-  const captured=`Captured ${when(row?.captured_at)}${positions===null?'':` · ${positions} ${positions===1?'position':'positions'}`}`;
-  node.append(heading,el('div',captured,'account-meta'));
+  const captured=positions===null?'':`${positions} ${positions===1?'holding':'holdings'}`;
+  const meta=el('div',captured,'account-meta');meta.title=`Collected ${when(row?.captured_at)}`;node.append(heading,meta);
   const subtotals=el('div',null,'account-subtotals'), lines=listOf(row?.subtotals);
-  for(const line of lines)subtotals.append(subtotalLine(line));
-  if(!lines.length)subtotals.append(el('div','No captured subtotal','muted'));
   const held=objectRows(context.positions).filter(position=>position.account_id===row?.account_id);
-  const usdLine=accountUsdLine(row,held);if(usdLine)subtotals.append(usdLine);
+  const usdLine=accountUsdLine(row,held);
+  if(usdLine && !usdLine.classList.contains('muted')) {
+    subtotals.append(usdLine);
+    if(lines.length)subtotals.append(disclosure('Captured amounts',...lines.map(subtotalLine)));
+  } else {for(const line of lines)subtotals.append(subtotalLine(line));if(!lines.length)subtotals.append(el('div','Value unavailable','muted'));}
   node.append(subtotals);
   const valueLine=valueCurrencyLine(row?.value_currency);if(valueLine)node.append(valueLine);
-  if(context.identity)node.append(identityLine(row,held,objectRows(context.exceptions)));
+  if(context.identity && (numeric(row?.identity?.open) || 0)>0)node.append(identityLine(row,held,objectRows(context.exceptions)));
   if(row?.value_basis==='attested')node.append(el('div',`Attested valuation ${row.valuation_date || 'date unavailable'}`,'account-meta'));
   const exceptions=listOf(row?.exceptions).length;
-  node.append(el('div',exceptions?`${exceptions} ${exceptions===1?'exception':'exceptions'}`:'No exceptions',`account-meta${exceptions?' has-exceptions':''}`));
+  if(exceptions)node.append(el('div',`${exceptions} ${exceptions===1?'item needs':'items need'} attention`,'account-meta has-exceptions'));
   return node;
 }
 function renderAccountCards() {
@@ -409,27 +536,30 @@ function renderAccountCards() {
 function renderCurrent() {
   const containers=['current-value-currency','current-totals','current-accounts','current-positions','current-exceptions'];
   if(!current){collectionBadge('Loading…');$('current-dates').textContent='Loading the newest collection…';for(const id of containers)replace(id);return;}
-  $('exception-panel').hidden=!current.supported;
+  $('exception-panel').hidden=!current.supported || !objectRows(exceptionState?.exceptions).some(resolvable);
   if(!current.supported){collectionBadge('Unavailable');$('current-dates').textContent=current.reason || 'Current holdings are unavailable for this source.';for(const id of containers)replace(id);return;}
   const snapshot=current.current || {}, dates=snapshot.dates || {}, collection=snapshot.collection || {};
   const accounts=objectRows(snapshot.accounts), positions=objectRows(snapshot.positions);
   const status=collection.status || 'none';
   collectionBadge(collectionLabels[status] || friendly(status),collectionClasses[status] ?? '');
-  $('current-dates').textContent=`Collected ${when(dates.collection_received_at)} · Source valuation time ${dates.source_valuation_time || 'unknown — captured values shown as observed'} · Market observation date ${dates.market_observation_date || 'unavailable'} · Generated ${when(dates.generated_at)}`;
+  $('current-dates').textContent=`Collected ${when(dates.collection_received_at)}`;
+  $('current-dates').title=`Source valuation: ${dates.source_valuation_time || 'unknown'} · Market date: ${dates.market_observation_date || 'unavailable'} · Generated: ${when(dates.generated_at)}`;
   const totals=objectRows(snapshot.totals?.by_currency), usd=snapshot.totals?.usd && typeof snapshot.totals.usd==='object'?snapshot.totals.usd:null;
-  const covered=usd?metric('Covered value (USD)',num(usd.covered_total),`${numeric(usd.covered_position_count) ?? 0} positions · ${numeric(usd.unconverted_position_count) ?? 0} unconverted · not reconciled NAV`):null;
+  const covered=usd?metric('Covered value (USD)',num(usd.covered_total),`${numeric(usd.covered_position_count) ?? 0} holdings${numeric(usd.unconverted_position_count)?` · ${numeric(usd.unconverted_position_count)} unconverted`:''}`):null;
   if(covered)covered.title=typeof usd.label==='string'?usd.label:'USD presentation of covered amounts using dated FX observations; not reconciled NAV';
   replace('current-value-currency',valueCurrencyLine(usd?.value_currency,'muted value-currency-basis'));
-  replace('current-totals',covered,...(totals.length?totals.map(row=>metric(`Captured subtotal (${row?.currency || 'unlabeled'})`,num(row?.total),`${row?.account_count ?? 0} ${row?.account_count===1?'account':'accounts'} · not reconciled NAV`)):[el('p','No captured subtotals in the newest collection.','muted')]));
+  const capturedTotals=totals.map(row=>metric(`Captured subtotal (${row?.currency || 'unlabeled'})`,num(row?.total),`${row?.account_count ?? 0} ${row?.account_count===1?'account':'accounts'}`));
+  replace('current-totals',covered,metric('Accounts',String(accounts.length)),metric('Holdings',String(positions.filter(row=>row.symbol!=='CASH').length)),covered?disclosure('Captured subtotals',...capturedTotals):capturedTotals.length?el('div'):el('p','No captured values.','muted'));
+  if(!covered && capturedTotals.length)$('current-totals').append(...capturedTotals);
   renderAccountCards();
-  const names=new Map(accounts.map(row=>[row?.account_id,row?.name || row?.account_id]));
+  const names=new Map(accounts.map(row=>[row?.account_id,accountLabel(row?.account_id,row)]));
   replace('current-positions',table(positions,[
     {key:'symbol'},{key:'name',wrap:true},{key:'quantity',render:value=>num(value,4)},{key:'price',render:value=>num(value)},
     {key:'market_value',label:'Market value',render:value=>num(value)},{key:'currency'},
     {key:'quote_currency',label:'Quote currency'},{key:'reported_currency',label:'Value currency',render:(_value,row)=>valueCurrencyCell(row)},
     {key:'market_value_usd',label:'USD value',render:value=>num(value)},
     {key:'fx_pair',label:'FX (pair · date)',render:(value,row)=>value?`${value} · ${row?.fx_observation_date || 'undated'}`:'—'},
-    {key:'account_id',label:'Account',render:value=>names.get(value) || text(value)},{key:'observed_at',label:'Observed',render:value=>when(value)},
+    {key:'account_id',label:'Account',render:value=>names.get(value) || accountLabel(value)},{key:'observed_at',label:'Observed',render:value=>when(value)},
   ],`${positions.length} captured positions · values as observed at capture · USD only with a dated FX observation`));
   const issues=listOf(snapshot.exceptions).filter(issue=>['error','warning'].includes(issue?.severity) && !resolvable(issue));
   const qualifying=issues.filter(issue=>currencyBasisCodes.has(issue?.code));
@@ -439,7 +569,8 @@ function renderCurrent() {
   replace('current-exceptions',
     collection.newer_collection_in_progress?el('p','A newer collection is still in progress; the newest complete collection is shown until it publishes.','current-progress'):null,
     collection.newer_collection_failed?el('p','A newer collection did not complete; the newest complete collection is shown.','current-alert'):null,
-    listIssues(shown,'No collection warnings or errors.'),
+    qualifying.length?listIssues(qualifying):null,
+    rest.slice(0,CURRENT_ISSUE_LIMIT).length?disclosure('Collection details',listIssues(rest.slice(0,CURRENT_ISSUE_LIMIT))):null,
     overflow.length?disclosure(`+${overflow.length} more`,listIssues(overflow)):null);
 }
 async function loadCurrent() {
@@ -549,9 +680,10 @@ function renderExceptionForms() {
   const count=$('exception-count');
   const status=(label,className='')=>{count.textContent=label;count.className=`badge ${className}`.trim();};
   if(!exceptionState){status('Loading…');replace('current-exception-forms',el('p','Loading open exceptions…','muted'));return;}
-  if(exceptionState.unavailable){status('Unavailable','warning');replace('current-exception-forms',el('p',exceptionState.unavailable,'muted'));return;}
+  if(exceptionState.unavailable){$('exception-panel').hidden=false;status('Unavailable','warning');replace('current-exception-forms',el('p',exceptionState.unavailable,'muted'));return;}
   const records=objectRows(exceptionState.exceptions).filter(resolvable);
   status(records.length?`${records.length} open`:'None open',records.length?'warning':'complete');
+  $('exception-panel').hidden=!records.length;
   replace('current-exception-forms',...(records.length?records.map(exceptionCard):[el('p',noOpenExceptions,'exception-empty')]));
 }
 async function loadExceptions() {
@@ -594,7 +726,8 @@ function renderOverview() {
       chartCaption({units:'Rebased weekly benchmark index (hypothetical)',date:observationDate(),
         scope:`${resolved().mandate?.benchmark_id || 'Approved benchmark'} · constant-weight weekly replay`,
         coverage:readinessNote('risk')})));
-  replace('review-priorities',result?listIssues(result.issues?.slice(0,8),'No blocking data issues reported. Review the assumptions before considering changes.'):empty());
+  const issues=result?.issues || [];
+  replace('review-priorities',result?listIssues(issues.slice(0,3),'No blocking data issues.'):empty(),issues.length>3?disclosure(`All ${issues.length} data issues`,listIssues(issues.slice(3))):null);
   const macros=(result?.macro || []).map(row=>{
     const node=el('article',null,'macro-card');node.append(metric(row.series_id,num(row.latest_value),`${row.units || 'Units unavailable'} · ${row.observation_date || 'Undated'}`),lineChart(row.history,`${row.series_id} observed history`),
       chartCaption({units:row.units || 'Units unavailable',date:row.observation_date || observationDate(),scope:`Vintage ${row.vintage_date || 'unknown'} · context only`,coverage:`coverage ${(row.history || []).length} observations`}));return node;
@@ -635,14 +768,11 @@ function briefChanges() {
 }
 function renderWhatChanged() {
   const rows=result?[...decisionInsight(),...summaryComparison(),...briefChanges()]:[];
-  const shown=rows.slice(0,12);
-  $('what-changed-state').textContent=rows.length?`${rows.length} stated`:'Nothing stated';
+  const shown=rows.slice(0,3);
+  $('what-changed-state').textContent=rows.length?`${rows.length} updates`:'No changes';
   replace('what-changed',
-    ...(shown.length?shown.map(insight):[result?empty('No recorded decision, comparable earlier review or dated brief change.','Nothing this review can evidence'):empty()]),
-    rows.length>shown.length?el('p',`+${rows.length-shown.length} more`,'muted'):null,
-    result?el('p',previousRun
-      ?`Compared with the previous ${friendly(result.metadata?.review_kind || 'review').toLowerCase()} review, run ${String(previousRun.run_id).slice(0,12)}.`
-      :'No earlier review of this kind is retained; only this review’s own dated changes are listed.','muted'):null);
+    ...(shown.length?shown.map(insight):[result?el('p','No comparable earlier review.','muted'):empty()]),
+    rows.length>shown.length?disclosure(`All ${rows.length} updates`,...rows.slice(shown.length).map(insight)):null);
 }
 // Concentration is stated against the cap the owner confirmed, never against a default.
 function concentrationRows() {
@@ -680,9 +810,9 @@ function renderPriorityLists() {
   const priorities=result?.priorities || {};
   for(const [id,key,fallback] of [['holdings-review','holdings_to_review','No holding collected a stated reason this review.'],
     ['new-candidates','new_candidates','No unowned company collected a stated reason this review.']]) {
-    const rows=(priorities[key] || []).slice(0,10);
+    const all=priorities[key] || [],rows=all.slice(0,3);
     replace(id,...(rows.length?rows.map(priorityRow):[result?empty(fallback,'Nothing to review here'):empty()]),
-      result?el('p',priorities.rules?`${(priorities[key] || []).length} listed · ordered by how many independent reasons each collected`:'Automatic research did not run for this review; this list is empty rather than guessed.','muted'):null);
+      all.length>rows.length?disclosure(`All ${all.length} ${key==='holdings_to_review'?'holdings':'candidates'}`,...all.slice(rows.length).map(priorityRow)):null);
   }
 }
 // Where the same issuer is held twice: directly and inside a fund. The residual a fund
@@ -708,11 +838,12 @@ function fundSectorBars() {
 }
 function renderOverlap() {
   const unclassified=numeric(result?.summary?.unclassified_value);
-  const overlap=table(overlapRows(),[{key:'issuer_id',label:'Issuer'},{key:'sector'},
+  const rows=overlapRows();
+  const overlap=rows.length?table(rows,[{key:'issuer_id',label:'Issuer'},{key:'sector'},
       {key:'direct_value',label:'Held directly',render:value=>money(value)},
       {key:'indirect_value',label:'Held through funds',render:value=>money(value)},
       {key:'funds',label:'Contributing funds',wrap:true}],
-      'Issuers reached twice: directly and through a fund’s disclosed holdings.');
+      'Issuers reached twice: directly and through a fund’s disclosed holdings.'):el('p','No overlap in available fund disclosures.','compact-note');
   overlap.classList?.add('overlap-table');
   replace('overlap-view',overlap,
     ...fundSectorBars(),
@@ -721,7 +852,7 @@ function renderOverlap() {
       scope:'Direct holdings and disclosed fund holdings',coverage:coverageSummary('fund_disclosures','prices')}));
 }
 function securityRow(id) { return (result?.holdings || []).find(row=>row.security_id===id) || (result?.signals || []).find(row=>row.security_id===id) || {}; }
-function securityButton(id) { return button(id || 'Unresolved',()=>showSecurity(id),'text-button'); }
+function securityButton(id) { const node=button(securityLabel(id),()=>showSecurity(id),'text-button');node.title=id || 'Unresolved';return node; }
 // A published locator is data, not markup: only an https address the service already
 // vetted becomes a link, and everything else stays readable text.
 function sourceLink(source) {
@@ -759,6 +890,24 @@ function detailEvidence(id) {
 function detailCalculation(id) {
   const company=result?.company_research?.[id], proposals=result?.research?.[id]?.proposals;
   const nodes=[];
+  const signal=(result?.signals || []).find(row=>row.security_id===id);
+  if(signal) {
+    const representative=(result?.signals || []).find(row=>row.security_id===signal.representative_security_id) || signal;
+    const metrics=[['gross_profitability','Gross profitability'],['operating_profitability','Operating profitability'],['negative_accruals','Negative cash accruals'],['earnings_yield','Earnings yield'],['cashflow_yield','Cash-flow yield'],['raw_momentum','Momentum return']];
+    nodes.push(el('h3','Quality, value & momentum'),
+      kv({normalization_sector:signal.normalization_sector || signal.sector,ranked_issuers:signal.rank_universe_issuer_count,
+        sector_peers:signal.sector_peer_count,quality_metrics_used:signal.quality_metric_count,quality_metrics_required:signal.quality_metric_required,
+        representative_security:signal.representative_security_id?securityLabel(signal.representative_security_id):null,
+        momentum_start_session:representative.momentum_start_session,momentum_end_session:representative.momentum_end_session}),
+      table(metrics.map(([key,metric])=>({metric,raw_value:representative[key],percentile:key==='raw_momentum'?signal.momentum:signal.metric_percentiles?.[key],
+        usable_peers:signal.quality_peer_counts?.[key] ?? signal.value_peer_counts?.[key] ?? (key==='raw_momentum'?result?.signal_context?.momentum_issuers:null)})),[
+        {key:'metric'},{key:'raw_value',label:'Raw metric',render:pct},{key:'percentile',label:'Input percentile',render:pct},{key:'usable_peers',label:'Usable peers',render:num},
+      ]),listIssues((signal.reasons || []).map(friendly),'Required inputs and peer coverage are present.'),
+      disclosure('Calculation inputs & sources',kv(representative.metric_inputs || {}),
+        kv(Object.fromEntries(['fundamental_source_id','fundamental_period_end','fundamental_available_at','fundamental_currency',
+          'market_cap_source_id','market_cap_as_of','market_cap_currency','momentum_start_adjusted_close','momentum_end_adjusted_close','momentum_start_source_id','momentum_end_source_id'].map(key=>[key,representative[key]])))),
+      disclosure('Reported fundamental inputs',autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===representative.security_id))));
+  }
   if(company?.eps)nodes.push(el('h3','EPS and multiple'),table(company.eps.scenarios,[{key:'label',label:'Outcome'},
     {key:'horizon_price',label:'Horizon price',render:value=>money(value,company.eps.currency)},
     {key:'total_return',label:'Total return',render:pct},{key:'status',render:badge}],'Reviewed assumptions calculated by this run.'));
@@ -773,6 +922,8 @@ function detailCalculation(id) {
     terminal_growth_rate:pct(proposals.dcf.terminal_growth_rate),terminal_roic:pct(proposals.dcf.terminal_roic),
     diluted_shares:num(proposals.dcf.diluted_shares,0)}));
   if(!nodes.length)nodes.push(empty('No valuation was calculated and none was proposed for this security.','No calculation'));
+  const history=financialHistoryCoverage(id);
+  if(history)nodes.push(disclosure('Financial history coverage',history));
   return nodes;
 }
 function detailAssumptions(id) {
@@ -810,30 +961,120 @@ function renderHoldings() {
   const search=$('holdings-search').value.toLowerCase(), rows=(result?.holdings || []).filter(row=>(!account || row.account_id===account) && JSON.stringify(row).toLowerCase().includes(search));
   const fields=[['security_id','Security'],['account_id','Account'],['quantity','Quantity'],['price','Price'],['market_value','Market value'],['calculated_weight','Account weight'],['currency','Currency'],['issuer_id','Issuer'],['valuation_date','Valuation date'],['reported_weight','Reported weight']];
   replace('holdings-columns',...fields.map(([key,label])=>field(label,columnVisibility.has(key),checked=>{if(checked)columnVisibility.add(key);else columnVisibility.delete(key);renderHoldings();},{type:'checkbox'})));
-  replace('research-holdings',table(rows,fields.filter(([key])=>columnVisibility.has(key)).map(([key,label])=>({key,label,render:key==='security_id'?value=>securityButton(value):key.includes('weight')?pct:['quantity','price','market_value'].includes(key)?value=>num(value):undefined})),`${rows.length} visible positions · account display filter only`));
+  replace('research-holdings',table(rows,fields.filter(([key])=>columnVisibility.has(key)).map(([key,label])=>({key,label,render:key==='security_id'?value=>securityButton(value):key==='account_id'?(value,row)=>accountLabel(value,row):key.includes('weight')?pct:['quantity','price','market_value'].includes(key)?value=>num(value):undefined})),`${rows.length} visible positions · account display filter only`));
   replace('account-reconciliation',table((result?.summary?.accounts || []).filter(row=>!account || row.account_id===account),[
-    {key:'account_id',label:'Account'},{key:'total_value',label:'NAV',render:num},{key:'cash',label:'Explicit cash',render:num},
+    {key:'account_id',label:'Account',render:(value,row)=>accountLabel(value,row)},{key:'total_value',label:'NAV',render:num},{key:'cash',label:'Explicit cash',render:num},
     {key:'unclassified_value',label:'Unclassified',render:num},{key:'coverage',render:pct},{key:'currency'},
     {key:'complete',render:value=>badge(value?'complete':'incomplete')},
   ]));
 }
+function renderAnalysisFreshness() {
+  const stale=draft.dirty && !previewReady(draft);
+  const availability=holdingAnalysisAvailability();
+  $('holding-analysis-state').textContent=availability.status!=='available'?availability.label:stale?'Recalculate to update':`${horizon()}-month scenarios`;
+  $('holding-analysis-state').className=`badge ${stale?'dirty':''}`;
+  $('holding-analysis').classList.toggle('stale-result',stale);
+  $('company-status').title=stale?'Assumptions changed; the action is from the previous calculation.':'Based on the displayed scenario inputs.';
+  const model=$('calculated-action-model');
+  if(model)model.textContent=`Signal uses ${modelLabel(holdingDisplay(securityId))}${stale?' · previous calculation':''}`;
+  const selected=document.querySelector('[data-action-model] select');
+  if(selected)selected.value=draft.workspace.valuations?.[securityId]?.active_model || (holdingAnalysis(securityId)?.model==='fcff_dcf'?'dcf':'eps');
+}
+function renderHoldingAnalysis() {
+  const search=$('analysis-search').value.toLowerCase().trim();
+  const held=new Map();
+  for(const row of result?.holdings || []) {
+    if(account && row.account_id!==account)continue;
+    if(row.security_id && row.security_id!=='CASH')held.set(row.security_id,row);
+  }
+  const rows=[...held].map(([id,holding])=>{
+    const row=holdingDisplay(id,holding);
+    return {...row,starting_price:row.inputs?.starting_price ?? holding.price,
+      ...Object.fromEntries(labels.map(label=>[label,row.scenarios?.find(item=>item.label===label)?.return_value ?? null]))};
+  }).filter(row=>`${row.ticker || ''} ${row.name || ''} ${row.security_id}`.toLowerCase().includes(search));
+  const openHolding=id=>{securityId=id;renderCompany();$('research-security').focus();$('company-heading').scrollIntoView({behavior:'smooth',block:'start'});};
+  const availability=holdingAnalysisAvailability(),computed=result?.metadata?.computed_views?.holding_analysis,message=$('holding-analysis-message');
+  message.hidden=availability.status==='available' && computed?.status!=='computed';
+  message.replaceChildren();
+  if(!message.hidden){
+    if(availability.status==='available')message.append(el('span','Research calculated from saved inputs.'),disclosure('Calculation details',kv(computed)));
+    else {message.append(el('strong',availability.label),el('span',availability.reason));const next=nextStepButton(availability);if(next)message.append(next);}
+  }
+  replace('holding-analysis',table(rows,[
+    {key:'action',label:'Scenario signal',render:(_value,row)=>actionBadge(row)},
+    {key:'ticker',label:'Holding',render:(_value,row)=>{const cell=el('div',null,'holding-name');cell.append(button(row.ticker || securityLabel(row.security_id),()=>openHolding(row.security_id),'text-button'),el('small',row.name || ''));return cell;}},
+    {key:'model',label:'Model',render:(_value,row)=>{const node=el('span',modelLabel(row),'input-basis');node.title=[row.evidence?.statements?.used?'Statements used':null,row.evidence?.estimates?.used?'Estimates used':null,row.reason].filter(Boolean).join(' · ');return node;}},
+    {key:'starting_price',label:'Price',render:num},
+    ...labels.map(label=>({key:label,label:friendly(label),render:(value,row)=>{const scenario=row.scenarios?.find(item=>item.label===label);if(numeric(value)===null && numeric(scenario?.value_per_share)!==null){const span=el('span',money(scenario.value_per_share,row.inputs?.currency));span.title='Conditional intrinsic value per share; no horizon return is assumed.';return span;}const span=el('span',pct(value),numeric(value)<0?'negative':numeric(value)>0?'positive':'');return span;}})),
+    {key:'excess_return',label:'Vs benchmark',render:pct},
+    {key:'reason',label:'Why / next step',wrap:true,render:(_value,row)=>analysisReason(row,{compact:true})},
+  ]));
+  $('research-horizon').value=horizon();renderAnalysisFreshness();
+}
+async function loadAccountDirectory() {
+  try {accountDirectory=await api('/api/research/accounts');document.dispatchEvent(new CustomEvent('portfolio:account-names',{detail:accountDirectory.accounts || []}));renderContext();renderAccountCards();renderAccountNames();}
+  catch { /* Older services still show source names from the current collection. */ }
+}
+function renderAccountNames() {
+  const rows=accountDirectory?.accounts || result?.accounts || [];
+  if(!rows.length){replace('account-name-editor',el('p','Pull holdings to see your accounts.','muted'));return;}
+  replace('account-name-editor',...rows.map(row=>{
+    const block=el('div',null,'account-name-row');
+    const label=field('Display name',accountLabel(row.account_id,row),()=>{});
+    const input=label.querySelector('input');
+    block.append(label,button('Save name',async()=>{
+      const display_name=input.value.trim();if(!display_name)throw new Error('Enter an account name.');
+      await api('/api/research/accounts',{account_id:row.account_id,display_name});
+      await loadAccountDirectory();renderAll();announce('Account name saved.');
+    }));
+    if(row.source_name)block.append(el('small',`Yahoo: ${row.source_name}`,'muted'));
+    return block;
+  }));
+}
+
 function renderScreen() {
   const search=$('screen-search').value.toLowerCase(), rows=(result?.signals || []).filter(row=>JSON.stringify(row).toLowerCase().includes(search));
-  $('screen-scope').textContent=`${result?.signals?.length || 0} supplied securities · not a market-wide claim`;
+  const context=result?.signal_context || {},spec=(previewReady(draft)?resolved():saved?.config || draft.baseConfig).signals || {};
+  $('screen-scope').textContent=context.ranked_issuers!==undefined?`${context.ranked_issuers} ranked issuers · ${context.complete_composite_issuers ?? 0} complete scores`:`${result?.signals?.length || 0} supplied securities`;
+  const minimum=context.minimum_sector_peers ?? spec.min_sector_size ?? 20;
+  const weights=context.family_weights || spec.family_weights || {quality:1/3,value:1/3,momentum:1/3};
+  const weightTotal=Object.values(weights).reduce((sum,value)=>sum+(numeric(value) ?? 0),0);
+  const weightSummary=['quality','value','momentum'].map(key=>`${friendly(key)} ${pct(weightTotal>0 && numeric(weights[key])!==null?numeric(weights[key])/weightTotal:null)}`).join(' · ');
+  const incomplete=(result?.signals || []).length && !(result?.signals || []).some(row=>numeric(row.score)!==null);
+  const peerGap=(result?.signals || []).some(row=>row.eligible && (row.reasons || []).includes('incomplete_family_or_insufficient_sector_peers'));
+  const attention=incomplete?el('div',null,'analysis-notice'):null;
+  if(attention)attention.append(el('span',peerGap?`Scores unavailable · quality and value need ${minimum} usable sector peers per metric.`:'Scores unavailable · check data and universe eligibility.'),button(peerGap?'Peer settings':'Check data',()=>{
+    navigate(peerGap?'settings':'data');
+    if(peerGap){$('candidate-policy-form').scrollIntoView({behavior:'smooth',block:'center'});$('candidate-policy-form').querySelector('select,input')?.focus();}
+  },'text-button'));
+  replace('score-method',attention,disclosure('How scores work',
+    el('p','QVM ranks research priority. Scenario models determine holding signals. Opening this comparison shows the saved review; Update & analyze refreshes evidence and peers.','compact-note'),
+    table([
+      {family:'Quality',inputs:'Gross profit / beginning assets; operating income / average assets; −(net income − operating cash flow) / average assets.',method:`Mean of favorable sector percentiles; at least ${context.minimum_quality_metrics ?? spec.min_quality_metrics ?? 2} inputs.`},
+      {family:'Value',inputs:'Common earnings / issuer market value; (operating cash flow − capex) / issuer market value.',method:'Mean of both sector percentiles.'},
+      {family:'Momentum',inputs:`Adjusted return from ${context.momentum_months ?? spec.momentum_months ?? 12}-to-${context.momentum_skip_months ?? spec.momentum_skip_months ?? 1} month-end endpoints.`,method:'Percentile across supplied eligible issuers.'},
+      {family:'Composite',inputs:'Quality, Value and Momentum.',method:'Configured weighted average; all three families required. Shown on a 0–100 scale.'},
+    ],[{key:'family'},{key:'inputs',wrap:true},{key:'method',wrap:true}]),
+    kv({minimum_usable_sector_peers:minimum,winsorized_percentiles:`${pct(context.winsor_low ?? spec.winsor_low ?? .025)}–${pct(context.winsor_high ?? spec.winsor_high ?? .975)}`,tie_method:'Average ranks'}),
+    el('p',`Family weights · ${weightSummary}`,'compact-note score-weights'),
+    Object.keys(context).length?disclosure('Technical score metadata',kv(context)):null,
+    el('p','Missing inputs or peers leave a blank score. Funds and noneligible issuers remain available in company research. Open a security for its raw metrics, dates and peer counts.','compact-note'),
+    button('Import peer data',()=>{navigate('data');$('import-kind').value='universe';$('import-kind').focus();$('import-kind').scrollIntoView({behavior:'smooth',block:'center'});},'text-button')));
+  const score=value=>numeric(value)===null?'—':num(numeric(value)*100,1);
   replace('company-screen',table(rows,[{key:'security_id',label:'Security',render:securityButton},{key:'sector'},
-    {key:'quality',render:pct},{key:'value',render:pct},{key:'momentum',render:pct},{key:'score',label:'Composite rank',render:pct},
-    {key:'eligible',render:value=>badge(value?'eligible':'ineligible')},{key:'reasons',label:'Coverage / eligibility',wrap:true}],
+    {key:'quality',label:'Quality score',render:score},{key:'value',label:'Value score',render:score},{key:'momentum',label:'Momentum rank',render:pct},{key:'score',label:'Composite score',render:score},
+    {key:'eligible',label:'Peer universe',render:value=>badge(value?'included':'excluded')},{key:'data_status',label:'Score status',render:badge},{key:'reasons',label:'Coverage / eligibility',wrap:true,render:value=>(Array.isArray(value)?value:[value]).filter(Boolean).map(friendly).join(' · ')}],
   'Ranks are relative research scores, not return forecasts. Open a security for raw inputs and peer coverage.'));
 }
 // A proposal is this review's reviewable starting point, never an adopted assumption:
 // keeping one copies it into the workspace as a prefill that still has to be
 // recalculated, reviewed and saved.
-const proposalFor = kind => result?.research?.[securityId]?.proposals?.[kind] || null;
+const proposalFor = kind => result?.research?.[securityId]?.proposals?.[kind] || (kind==='eps'?holdingAnalysis(securityId)?.valuation_input:null) || null;
 function keepProposal(kind) {
   const proposal=proposalFor(kind);
   if(!proposal)throw new Error(`This review proposed no ${kind.toUpperCase()} model for ${securityId || 'this security'}.`);
   if(!draft.baseRunId)throw new Error('Load a saved run before keeping a proposal.');
-  draft=applyProposal(draft,securityId,kind,proposal,horizon());persist();renderAll();
+  draft=applyProposal(draft,securityId,kind,proposal,horizon());draft.workspace.valuations[securityId].active_model=kind;persist();renderAll();
   announce(`Proposed ${kind.toUpperCase()} assumptions copied for review. Recalculate to value them, then save to retain them.`);
 }
 function assumptionTags(kind,proposal) {
@@ -847,16 +1088,19 @@ function renderProposals() {
   const actions=[], tags=[];
   for(const kind of ['eps','dcf']) {
     const proposal=proposalFor(kind);
-    const action=button(`Use proposed ${kind.toUpperCase()} assumptions`,()=>keepProposal(kind),proposal?'secondary':'quiet');
+    const action=button(`Reset ${kind.toUpperCase()} defaults`,()=>keepProposal(kind),proposal?'secondary':'quiet');
     action.disabled=!proposal || !draft.baseRunId;
     action.title=proposal?`Copy this review's proposed ${kind.toUpperCase()} inputs into the workspace for review.`
       :`This review proposed no ${kind.toUpperCase()} model for ${securityId || 'this security'}.`;
-    actions.push(action);tags.push(...assumptionTags(kind,proposal));
+    if(proposal)actions.push(action);if(proposal)tags.push(...assumptionTags(kind,proposal));
   }
-  replace('proposal-actions',...actions);
-  replace('assumption-strip',...tags,el('p','A proposal is evidence-backed input, not an established assumption. Review each value before recalculating.','muted'));
+  replace('proposal-actions',...actions);$('proposal-actions').closest('.proposal-strip').hidden=!actions.length;
+  const meta=(holdingAnalysis(securityId)?.valuation_input || proposalFor('eps'))?.proposal_meta || {};
+  replace('assumption-strip',disclosure('Assumption sources',...tags,kv(meta.inputs || {}),kv(meta.assumptions || {})));
 }
 function epsDefaults() {
+  const proposed=holdingAnalysis(securityId)?.valuation_input || proposalFor('eps');
+  if(proposed && proposed.horizon_months===horizon()) {const model=clone(proposed);delete model.proposal_meta;return model;}
   const security=securityRow(securityId);
   return {starting_price:numeric(security.price),currency:security.currency || resolved().mandate?.base_currency || null,
     horizon_months:horizon(),eps_convention:'forward',pe_convention:'forward',scenarios:labels.map(label=>({label,eps:null,pe:null,distributions_per_starting_share:null}))};
@@ -867,7 +1111,8 @@ function updateValuation(kind, mutate) {
   mutate(model);
   draft=keepValuationEdit(draft,securityId,kind,model,
     {origin:'manual',source:'User scenario input',version:1,horizon_months:horizon()});
-  persist();renderState(true);renderDiff();
+  draft.workspace.valuations[securityId].active_model=kind;
+  persist();renderState(true);renderDiff();renderAnalysisFreshness();
 }
 // The grid is shaded by where each cell sits between the grid's own lowest and highest
 // value, so the eye finds the drivers; the number and its contrast stay unchanged, and a
@@ -899,6 +1144,18 @@ function sensitivity(id,grid,type) {
       coverage:readinessNote('company_valuation')}));
 }
 function renderEPS() {
+  const analysis=holdingAnalysis(securityId);
+  if(analysis?.model==='shared_state' && !valuationValue('eps')) {
+    const rows=labels.map(label=>({label,return_value:resolved().allocation?.return_overrides?.[securityId]?.[label] ?? analysis.scenarios?.find(row=>row.label===label)?.return_value ?? null}));
+    replace('eps-form',table(rows,[{key:'label',label:'Outcome'},{key:'return_value',label:`${horizon()}-month return (%)`,render:(value,row)=>field(`${friendly(row.label)} return (%)`,value,next=>{
+      const overrides=clone(resolved().allocation?.return_overrides || {});
+      overrides[securityId] ||= Object.fromEntries(rows.filter(item=>item.return_value!==null).map(item=>[item.label,item.return_value]));
+      if(next===null)delete overrides[securityId][row.label];else overrides[securityId][row.label]=next;
+      patch({allocation:{return_overrides:overrides}});
+    },{type:'number',percent:true})}]),disclosure('Scenario basis',el('p','These outcomes use the shared market, sector and currency assumptions. An individual return override replaces that outcome for this holding. Recalculate to update the portfolio and review signal.','muted'),button('Edit market assumptions',()=>navigate('scenarios'),'text-button')));
+    replace('eps-output',table(analysis.scenarios || [],[{key:'label',label:'Outcome'},{key:'return_value',label:'Total return',render:pct}]));
+    replace('eps-grid');replace('valuation-link');return;
+  }
   const data=valuationValue('eps') || epsDefaults();
   const fields=form([
     field('Starting price / share',data.starting_price,value=>updateValuation('eps',model=>model.starting_price=value),{type:'number'}),
@@ -909,10 +1166,11 @@ function renderEPS() {
   const rows=table(labels.map(label=>data.scenarios.find(row=>row.label===label) || {label}),[{key:'label',label:'Outcome'},...['eps','pe','distributions_per_starting_share'].map(key=>({key,label:{eps:'Horizon EPS',pe:'Matching P/E',distributions_per_starting_share:'Cash / starting share'}[key],render:(value,row)=>field(`${row.label} ${friendly(key)}`,value,next=>updateValuation('eps',model=>{
     let item=model.scenarios.find(item=>item.label===row.label);if(!item){item={label:row.label};model.scenarios.push(item);}item[key]=next;
   }),{type:'number'})}))]);
-  replace('eps-form',fields,rows,el('p','Cash distributions exclude buybacks. Buybacks and dilution enter EPS/share assumptions only. Returns are over the declared horizon, without reinvestment.','muted'));
+  replace('eps-form',fields,rows,disclosure('Calculation & conventions',el('p','Horizon price = EPS × P/E. Total return = (horizon price + cash distributions) / starting price − 1. Buybacks and dilution enter EPS only; distributions are held as cash.','muted')));
   const output=result?.company_research?.[securityId]?.eps;
   replace('eps-output',output?table(output.scenarios,[{key:'label',label:'Outcome'},{key:'horizon_price',label:'Horizon price',render:value=>money(value,output.currency)},{key:'total_return',label:'Total return',render:pct},{key:'status',render:badge},{key:'issues',wrap:true}]):empty('Enter assumptions and recalculate.','No EPS valuation yet'));
   sensitivity('eps-grid',result?.company_research?.[securityId]?.eps_sensitivity,'eps');
+  if($('eps-grid').parentElement.tagName!=='DETAILS'){const details=disclosure('Price sensitivity');$('eps-grid').before(details);details.append($('eps-grid'));}
   const rationale=field('Rationale for linking reviewed EPS scenarios','',()=>{}, {type:'textarea'});
   const action=button('Use reviewed EPS scenarios',async()=>{
     const value=rationale.querySelector('textarea').value.trim();if(!value)throw new Error('Explain why these reviewed scenarios should feed portfolio comparison.');
@@ -922,6 +1180,7 @@ function renderEPS() {
   action.disabled=!draft.baseRunId;replace('valuation-link',rationale,action,el('p','Linking is an explicit review action. It does not create a calibrated forecast.','muted'));
 }
 function dcfDefaults() {
+  const proposed=proposalFor('dcf');if(proposed){const model=clone(proposed);delete model.proposal_meta;return model;}
   return {currency:securityRow(securityId).currency || resolved().mandate?.base_currency || null,monetary_unit:'units',
     company_type:null,sbc_treatment:null,discount_rate:null,terminal_growth_rate:null,terminal_roic:null,
     debt:null,preferred:null,nci:null,excess_cash:null,nonoperating_assets:null,diluted_shares:null,
@@ -944,6 +1203,7 @@ function renderDCF() {
   const amount=value=>numeric(value)===null?'—':`${num(value)} ${output.monetary_unit} ${output.currency}`;
   replace('dcf-output',output?kv({status:output.status,enterprise_value:amount(output.enterprise_value),common_equity_value:amount(output.common_equity_value),intrinsic_value_per_share:money(output.value_per_share,output.currency),explicit_cash_flow_present_value:amount(output.explicit_present_value),terminal_value:amount(output.terminal_value),terminal_present_value:amount(output.terminal_present_value),terminal_reinvestment_rate:pct(output.terminal_reinvestment_rate),horizon_return:output.return_reason}):empty('Enter explicit projections and bridge inputs, then recalculate.','No DCF valuation yet'),output?autoTable(output.projections,['year','nopat','reinvestment','roic','fcff','present_value']):null,output?listIssues(output.issues):null);
   sensitivity('dcf-grid',result?.company_research?.[securityId]?.dcf_sensitivity,'dcf');
+  if($('dcf-grid').parentElement.tagName!=='DETAILS'){const details=disclosure('DCF sensitivity');$('dcf-grid').before(details);details.append($('dcf-grid'));}
 }
 function assessmentDefaults() {
   return {version:1,security_id:securityId,author:'',horizon_months:horizon(),decision_cutoff:result?.timeline?.decision_cutoff || null,
@@ -986,14 +1246,41 @@ function renderCompany() {
   const ids=[...new Set([...(result?.holdings || []).map(row=>row.security_id),...(result?.signals || []).map(row=>row.security_id),...Object.keys(draft.workspace.valuations || {}),...Object.keys(draft.workspace.assessments || {})].filter(Boolean))].sort();
   if(securityId && !ids.includes(securityId))ids.unshift(securityId);
   if(!securityId)securityId=ids[0] || '';
-  $('research-security').replaceChildren(...(ids.length?ids:['']).map(id=>{const item=el('option',id || 'Enter an exact security ID');item.value=id;return item;}));$('research-security').value=securityId;
+  $('research-security').replaceChildren(...(ids.length?ids:['']).map(id=>{const held=holdingAnalysis(id);const item=el('option',held?.name?`${securityLabel(id)} · ${held.name}`:securityLabel(id) || 'Choose a holding');item.value=id;return item;}));$('research-security').value=securityId;
   if(!securityId){for(const id of ['eps-form','dcf-form','evidence-form'])replace(id,empty('Choose a retained security or enter its exact identifier.','Select a company'));return;}
   const security=securityRow(securityId);
   const kept=draft.workspace.valuations?.[securityId];
-  replace('security-summary',kv({security_id:securityId,issuer:security.issuer_id,currency:security.currency,horizon:`${horizon()} months`,
-    valuation_origin:kept?.origin || 'none kept',valuation_source:kept?.source || 'not stated',
-    basis:'Subjective assumptions; prices may be unavailable'}),
-    disclosure('Retained financial statements and source observations',autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),el('p',result?.observations?.fundamentals?.scope || 'Only facts eligible at the saved cutoff are displayed.','muted')));
+  const analysis=holdingDisplay(securityId);
+  document.querySelector('[data-company-tab=eps]').textContent=analysis?.model==='shared_state'&&!kept?.eps?'Scenario returns':'EPS & multiple';
+  $('company-heading').textContent=`${securityLabel(securityId)} · Assumptions`;
+  $('company-status').replaceChildren(actionBadge(analysis));
+  const summary=el('div',null,'security-readout');
+  summary.append(el('strong',analysis?.name || security.name || securityLabel(securityId)),
+    el('span',money(analysis?.inputs?.starting_price ?? security.price,security.currency)),el('span',`${horizon()} months`),
+    el('span',kept?.origin || (analysis?.valuation_input?'Source defaults':'Scenario assumptions'),'badge'));
+  const calculatedModel=el('span',`Signal uses ${modelLabel(analysis)}`,'compact-note');calculatedModel.id='calculated-action-model';summary.append(calculatedModel);
+  if(!analysis.analysis_missing && (['eps_multiple','fcff_dcf'].includes(analysis.model) || kept?.eps || kept?.dcf || proposalFor('eps') || proposalFor('dcf'))) {
+    const active=kept?.active_model || (analysis.model==='fcff_dcf'?'dcf':'eps');
+    const selector=field('Action model',active,kind=>{
+      updateValuation(kind,()=>{});renderCompany();document.querySelector(`[data-company-tab="${kind}"]`)?.click();
+      document.querySelector('[data-action-model] select')?.focus();
+    },{options:[['eps','EPS × P/E'],['dcf','DCF value']],help:'Choose the model for the scenario signal, then recalculate. Tabs only change the view.'});
+    selector.querySelector('select').setAttribute('aria-label','Action model');
+    selector.dataset.actionModel='true';selector.classList.add('action-model-control');summary.append(selector);
+  }
+  replace('security-summary',summary);
+  const evidence=analysis?.evidence || {};
+  const cards=el('div',null,'evidence-summary');
+  for(const [key,label] of analysis.analysis_missing?[]:[['statements','Statements'],['estimates','Estimates'],['macro','Economic data']]) {
+    const input=evidence[key] || {}, state=input.used?'Used':key==='macro' && (result?.macro || []).length?'Context only':['available','ok','ready','complete'].includes(input.status)?'Available · unused':input.status==='unavailable' || !input.status?'Unavailable':friendly(input.status);
+    const chip=el('span',`${label}: ${state}`,`evidence-chip ${input.used?'used':'context'}`);chip.title=input.note || (input.source_ids || []).join(', ') || `${label} ${state.toLowerCase()}`;cards.append(chip);
+  }
+  replace('company-data-basis',cards,analysisReason(analysis),actionBreakdown(analysis),
+    disclosure('Inputs & source details',financialHistoryCoverage(securityId,analysis),kv(Object.fromEntries(Object.entries(analysis?.inputs || {}).filter(([key])=>key!=='financial_history'))),kv({model:analysis?.model,return_metric:analysis?.return_metric,basis:analysis?.basis,method_version:analysis?.method_version || result?.metadata?.computed_views?.holding_analysis?.method_version,calculation_source:result?.metadata?.computed_views?.holding_analysis?.source || 'saved_review',trade_readiness:analysis?.trade_readiness?.status}),
+      result?.benchmark_reference?el('h4','Benchmark comparison'):null,result?.benchmark_reference?kv(result.benchmark_reference):null,
+      listIssues(analysis?.trade_readiness?.reasons || [],'No additional trade readiness information.'),
+      autoTable((result?.observations?.fundamentals?.rows || []).filter(row=>row.security_id===securityId)),
+      evidence.macro?.note?el('p',evidence.macro.note,'muted'):null));
   renderProposals();renderEPS();renderDCF();renderEvidence();
   jsonEditor('company-json','Company assessment and valuation inputs',{
     assessment:draft.workspace.assessments[securityId] || assessmentDefaults(),
@@ -1011,6 +1298,7 @@ function renderCompany() {
       }
     });
   },`company-${securityId}`);
+  renderAnalysisFreshness();
 }
 // Grouped bars for two series over the same states, drawn like `lineChart`: one baseline
 // at zero, one pair of bars per state, and every value also stated in the axis text so
@@ -1080,10 +1368,9 @@ function renderSharedState() {
   const probabilities=form(labels.map(label=>field(`${friendly(label)} state probability (%)`,state.probabilities?.[label] ?? null,
     value=>stateProbability(labels,label,value),{type:'number',percent:true,
     help:'Optional. State every probability or leave every one blank; a partial distribution is refused.'})));
-  replace('shared-state-editor',el('h3','Stated market view'),
-    el('p','These states are expanded into per-security joint scenarios by the next full review (Update & analyze). Recalculating replays the joint scenarios this saved run already froze.','muted'),
-    markets,el('h3','Sector multipliers'),sectors,el('h3','Currency states'),fx,
-    el('h3','State probabilities (optional)'),probabilities,
+  replace('shared-state-editor',el('h3','Market assumptions'),
+    el('p','Recalculate applies these assumptions to the retained inputs.','muted'),
+    markets,probabilities,disclosure('Sector & currency assumptions',el('h3','Sector multipliers'),sectors,el('h3','Currency states'),fx),
     button('Reset to this run’s saved market view',()=>{
       patchSharedState(clone(draft.baseConfig.allocation?.shared_state || {}));renderScenarios();
       announce('The stated market view was restored to this saved run’s assumptions.');
@@ -1124,10 +1411,14 @@ function renderScenarios() {
     if(value===null)delete probabilities[name];else probabilities[name]=value;
     patch({allocation:{probability_overrides:probabilities}});
   },{type:'number',percent:true}))),button('Use source probabilities',()=>{patch({allocation:{probability_overrides:{}}});renderScenarios();},'quiet'));
-  const ids=[...new Set([...(result?.holdings || []).map(row=>row.security_id),...(result?.forecast_inputs || []).map(row=>row.security_id),config.mandate?.benchmark_id].filter(Boolean))].filter(id=>id!=='CASH');
-  const rows=ids.map(id=>({security_id:id,...Object.fromEntries(names.map(name=>[name,allocation.return_overrides?.[id]?.[name] ?? (result?.forecast_inputs || []).find(row=>row.security_id===id && row.scenario===name && row.horizon_months===horizon())?.return_value]))}));
-  replace('return-editor',el('h3','Asset and benchmark horizon returns (%)'),table(rows,[{key:'security_id',label:'Security',render:securityButton},...names.map(name=>({key:name,label:friendly(name),render:(value,row)=>field(`${row.security_id} ${name} return (%)`,value,next=>{
-    const map=clone(resolved().allocation?.return_overrides || {});map[row.security_id] ||= {};
+  const selectedBenchmark=config.mandate?.benchmark_id || 'VOO',reference=result?.benchmark_reference;
+  const benchmarkId=reference && ([reference.selection,reference.configured_id].includes(selectedBenchmark) || (!config.mandate?.benchmark_id && reference.default_applied))?reference.security_id || selectedBenchmark:selectedBenchmark;
+  const ids=[...new Set([...(result?.holdings || []).map(row=>row.security_id),...(result?.forecast_inputs || []).map(row=>row.security_id===selectedBenchmark?benchmarkId:row.security_id),benchmarkId].filter(Boolean))].filter(id=>id!=='CASH');
+  const rows=ids.map(id=>({security_id:id,...Object.fromEntries(names.map(name=>[name,allocation.return_overrides?.[id]?.[name] ?? (id===benchmarkId?allocation.return_overrides?.[selectedBenchmark]?.[name]:undefined) ?? (result?.forecast_inputs || []).find(row=>(row.security_id===id || (id===benchmarkId && row.security_id===selectedBenchmark)) && row.scenario===name && row.horizon_months===horizon())?.return_value]))}));
+  replace('return-editor',el('h3','Asset and benchmark horizon returns (%)'),table(rows,[{key:'security_id',label:'Security',render:securityButton},...names.map(name=>({key:name,label:friendly(name),render:(value,row)=>field(`${securityLabel(row.security_id)} ${name} return (%)`,value,next=>{
+    const map=clone(resolved().allocation?.return_overrides || {});
+    if(row.security_id===benchmarkId && selectedBenchmark!==benchmarkId){map[benchmarkId]={...(map[selectedBenchmark] || {}),...(map[benchmarkId] || {})};delete map[selectedBenchmark];}
+    map[row.security_id] ||= {};
     if(!Object.keys(map[row.security_id]).length)for(const stateName of names){const base=rows.find(item=>item.security_id===row.security_id)?.[stateName];if(base!==undefined && base!==null)map[row.security_id][stateName]=base;}
     if(next===null)delete map[row.security_id][name];else map[row.security_id][name]=next;
     patch({allocation:{return_overrides:map}});
@@ -1164,7 +1455,7 @@ function renderReview() {
   renderAllocationChange(candidate);
   // The exact decimal amounts, beside the weights the chart above shows.
   replace('trade-basket',table(candidate.proposals || [],[
-    {key:'security_id',label:'Security',render:securityButton},{key:'account_id',label:'Account'},{key:'action'},
+    {key:'security_id',label:'Security',render:securityButton},{key:'account_id',label:'Account',render:(value,row)=>accountLabel(value,row)},{key:'action'},
     {key:'current_weight',label:'Current weight',render:pct},{key:'target_weight',label:'Target weight',render:pct},
     {key:'decimal_amounts',label:'Exact trade value',render:(value,row)=>`${value?.trade_value ?? num(row.trade_value)} ${row.currency || ''}`.trim()},
     {key:'fractional_quantity_change',label:'Exact quantity change',render:(value,row)=>text(row.decimal_amounts?.quantity_change ?? num(value,8))},
@@ -1181,17 +1472,17 @@ function renderReview() {
       autoTable((candidate.proposals || []).flatMap(leg=>(leg?.lot_plan || [])
         .map(lot=>({security_id:leg.security_id,account_id:leg.account_id,...lot})))),
       el('p','Lots the conditional tax reserve was estimated from. An estimate flagged for review is named in the basket table above.','muted')));
-  replace('basket-funding',autoTable(candidate.accounts || []));
-  replace('basket-reasons',listIssues([...(allocation.issues || []),...(candidate.issues || []),...(candidate.decisions || []).map(row=>({message:`${row.security_id || row.account_id || ''}: ${row.reason || row.action}`}))]),candidate.validation?kv(candidate.validation):null,
+  replace('basket-funding',table(candidate.accounts || [],[{key:'account_id',label:'Account',render:(value,row)=>accountLabel(value,row)},{key:'starting_cash',render:num},{key:'sales',render:num},{key:'purchases',render:num},{key:'costs',render:num},{key:'tax_reserve',render:num},{key:'ending_cash',render:num},{key:'status',render:badge}]));
+  replace('basket-reasons',listIssues([...(allocation.issues || []),...(candidate.issues || []),...(candidate.decisions || []).map(row=>({message:`${row.security_id?securityLabel(row.security_id):row.account_id?accountLabel(row.account_id,row):''}: ${row.reason || row.action}`}))]),candidate.validation?kv(candidate.validation):null,
     disclosure('Candidate joint outcomes after costs and tax reserve',table(Object.entries(candidate.scenarios || {}).map(([scenario,value])=>({scenario,return:value})),[{key:'scenario'},{key:'return',render:pct}],'Conditional horizon returns for the complete funded basket.')),
     disclosure('Trading-cost sensitivities',autoTable(candidate.cost_sensitivities || [])),
     disclosure('Substitution-hurdle sensitivities',autoTable(candidate.hurdle_sensitivities || [])),
     disclosure('Candidate method and solver diagnostics',kv(allocation.solver || {})));
   renderDecisionHistory();
   const runs=service.runs || [];
-  replace('run-history',table(runs,[{key:'run_id',label:'Saved run',render:id=>button(String(id).slice(0,16),()=>loadRun(id),'text-button')},{key:'as_of',label:'Decision date'},{key:'created_at'},{key:'parent_run_id'}]));
+  replace('run-history',table(runs,[{key:'as_of',label:'Review',render:(value,row)=>button(shortDate(value || row.created_at),()=>loadRun(row.run_id),'text-button')},{key:'created_at',label:'Saved',render:when}]));
   for(const id of ['compare-left','compare-right']){
-    const previous=$(id).value;$(id).replaceChildren(...runs.map(run=>{const item=el('option',`${run.as_of || run.created_at || 'Run'} · ${run.run_id.slice(0,12)}`);item.value=run.run_id;return item;}));
+    const previous=$(id).value;$(id).replaceChildren(...runs.map(run=>{const item=el('option',`${shortDate(run.as_of || run.created_at)} · Review ${runs.length-runs.indexOf(run)}`);item.value=run.run_id;return item;}));
     $(id).value=previous && runs.some(run=>run.run_id===previous)?previous:(id==='compare-right'?runs[1]?.run_id:runs[0]?.run_id) || '';
   }
   const savedId=draft.baseRunId;
@@ -1209,7 +1500,7 @@ function renderAllocationChange(candidate) {
   // A basket with many legs is read leg by leg in the table below; the chart shows the
   // largest few so its stated values stay readable rather than overflowing the panel.
   const shown=legs.slice(0,10);
-  const groups=shown.map(row=>({label:`${row.security_id}${row.account_id?` · ${row.account_id}`:''}`,
+  const groups=shown.map(row=>({label:`${securityLabel(row.security_id)}${row.account_id?` · ${accountLabel(row.account_id,row)}`:''}`,
     values:[row.current_weight,row.target_weight]}));
   replace('allocation-before-after',
     groupedBarChart(groups,['Current weight','Target weight'],'Household weight before and after the selected basket'),
@@ -1278,11 +1569,36 @@ async function recordDecision() {
 function configField(group,key,label= friendly(key),options={}) {
   return field(label,resolved()[group]?.[key],value=>patch({[group]:{[key]:value}}),options);
 }
+function benchmarkField(config) {
+  const selected=config.mandate?.benchmark_id || 'VOO',securities=new Map();
+  for(const row of [...(result?.holdings || []),...(result?.signals || []),...(result?.holding_analysis || []),...(result?.forecast_inputs || []),result?.benchmark_reference || {}]) {
+    if(!row.security_id)continue;
+    const existing=securities.get(row.security_id) || {};
+    securities.set(row.security_id,{security_id:row.security_id,ticker:row.ticker || row.symbol || existing.ticker,name:row.name || existing.name});
+  }
+  const name=row=>row.ticker?[row.ticker,row.name!==row.ticker?row.name:null].filter(Boolean).join(' · '):row.name || row.security_id;
+  const options=[['VOO','S&P 500 (VOO)'],['VTI','VTI (U.S. equities)'],
+    ...[...securities.values()].filter(row=>!['VOO','VTI'].includes(row.security_id) && !['VOO','VTI'].includes(row.ticker?.toUpperCase()))
+      .sort((a,b)=>name(a).localeCompare(name(b))).map(row=>[row.security_id,name(row)])];
+  if(selected && !options.some(([id])=>id===selected)) {
+    const matches=[...securities.values()].filter(row=>row.ticker?.toUpperCase()===selected.toUpperCase());
+    const reference=result?.benchmark_reference;
+    const row=securities.get(selected) || (matches.length===1?matches[0]:null)
+      || ([reference?.configured_id,reference?.selection].includes(selected)?reference:null);
+    options.push([selected,row?name(row):selected]);
+  }
+  const wrapper=field('Benchmark',selected,value=>patch({mandate:{benchmark_id:value || null}}),{options});
+  const input=wrapper.querySelector('select'),label=wrapper.querySelector('span');
+  label.id=`${input.id}-label`;input.setAttribute('aria-labelledby',label.id);
+  const help=el('small','Comparison reference for scenario returns.','field-help');help.id=`${input.id}-help`;
+  input.setAttribute('aria-describedby',help.id);wrapper.append(help);
+  return wrapper;
+}
 function renderSettings() {
   const config=resolved();
   replace('mandate-form',form([
     field('Base currency',config.mandate?.base_currency,value=>patch({mandate:{base_currency:value.toUpperCase() || null}})),
-    configField('mandate','benchmark_id','Approved benchmark security ID'),
+    benchmarkField(config),
     ...['issuer_cap','sector_cap','min_cash_weight','max_turnover','max_volatility','max_stress_loss'].map(key=>configField('mandate',key,`${friendly(key)} (%)`,{type:'number',percent:true})),
     configField('mandate','confirmed','I confirm this mandate',{type:'checkbox'}),
     configField('mandate','allow_taxable_proposals','Allow conditional taxable-account proposals',{type:'checkbox'}),
@@ -1290,7 +1606,7 @@ function renderSettings() {
   ]));
   const accountNodes=[];
   for(const row of result?.summary?.accounts || []) {
-    const id=row.account_id, block=el('section',null,'section-block');block.append(el('h3',id));
+    const id=row.account_id, block=el('section',null,'section-block');block.append(el('h3',accountLabel(id,row)));
     block.append(field('Permitted security IDs (comma separated)',(config.mandate?.account_permissions?.[id] || []).join(', '),value=>{
       const map=clone(resolved().mandate?.account_permissions || {});map[id]=value.split(',').map(item=>item.trim()).filter(Boolean);patch({mandate:{account_permissions:map}});
     },{help:'Blank does not grant trading permission. Include approved residual and benchmark instruments explicitly.'}));
@@ -1310,10 +1626,10 @@ function renderSettings() {
     field('New-flow treatment',config.allocation?.flow_policy,value=>patch({allocation:{flow_policy:value || null}}),{options:[['','Unconfirmed'],['approved_benchmark','Approved benchmark']]}),
   ]),...(accountNodes.length?accountNodes:[empty('Load a reconciled snapshot to see exact account identifiers.','Accounts unavailable')]));
   const policies=config.mandate?.account_candidate_policy || {};
-  const accounts=(result?.summary?.accounts || []).map(row=>row.account_id).filter(Boolean);
+  const accounts=(result?.summary?.accounts || []).filter(row=>row.account_id);
   replace('candidate-policy-form',form([
-    ...accounts.map(id=>field(`${id} candidate comparison`,policies[id] || 'none',value=>{
-      const map={...(resolved().mandate?.account_candidate_policy || {})};map[id]=value;patch({mandate:{account_candidate_policy:map}});
+    ...accounts.map(row=>field(`${accountLabel(row.account_id,row)} candidate comparison`,policies[row.account_id] || 'none',value=>{
+      const map={...(resolved().mandate?.account_candidate_policy || {})};map[row.account_id]=value;patch({mandate:{account_candidate_policy:map}});
     },{options:[['none','None: compare held securities only'],['eligible_universe','Eligible universe: compare screened candidates']],
       help:'Unowned companies are compared for this account only where this says so.'})),
     field('Watchlist symbols (comma separated)',(config.signals?.watchlist || []).join(', '),value=>{
@@ -1342,7 +1658,7 @@ function renderSettings() {
   jsonEditor('settings-json','Resolved editable configuration',config,value=>patch(value));renderDiff();
 }
 function renderData() {
-  renderProviderHealth();
+  renderProviderHealth();renderAccountNames();
   const status=service.providers || {};
   const providerDraft={...status};
   const providerFields=form([
@@ -1400,22 +1716,22 @@ function renderLedgerEvaluation() {
 function renderContext() {
   const runs=service.runs || [];
   // One selector over two dated views: the newest collection, or one saved analysis.
-  const options=[[CURRENT_VIEW,'Current holdings (no analysis)'],
-    ...runs.map(run=>[run.run_id,`${run.as_of || run.created_at || 'Saved run'} · ${run.run_id.slice(0,12)}`])];
+  const options=[[CURRENT_VIEW,'Current holdings'],
+    ...runs.map((run,index)=>[run.run_id,`${shortDate(run.as_of || run.created_at)}${index===0?' · Latest':` · Review ${runs.length-index}`}`])];
   $('research-run').replaceChildren(...options.map(([value,label])=>{const option=el('option',label);option.value=value;return option;}));
   $('research-run').value=view==='saved' && draft.baseRunId?draft.baseRunId:CURRENT_VIEW;
-  const accounts=result?.summary?.accounts || [];
+  const accounts=accountDirectory?.accounts || result?.accounts || result?.summary?.accounts || objectRows(current?.current?.accounts);
   if(account && !accounts.some(row=>row.account_id===account))account='';
-  $('account-scope').replaceChildren(...[{account_id:'',name:'All accounts'},...accounts].map(row=>{const option=el('option',row.name || row.account_id);option.value=row.account_id;return option;}));$('account-scope').value=account;
-  $('valuation-context').textContent=`Valuation ${result?.metadata?.valuation_date || 'date unavailable'}`;
+  $('account-scope').replaceChildren(...[{account_id:'',name:'All accounts'},...accounts].map(row=>{const option=el('option',row.account_id?accountLabel(row.account_id,row):'All accounts');option.value=row.account_id;return option;}));$('account-scope').value=account;
+  $('valuation-context').textContent=view==='saved'?`As of ${shortDate(result?.metadata?.as_of)}`:`${objectRows(current?.current?.positions).length} holdings`;
   $('cutoff-context').textContent=`Decision cutoff ${result?.timeline?.decision_cutoff || 'unavailable'}`;
   const mode=result?.metadata?.mode || service.mode;
-  $('research-mode').textContent=mode==='demo'?'SYNTHETIC DEMO · example data':`${friendly(mode || 'unavailable')} · ${service.dataset || 'source unavailable'}`;$('research-mode').className=`badge ${mode==='demo'?'demo':''}`;
+  $('research-mode').textContent=mode==='demo'?'SYNTHETIC DEMO':mode==='live'?'Connected':mode==='offline'?'Saved data':'Loading…';$('research-mode').className=`badge ${mode==='demo'?'demo':''}`;
   if(!$('review-date').value)$('review-date').value=service.default_as_of || '';
   if(!$('evaluation-date').value)$('evaluation-date').value=new Date().toISOString().slice(0,10);
 }
 function renderAll() {
-  renderContext();renderOverview();renderHoldings();renderScreen();renderCompany();renderScenarios();renderReview();renderSettings();renderData();renderState(true);
+  renderContext();renderOverview();renderHoldings();renderScreen();renderHoldingAnalysis();renderCompany();renderScenarios();renderReview();renderSettings();renderData();renderState(true);
 }
 function draftChoice(message) {
   return new Promise(resolve=>{
@@ -1572,8 +1888,8 @@ function renderWorkflow(workflow) {
     const chips=el('div',null,'stage-chips');chips.append(...stageOrder.map(name=>stageChip(name,stages[name])));
     const actions=stageOrder.map(name=>stages[name]?.action_needed).filter(Boolean)
       .filter((message,index,all)=>all.indexOf(message)===index).map(message=>el('p',message,'notice'));
-    replace('workflow-progress',el('p',workflowHeadline(workflowRecord),'stage-headline'),chips,...actions,
-      workflowRecord.error?el('p',workflowRecord.error,'notice'):null);
+    if(liveWorkflow(workflowRecord.status))replace('workflow-progress',el('p',workflowHeadline(workflowRecord),'stage-headline'),chips,...actions,workflowRecord.error?el('p',workflowRecord.error,'notice'):null);
+    else replace('workflow-progress',disclosure(workflowRecord.status==='complete'?'Last update · Complete':workflowHeadline(workflowRecord),chips,...actions,workflowRecord.error?el('p',workflowRecord.error,'notice'):null));
   }
   strip.hidden=false;$('cancel-workflow').hidden=!liveWorkflow(workflowRecord.status);
   renderState();
@@ -1614,7 +1930,7 @@ async function finishWorkflow(workflow) {
   renderWorkflow(workflow);
   const summary=workflowSummary(workflow);
   announce(workflow.status==='complete' && workflow.run_id
-    ?`Review saved · run ${String(workflow.run_id).slice(0,12)}${summary?` · ${summary}`:''}`
+    ?'Review saved.'
     :workflowHeadline(workflow));
 }
 async function startWorkflow() {
@@ -1753,12 +2069,14 @@ $('research-run').addEventListener('change',()=>{
   if(choice.runId===draft.baseRunId){view='saved';applyView();announce('Showing the analysis of the loaded saved run.');return;}
   loadRun(choice.runId).catch(failure=>{error(failure.message);restoreRunSelection();});
 });
-$('account-scope').addEventListener('change',()=>{account=$('account-scope').value;renderHoldings();announce('Account display changed. Portfolio calculations and constraints retain their saved scope.');});
+$('account-scope').addEventListener('change',()=>{account=$('account-scope').value;renderHoldings();renderHoldingAnalysis();announce('');});
+$('analysis-search').addEventListener('input',renderHoldingAnalysis);
 $('holdings-search').addEventListener('input',renderHoldings);$('screen-search').addEventListener('input',renderScreen);
 $('research-security').addEventListener('change',()=>{securityId=$('research-security').value;renderCompany();});
 wire('open-security',()=>{const value=$('manual-security').value.trim();if(!value || ['__proto__','constructor','prototype'].includes(value))throw new Error('Enter a valid exact security identifier.');securityId=value;renderCompany();});
 wire('close-security-dialog',()=>$('security-dialog').close());
 wire('research-from-detail',()=>{$('security-dialog').close();securityId=detailId;renderCompany();navigate('research');});
+$('research-horizon').addEventListener('change',()=>{$('scenario-horizon').value=$('research-horizon').value;$('scenario-horizon').dispatchEvent(new Event('change'));});
 $('scenario-horizon').addEventListener('change',async()=>{
   const months=Number($('scenario-horizon').value);if(months===horizon())return;
   const choice=await draftChoice('Changing the horizon clears incompatible return overrides, priors, probabilities, cash returns and EPS outcomes. Retain keeps your other draft edits; discard restores saved assumptions first. Cancel keeps the current horizon.');
@@ -1799,7 +2117,7 @@ async function initialize() {
   try {
     const [local,status]=await Promise.all([api('/api/state'),api('/api/research'),loadCurrent().then(loadExceptions)]);token=local.token;service=status;bootstrap='ready';
     try{const response=await api('/api/research/supplemental');supplementalSupported=response.supported;supplemental=clone(response.saved || response.template || null);}catch(failure){error(`Supplemental input is unavailable: ${failure.message}`);}
-    resumeWorkflow();loadProviderHealth();
+    resumeWorkflow();loadProviderHealth();loadAccountDirectory();
     if(service.latest_run_id)await loadRun(service.latest_run_id,false);
     else{draft=restoreDraft(sessionStorage,null,service.config,{});renderAll();}
   } catch(failure){bootstrap='failed';error(`Research could not load: ${failure.message} Reload this page to try again. Yahoo collection remains available in Data and Holdings.`);renderAll();}
